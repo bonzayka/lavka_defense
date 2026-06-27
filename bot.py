@@ -2,24 +2,20 @@
 """
 Антиспам-бот для Telegram-группы.
 
-Что делает:
-  1. Новичок зашёл -> мгновенно мут и 3-факторная капча по шагам:
-       Шаг 1 — математический пример (A + B);
-       Шаг 2 — случайный вопрос на здравый смысл (из пула);
-       Шаг 3 — сколько углов у фигуры (ответ цифрой).
-     Ошибка на любом шаге или тишина за CAPTCHA_TIMEOUT секунд -> бан.
-     Админы группы капчу не проходят (пропускаются).
-  2. Любое присланное фото проверяется в 2 слоя:
-       а) хеш по базе photo/ (точный/пережатый повтор известного спама);
-       б) нейросеть NudeNet (нагота/18+ на любой новой картинке).
-     Совпало -> удалить сообщение, мут, вычистить весь спам юзера за
-     PURGE_WINDOW_SECONDS (вся «связка»/альбом) и кнопки [Бан]/[Размут] админу.
-  3. Админ-команды: /spam (ответом на картинку — в базу + наказать),
-     /reload, /stats, /help, /ping.
+Кратко:
+  • 3-факторная капча на входе (пример / вопрос / углы фигуры); админы пропускаются;
+    имена вступающих проверяются на мат/стоп-слова.
+  • Картинки в 2 слоя: хеш по базе photo/ + нейросеть NudeNet (18+).
+  • Модерация сообщений: ссылки, пересылки, посты «от имени канала», .apk,
+    премиум-эмодзи, антифлуд, антимат и стоп-слова (с фильтром подмены символов).
+  • Наказания: delete / warn (с лимитом) / mute / ban; ночной и тихий режимы;
+    приветствие; удаление сервисных сообщений.
+  • Команды для админов: /spam /reload /stats /help /ping /ban /unban /mute
+    /unmute /warn /unwarn /whitelist /addword /delword /words /night /quiet
+    /antimat /settings.
 
-Требования: бот — АДМИН группы с правами
-"Блокировка пользователей" (ban), "Ограничение пользователей" (restrict)
-и "Удаление сообщений" (delete).
+Требования: бот — АДМИН группы (бан / ограничение / удаление сообщений),
+Group Privacy выключен.
 """
 
 import asyncio
@@ -28,6 +24,7 @@ import io
 import logging
 import os
 import random
+import re
 import tempfile
 from collections import deque
 from datetime import datetime, timedelta, timezone
@@ -50,6 +47,8 @@ from aiogram.types import (
 from aiogram.exceptions import TelegramBadRequest
 
 import config
+import storage
+import textguard
 
 logging.basicConfig(
     level=logging.INFO,
@@ -65,56 +64,26 @@ bot = Bot(
 )
 dp = Dispatcher()
 
-# Ожидающие капчу: (chat_id, user_id) -> {steps, idx, msg_id, task}.
-pending: dict[tuple[int, int], dict] = {}
-
-# Эталонные хеши спам-картинок: список (имя_файла, dhash:int). Грузится при старте.
-ref_hashes: list[tuple[str, int]] = []
-
-# Буфер последних сообщений: (chat_id, user_id) -> deque[(msg_id, datetime)].
-# Нужен, чтобы при нарушении вычистить весь спам юзера за окно PURGE_WINDOW_SECONDS.
-recent: dict[tuple[int, int], deque] = {}
-
-# Антидубль: (chat_id, user_id) -> datetime последнего срабатывания модерации,
-# чтобы альбом из N фото не плодил N уведомлений админу.
-flagged: dict[tuple[int, int], datetime] = {}
-
-# Кэш админов: chat_id -> (set(user_id), datetime_обновления).
-admins_cache: dict[int, tuple[set, datetime]] = {}
-
-# Нейросеть-детектор 18+ (NudeNet). Создаётся при старте, если NSFW_ENABLED.
+# --- состояние в памяти ---
+pending: dict[tuple[int, int], dict] = {}          # ждут капчу
+ref_hashes: list[tuple[str, int]] = []             # хеши спам-картинок
+recent: dict[tuple[int, int], deque] = {}          # последние сообщения (для зачистки)
+flagged: dict[tuple[int, int], datetime] = {}      # антидубль уведомлений
+admins_cache: dict[int, tuple[set, datetime]] = {} # кэш админов
+flood: dict[tuple[int, int], deque] = {}           # тайминги сообщений (антифлуд)
+night_notice: dict[int, datetime] = {}             # троттлинг уведомления ночного режима
 nsfw_detector = None
-
-# Простая статистика для /stats.
 stats = {"challenged": 0, "passed": 0, "failed": 0, "img_muted": 0, "banned": 0}
 
-# Полный мут (ничего нельзя слать) — пока висит капча / на время модерации.
 MUTE = ChatPermissions(can_send_messages=False)
-
-# Полный размут (обычные права участника).
 FULL = ChatPermissions(
-    can_send_messages=True,
-    can_send_audios=True,
-    can_send_documents=True,
-    can_send_photos=True,
-    can_send_videos=True,
-    can_send_video_notes=True,
-    can_send_voice_notes=True,
-    can_send_polls=True,
-    can_send_other_messages=True,
-    can_add_web_page_previews=True,
-    can_invite_users=True,
+    can_send_messages=True, can_send_audios=True, can_send_documents=True,
+    can_send_photos=True, can_send_videos=True, can_send_video_notes=True,
+    can_send_voice_notes=True, can_send_polls=True, can_send_other_messages=True,
+    can_add_web_page_previews=True, can_invite_users=True,
 )
 
-# Фигуры для 3-го фактора: название -> число углов.
-SHAPES = {
-    "треугольника": 3,
-    "квадрата": 4,
-    "пятиугольника": 5,
-    "шестиугольника": 6,
-}
-
-# Пул вопросов на здравый смысл для 2-го фактора: (вопрос, ответ, [неверные]).
+SHAPES = {"треугольника": 3, "квадрата": 4, "пятиугольника": 5, "шестиугольника": 6}
 COMMONSENSE = [
     ("Назови первую букву русского алфавита:", "А", ["Б", "Я", "О", "Д", "Ж"]),
     ("Сколько дней в неделе?", "7", ["5", "6", "8", "9"]),
@@ -125,17 +94,16 @@ COMMONSENSE = [
     ("Сколько будет 2 + 2?", "4", ["3", "5", "6", "22"]),
     ("Какое время года самое холодное?", "Зима", ["Лето", "Весна", "Осень"]),
 ]
-
-MAX_DOC_BYTES = 10 * 1024 * 1024  # картинки-документы крупнее не анализируем
+MAX_DOC_BYTES = 10 * 1024 * 1024
+LINK_RE = re.compile(r"(https?://|www\.|t\.me/|telegram\.me/|tg://|telega\.ph|teletype\.in)", re.I)
 
 
 def now() -> datetime:
     return datetime.now(tz=timezone.utc)
 
 
-def esc(text: str) -> str:
-    """Экранировать текст для HTML-разметки (имена юзеров могут содержать < > &)."""
-    return html.escape(text or "", quote=False)
+def esc(text) -> str:
+    return html.escape(str(text or ""), quote=False)
 
 
 def mention(user) -> str:
@@ -143,10 +111,14 @@ def mention(user) -> str:
     return f'<a href="tg://user?id={user.id}">{esc(name)}</a>'
 
 
+def flag(name: str) -> bool:
+    """Булева настройка с рантайм-оверрайдом из storage (команды /night и т.п.)."""
+    return storage.get_flag(name, getattr(config, name))
+
+
 # ----------------------------------------------------------------- админы
 
 async def get_admins(chat_id: int) -> set:
-    """ID админов чата с кэшем (TTL), чтобы не дёргать API на каждое сообщение."""
     entry = admins_cache.get(chat_id)
     if entry and (now() - entry[1]).total_seconds() < config.ADMIN_CACHE_TTL:
         return entry[0]
@@ -173,9 +145,8 @@ def photo_dir() -> str:
 
 
 def dhash(img: Image.Image, size: int = 8) -> int:
-    """Difference hash 64 бита: устойчив к ресайзу/пережатию одной картинки."""
     img = img.convert("L").resize((size + 1, size), Image.LANCZOS)
-    px = img.tobytes()  # row-major байты яркости, px[i] -> int 0..255
+    px = img.tobytes()
     bits = 0
     for row in range(size):
         for col in range(size):
@@ -189,7 +160,7 @@ def dhash_from_bytes(data: bytes) -> int | None:
     try:
         with Image.open(io.BytesIO(data)) as img:
             return dhash(img)
-    except Exception as e:  # битый файл / не-картинка / анимация
+    except Exception as e:
         log.debug("Не смог распознать изображение: %s", e)
         return None
 
@@ -199,7 +170,6 @@ def hamming(a: int, b: int) -> int:
 
 
 def load_reference_hashes() -> None:
-    """Загрузить эталоны из папки PHOTO_DIR (при старте и по /reload)."""
     ref_hashes.clear()
     base = photo_dir()
     if not os.path.isdir(base):
@@ -218,17 +188,14 @@ def load_reference_hashes() -> None:
 
 
 def best_match(h: int) -> tuple[str, int, float] | None:
-    """Ближайший эталон: (имя, расстояние, процент_похожести). None если базы нет."""
     if not ref_hashes:
         return None
     name, dist = min(((n, hamming(h, rh)) for n, rh in ref_hashes),
                      key=lambda t: t[1])
-    percent = (64 - dist) / 64 * 100
-    return name, dist, percent
+    return name, dist, (64 - dist) / 64 * 100
 
 
 def load_nsfw_detector() -> None:
-    """Поднять нейросеть NudeNet (если включена и установлена)."""
     global nsfw_detector
     if not config.NSFW_ENABLED:
         return
@@ -242,7 +209,6 @@ def load_nsfw_detector() -> None:
 
 
 def _nsfw_detect_sync(data: bytes, tmp_path: str):
-    """Синхронная детекция (в отдельном потоке). NudeNet читает с диска."""
     try:
         with open(tmp_path, "wb") as f:
             f.write(data)
@@ -258,13 +224,10 @@ def _nsfw_detect_sync(data: bytes, tmp_path: str):
     bad = set(config.NSFW_BAD_CLASSES)
     hits = [(x["class"], x["score"]) for x in dets
             if x["class"] in bad and x["score"] >= config.NSFW_MIN_SCORE]
-    if not hits:
-        return None
-    return max(hits, key=lambda t: t[1])  # самый уверенный класс
+    return max(hits, key=lambda t: t[1]) if hits else None
 
 
 async def nsfw_check(data: bytes, tag: str):
-    """Проверить байты картинки на 18+. Возвращает (класс, уверенность) или None."""
     if nsfw_detector is None:
         return None
     tmp = os.path.join(tempfile.gettempdir(), f"nsfw_{tag}.jpg")
@@ -274,33 +237,31 @@ async def nsfw_check(data: bytes, tag: str):
 # ------------------------------------------------- учёт сообщений и зачистка
 
 class TrackMiddleware(BaseMiddleware):
-    """Запоминает id+время каждого сообщения от юзеров (для зачистки спама)."""
+    """Запоминает id+время сообщений от юзеров (для зачистки спама)."""
 
     async def __call__(self, handler, event, data):
         msg = event
         if (msg.from_user and not msg.from_user.is_bot
                 and msg.chat.type in ("group", "supergroup")):
-            key = (msg.chat.id, msg.from_user.id)
-            buf = recent.setdefault(key, deque(maxlen=200))
+            buf = recent.setdefault((msg.chat.id, msg.from_user.id), deque(maxlen=200))
             buf.append((msg.message_id, now()))
         return await handler(event, data)
 
 
 async def purge_recent(chat_id: int, user_id: int) -> int:
-    """Удалить все запомненные сообщения юзера за окно PURGE_WINDOW_SECONDS."""
     buf = recent.get((chat_id, user_id))
     if not buf:
         return 0
     cutoff = now() - timedelta(seconds=config.PURGE_WINDOW_SECONDS)
     ids = [mid for mid, t in buf if t >= cutoff]
     deleted = 0
-    for i in range(0, len(ids), 100):  # bulk-удаление пачками по 100
+    for i in range(0, len(ids), 100):
         chunk = ids[i:i + 100]
         try:
             await bot.delete_messages(chat_id, chunk)
             deleted += len(chunk)
         except TelegramBadRequest:
-            for mid in chunk:  # фоллбэк поштучно
+            for mid in chunk:
                 try:
                     await bot.delete_message(chat_id, mid)
                     deleted += 1
@@ -311,7 +272,6 @@ async def purge_recent(chat_id: int, user_id: int) -> int:
 
 
 async def delayed_purge(chat_id: int, user_id: int, delay: float = 3.0):
-    """Повторная зачистка: ловит остатки альбома, пришедшие после нарушения."""
     try:
         await asyncio.sleep(delay)
     except asyncio.CancelledError:
@@ -322,45 +282,252 @@ async def delayed_purge(chat_id: int, user_id: int, delay: float = 3.0):
 
 
 async def janitor():
-    """Фоновая уборка: не даём словарям расти бесконечно."""
     while True:
         try:
-            await asyncio.sleep(600)  # каждые 10 минут
+            await asyncio.sleep(600)
         except asyncio.CancelledError:
             return
         n = now()
-        for k in [k for k, t in list(flagged.items())
-                  if (n - t).total_seconds() > 60]:
+        for k in [k for k, t in list(flagged.items()) if (n - t).total_seconds() > 60]:
             flagged.pop(k, None)
         cutoff = n - timedelta(seconds=config.PURGE_WINDOW_SECONDS)
         for k in list(recent.keys()):
             buf = recent.get(k)
-            if buf is None:
-                continue
             while buf and buf[0][1] < cutoff:
                 buf.popleft()
             if not buf:
                 recent.pop(k, None)
+        for k in list(flood.keys()):
+            buf = flood.get(k)
+            fcut = n - timedelta(seconds=config.ANTIFLOOD_SECONDS)
+            while buf and buf[0] < fcut:
+                buf.popleft()
+            if not buf:
+                flood.pop(k, None)
+
+
+# ----------------------------------------------------------- наказания
+
+def mod_keyboard(chat_id: int, uid: int) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(inline_keyboard=[[
+        InlineKeyboardButton(text="🔨 Бан", callback_data=f"mod:ban:{chat_id}:{uid}"),
+        InlineKeyboardButton(text="✅ Размут", callback_data=f"mod:unmute:{chat_id}:{uid}"),
+    ]])
+
+
+async def report(chat_id: int, text: str, kb: InlineKeyboardMarkup | None = None):
+    """Отправить уведомление с учётом тихого режима и лог-чата."""
+    target = config.LOG_CHAT_ID
+    dest = target if flag("QUIET_MODE") else (target or chat_id)
+    if dest is None:
+        return
+    try:
+        await bot.send_message(dest, text, reply_markup=kb)
+    except TelegramBadRequest:
+        if dest != chat_id:
+            try:
+                await bot.send_message(chat_id, text, reply_markup=kb)
+            except TelegramBadRequest:
+                pass
+
+
+async def ban_user(chat_id: int, user_id: int):
+    try:
+        await bot.ban_chat_member(chat_id, user_id)
+        stats["banned"] += 1
+        log.info("Забанен %s в чате %s", user_id, chat_id)
+    except TelegramBadRequest as e:
+        log.warning("Не смог забанить %s (админ? бот не админ?): %s", user_id, e)
+
+
+async def mute_user(chat_id: int, user_id: int):
+    try:
+        await bot.restrict_chat_member(chat_id, user_id, permissions=MUTE)
+    except TelegramBadRequest as e:
+        log.warning("Не смог замутить %s: %s", user_id, e)
+
+
+async def apply_punishment(message: Message, reason: str, action: str):
+    """Удалить сообщение и применить действие: delete | warn | mute | ban."""
+    chat_id = message.chat.id
+    user = message.from_user
+    uid = user.id
+    try:
+        await message.delete()
+    except TelegramBadRequest:
+        pass
+
+    if action == "warn":
+        n = storage.add_warn(chat_id, uid)
+        if n >= config.WARN_LIMIT:
+            storage.reset_warns(chat_id, uid)
+            if config.WARN_ACTION == "ban":
+                await ban_user(chat_id, uid)
+                await report(chat_id, f"🔨 {mention(user)} забанен: лимит предупреждений ({esc(reason)}).")
+            else:
+                await mute_user(chat_id, uid)
+                await report(chat_id, f"🔇 {mention(user)} в муте: лимит предупреждений ({esc(reason)}).",
+                             mod_keyboard(chat_id, uid))
+        else:
+            await report(chat_id, f"⚠️ {mention(user)}: предупреждение {n}/{config.WARN_LIMIT} — {esc(reason)}.")
+    elif action == "mute":
+        await mute_user(chat_id, uid)
+        await report(chat_id, f"🔇 {mention(user)} в муте: {esc(reason)}.", mod_keyboard(chat_id, uid))
+    elif action == "ban":
+        await ban_user(chat_id, uid)
+        await report(chat_id, f"🔨 {mention(user)} забанен: {esc(reason)}.")
+    # action == "delete": тихо удаляем, без уведомления (чтобы не флудить)
+
+
+# --------------------------------------------------- проверки сообщений
+
+def is_night() -> bool:
+    if not flag("NIGHT_MODE"):
+        return False
+    h = datetime.now(tz=timezone(timedelta(hours=config.NIGHT_TZ))).hour
+    s, e = config.NIGHT_START, config.NIGHT_END
+    return (s <= h or h < e) if s > e else (s <= h < e)
+
+
+def is_service(msg: Message) -> bool:
+    return bool(msg.new_chat_members or msg.left_chat_member or msg.new_chat_title
+                or msg.new_chat_photo or msg.delete_chat_photo or msg.pinned_message
+                or msg.group_chat_created or msg.video_chat_started
+                or msg.video_chat_ended or msg.message_auto_delete_timer_changed)
+
+
+def has_link(msg: Message) -> bool:
+    txt = msg.text or msg.caption or ""
+    if LINK_RE.search(txt):
+        return True
+    for e in (msg.entities or []) + (msg.caption_entities or []):
+        if e.type in ("url", "text_link"):
+            return True
+        if e.type in ("mention", "text_mention") and not flag("ALLOW_MENTIONS"):
+            return True
+    return False
+
+
+def has_apk(msg: Message) -> bool:
+    d = msg.document
+    return bool(d and ((d.file_name or "").lower().endswith(".apk")
+                       or d.mime_type == "application/vnd.android.package-archive"))
+
+
+def has_premium_emoji(msg: Message) -> bool:
+    return any(e.type == "custom_emoji"
+               for e in (msg.entities or []) + (msg.caption_entities or []))
+
+
+def antiflood_hit(chat_id: int, user_id: int) -> bool:
+    buf = flood.setdefault((chat_id, user_id), deque(maxlen=50))
+    t = now()
+    buf.append(t)
+    cut = t - timedelta(seconds=config.ANTIFLOOD_SECONDS)
+    while buf and buf[0] < cut:
+        buf.popleft()
+    if len(buf) > config.ANTIFLOOD_COUNT:
+        buf.clear()
+        return True
+    return False
+
+
+class ModerationMiddleware(BaseMiddleware):
+    """Фильтрует сообщения не-админов; нарушение -> наказание, сообщение не идёт дальше."""
+
+    async def __call__(self, handler, event, data):
+        msg = event
+        if (msg.chat.type in ("group", "supergroup") and not is_service(msg)
+                and await self._moderate(msg)):
+            return  # съели сообщение
+        return await handler(event, data)
+
+    async def _moderate(self, msg: Message) -> bool:
+        chat_id = msg.chat.id
+
+        # Сообщения «от имени канала» — у них from_user может быть None.
+        sc = msg.sender_chat
+        if sc and flag("BLOCK_CHANNEL_MESSAGES") and sc.id != chat_id and not msg.is_automatic_forward:
+            try:
+                await msg.delete()
+            except TelegramBadRequest:
+                pass
+            try:
+                await bot.ban_chat_sender_chat(chat_id, sc.id)
+            except TelegramBadRequest as e:
+                log.warning("Не смог забанить канал %s: %s", sc.id, e)
+            await report(chat_id, f"🚫 Заблокирован постинг от имени канала «{esc(sc.title or sc.id)}».")
+            return True
+
+        user = msg.from_user
+        if not user or user.is_bot or await is_admin(chat_id, user.id):
+            return False
+
+        # Ночной режим.
+        if is_night():
+            try:
+                await msg.delete()
+            except TelegramBadRequest:
+                pass
+            last = night_notice.get(chat_id)
+            if not last or (now() - last).total_seconds() > 600:
+                night_notice[chat_id] = now()
+                await report(chat_id, "🌙 Ночной режим: сейчас писать могут только админы.")
+            return True
+
+        # Пересылки.
+        if flag("BLOCK_FORWARDS") and (msg.forward_origin is not None or msg.forward_date is not None):
+            await apply_punishment(msg, "пересылка сообщений", config.FORWARD_ACTION)
+            return True
+
+        # Файлы .apk.
+        if flag("BLOCK_APK") and has_apk(msg):
+            await apply_punishment(msg, "файл .apk", "delete")
+            return True
+
+        # Премиум/кастом-эмодзи.
+        if flag("BLOCK_PREMIUM_EMOJI") and has_premium_emoji(msg):
+            await apply_punishment(msg, "премиум-эмодзи", "delete")
+            return True
+
+        # Ссылки (если не в белом списке).
+        if (flag("BLOCK_LINKS") and not storage.link_allowed(chat_id, user.id)
+                and has_link(msg)):
+            await apply_punishment(msg, "ссылка/инвайт", config.LINK_ACTION)
+            return True
+
+        # Антифлуд.
+        if flag("ANTIFLOOD_ENABLED") and antiflood_hit(chat_id, user.id):
+            await apply_punishment(msg, "флуд", config.ANTIFLOOD_ACTION)
+            return True
+
+        # Мат и стоп-слова.
+        text = msg.text or msg.caption or ""
+        if text:
+            if flag("ANTIMAT_ENABLED") and textguard.has_profanity(text):
+                await apply_punishment(msg, "мат", config.TEXT_ACTION)
+                return True
+            sw = textguard.find_stopword(text, storage.stopwords())
+            if sw:
+                await apply_punishment(msg, f"стоп-слово «{sw}»", config.TEXT_ACTION)
+                return True
+        return False
 
 
 # ---------------------------------------------------------------- капча
 
 def build_questions() -> list[dict]:
-    """Три задания по порядку. answer — строка, с ней сравниваем нажатую кнопку."""
     a, b = random.randint(2, 9), random.randint(2, 9)
     q, ans, wrongs = random.choice(COMMONSENSE)
     name, n = random.choice(list(SHAPES.items()))
     return [
-        {"q": f"Шаг 1/3. Реши пример:\n<b>{a} + {b} = ?</b>",
-         "answer": str(a + b), "kind": "num"},
+        {"q": f"Шаг 1/3. Реши пример:\n<b>{a} + {b} = ?</b>", "answer": str(a + b), "kind": "num"},
         {"q": f"Шаг 2/3. {esc(q)}", "answer": ans, "wrongs": wrongs},
-        {"q": f"Шаг 3/3. Сколько углов у <b>{name}</b>? (ответ цифрой)",
-         "answer": str(n), "kind": "num"},
+        {"q": f"Шаг 3/3. Сколько углов у <b>{name}</b>? (ответ цифрой)", "answer": str(n), "kind": "num"},
     ]
 
 
 def options_for(step: dict) -> list[str]:
-    """4 варианта-кнопки для шага (правильный + 3 неверных), перемешанные."""
     if step.get("kind") == "num":
         n = int(step["answer"])
         opts = {n}
@@ -378,28 +545,15 @@ def options_for(step: dict) -> list[str]:
 
 
 def captcha_markup(idx: int, options: list[str]) -> InlineKeyboardMarkup:
-    row = [
-        InlineKeyboardButton(text=o, callback_data=f"cap:{idx}:{o}")
-        for o in options
-    ]
+    row = [InlineKeyboardButton(text=o, callback_data=f"cap:{idx}:{o}") for o in options]
     return InlineKeyboardMarkup(inline_keyboard=[row])
 
 
-async def ban_user(chat_id: int, user_id: int):
-    try:
-        await bot.ban_chat_member(chat_id, user_id)
-        stats["banned"] += 1
-        log.info("Забанен %s в чате %s", user_id, chat_id)
-    except TelegramBadRequest as e:
-        log.warning("Не смог забанить %s (админ? бот не админ?): %s", user_id, e)
-
-
 async def cleanup(chat_id: int, user_id: int, *, delete_msg: bool = True):
-    """Снять состояние капчи и (опц.) удалить её сообщение."""
     state = pending.pop((chat_id, user_id), None)
     if not state:
         return
-    task: asyncio.Task | None = state.get("task")
+    task = state.get("task")
     if task and not task.done():
         task.cancel()
     if delete_msg and config.DELETE_CAPTCHA_MESSAGE and state.get("msg_id"):
@@ -410,7 +564,6 @@ async def cleanup(chat_id: int, user_id: int, *, delete_msg: bool = True):
 
 
 async def captcha_timeout(chat_id: int, user_id: int):
-    """Не успел пройти капчу за отведённое время -> бан."""
     try:
         await asyncio.sleep(config.CAPTCHA_TIMEOUT)
     except asyncio.CancelledError:
@@ -421,22 +574,42 @@ async def captcha_timeout(chat_id: int, user_id: int):
         await cleanup(chat_id, user_id)
 
 
-async def challenge(chat_id: int, user) -> None:
-    """Замутить новичка и выдать 3-факторную капчу. Идемпотентно."""
-    if user.is_bot:
-        return  # боты, добавленные админом, капчу пройти не могут
+async def send_welcome(chat_id: int, user):
+    if not flag("WELCOME_ENABLED"):
+        return
+    kb = None
+    if config.WELCOME_BUTTONS:
+        kb = InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text=b[0], url=b[1])] for b in config.WELCOME_BUTTONS
+        ])
+    try:
+        await bot.send_message(chat_id, f"{mention(user)}, {esc(config.WELCOME_TEXT)}", reply_markup=kb)
+    except TelegramBadRequest:
+        pass
 
+
+async def challenge(chat_id: int, user) -> None:
+    if user.is_bot:
+        return
     key = (chat_id, user.id)
-    # Резервируем ключ СИНХРОННО (до любого await), иначе два события входа
-    # (chat_member + new_chat_members) проходят проверку одновременно -> 2 капчи.
     if key in pending:
         return
     pending[key] = {"steps": None, "idx": 0, "msg_id": None, "task": None}
 
     try:
         if await is_admin(chat_id, user.id):
-            pending.pop(key, None)  # админов не проверяем
+            pending.pop(key, None)
             return
+
+        # Стоп-слова/мат в имени вступающего.
+        if flag("CHECK_JOIN_NAMES"):
+            bad = textguard.is_bad_name(
+                f"{user.full_name or ''} {user.username or ''}", storage.stopwords())
+            if bad:
+                pending.pop(key, None)
+                await ban_user(chat_id, user.id)
+                await report(chat_id, f"🚫 {mention(user)} забанен на входе: {esc(bad)}.")
+                return
 
         await bot.restrict_chat_member(chat_id, user.id, permissions=MUTE)
 
@@ -448,17 +621,14 @@ async def challenge(chat_id: int, user) -> None:
             f"<b>{config.CAPTCHA_TIMEOUT} сек</b>. Ошибка или тишина — бан.\n\n"
             f"{first['q']}"
         )
-        sent = await bot.send_message(
-            chat_id, text, reply_markup=captcha_markup(0, options_for(first))
-        )
+        sent = await bot.send_message(chat_id, text, reply_markup=captcha_markup(0, options_for(first)))
         task = asyncio.create_task(captcha_timeout(chat_id, user.id))
-        pending[key] = {"steps": steps, "idx": 0,
-                        "msg_id": sent.message_id, "task": task}
+        pending[key] = {"steps": steps, "idx": 0, "msg_id": sent.message_id, "task": task}
         stats["challenged"] += 1
         log.info("Новичок %s (%s) — капча выдана", user.id, user.full_name)
     except TelegramBadRequest as e:
-        log.warning("Не смог выдать капчу %s (бот не админ?): %s", user.id, e)
-        pending.pop(key, None)  # снять резерв, чтобы не залип
+        log.warning("Не смог выдать капчу %s: %s", user.id, e)
+        pending.pop(key, None)
     except Exception as e:
         log.exception("Ошибка в challenge для %s: %s", user.id, e)
         pending.pop(key, None)
@@ -466,20 +636,27 @@ async def challenge(chat_id: int, user) -> None:
 
 @dp.chat_member(ChatMemberUpdatedFilter(member_status_changed=JOIN_TRANSITION))
 async def on_member_joined(event: ChatMemberUpdated):
-    """Главный вход: ловит и добавленных, и зашедших по ссылке (большие группы)."""
     await challenge(event.chat.id, event.new_chat_member.user)
 
 
 @dp.message(F.new_chat_members)
 async def on_new_members(message: Message):
-    """Подстраховка + чистка служебного сообщения «X вошёл в группу»."""
-    if config.DELETE_JOIN_MESSAGE:
+    if config.DELETE_JOIN_MESSAGE or flag("DELETE_SERVICE_MESSAGES"):
         try:
             await message.delete()
         except TelegramBadRequest:
             pass
     for user in message.new_chat_members:
         await challenge(message.chat.id, user)
+
+
+@dp.message(F.left_chat_member)
+async def on_left_member(message: Message):
+    if flag("DELETE_SERVICE_MESSAGES"):
+        try:
+            await message.delete()
+        except TelegramBadRequest:
+            pass
 
 
 @dp.callback_query(F.data.startswith("cap:"))
@@ -510,7 +687,6 @@ async def on_captcha_answer(cb: CallbackQuery):
         stats["failed"] += 1
         await ban_user(chat_id, user_id)
         await cleanup(chat_id, user_id)
-        log.info("Забанен %s — ошибка на шаге %s капчи", user_id, idx + 1)
         return
 
     new_idx = idx + 1
@@ -522,17 +698,15 @@ async def on_captcha_answer(cb: CallbackQuery):
             log.warning("Не смог снять мут с %s: %s", user_id, e)
         await cleanup(chat_id, user_id)
         stats["passed"] += 1
+        await send_welcome(chat_id, cb.from_user)
         log.info("Юзер %s прошёл капчу — размучен.", user_id)
         return
 
-    # Переходим к следующему шагу — редактируем то же сообщение.
     state["idx"] = new_idx
     nstep = state["steps"][new_idx]
     text = f"✅ Верно!\n\n{mention(cb.from_user)}, {nstep['q']}"
     try:
-        await cb.message.edit_text(
-            text, reply_markup=captcha_markup(new_idx, options_for(nstep))
-        )
+        await cb.message.edit_text(text, reply_markup=captcha_markup(new_idx, options_for(nstep)))
     except TelegramBadRequest:
         pass
     await cb.answer("Верно ✅")
@@ -541,106 +715,77 @@ async def on_captcha_answer(cb: CallbackQuery):
 # ---------------------------------------------------------- анализ картинок
 
 def pick_image_file(message: Message):
-    """Вернуть скачиваемый объект-картинку из сообщения или None."""
     if message.photo:
         return message.photo[-1]
     if message.sticker:
         st = message.sticker
-        if st.is_animated or st.is_video:
-            return None  # анимированные/видео-стикеры не анализируем
-        return st
+        return None if (st.is_animated or st.is_video) else st
     if message.document:
         mt = message.document.mime_type or ""
         if not mt.startswith("image/"):
             return None
         if (message.document.file_size or 0) > MAX_DOC_BYTES:
-            return None  # слишком большой файл не качаем
+            return None
         return message.document
     return None
 
 
 async def handle_violation(message: Message, reason: str) -> None:
-    """Единый сценарий нарушения: мут + зачистка спама + кнопки админу."""
     chat_id = message.chat.id
     user_id = message.from_user.id
     key = (chat_id, user_id)
 
-    # Антидубль: альбом из N фото не должен слать N уведомлений админу.
     last = flagged.get(key)
     if last and (now() - last).total_seconds() < 30:
-        await delayed_purge(chat_id, user_id, delay=3.0)  # добить остатки связки
+        await delayed_purge(chat_id, user_id, delay=3.0)
         return
     flagged[key] = now()
 
-    try:
-        await bot.restrict_chat_member(chat_id, user_id, permissions=MUTE)
-    except TelegramBadRequest as e:
-        log.warning("Не смог замутить %s: %s", user_id, e)
-
-    # Удаляем весь спам юзера за PURGE_WINDOW_SECONDS (включая связку),
-    # затем добиваем остатки альбома, которые подъедут чуть позже.
+    await mute_user(chat_id, user_id)
     deleted = await purge_recent(chat_id, user_id)
     asyncio.create_task(delayed_purge(chat_id, user_id, delay=3.0))
     stats["img_muted"] += 1
 
-    kb = InlineKeyboardMarkup(inline_keyboard=[[
-        InlineKeyboardButton(text="🔨 Бан", callback_data=f"mod:ban:{chat_id}:{user_id}"),
-        InlineKeyboardButton(text="✅ Размут", callback_data=f"mod:unmute:{chat_id}:{user_id}"),
-    ]])
     mins = config.PURGE_WINDOW_SECONDS // 60
     text = (
         f"🚫 {mention(message.from_user)}: {esc(reason)}.\n"
         f"Удалено сообщений за {mins} мин: <b>{deleted}</b>. Выдан <b>мут</b>.\n\n"
-        f"Админ, проверь лог нарушения (Управление группой → "
-        f"Недавние действия) и реши:"
+        f"Админ, проверь лог нарушения (Управление группой → Недавние действия) и реши:"
     )
-    target = config.LOG_CHAT_ID or chat_id
-    try:
-        await bot.send_message(target, text, reply_markup=kb)
-    except TelegramBadRequest:
-        if target != chat_id:  # лог-канал недоступен — постим в группе
-            await bot.send_message(chat_id, text, reply_markup=kb)
+    await report(chat_id, text, mod_keyboard(chat_id, user_id))
     log.info("МУТ %s — %s, удалено %d сообщ.", user_id, reason, deleted)
 
 
 @dp.message(F.photo | F.sticker | F.document)
 async def on_media(message: Message):
-    """Проверяем картинку: 1) хеш по базе, 2) нейросеть 18+. Совпало -> нарушение."""
     if not message.from_user:
         return
     if await is_admin(message.chat.id, message.from_user.id):
-        return  # картинки админов не трогаем
+        return
 
     file_obj = pick_image_file(message)
     if file_obj is None:
         return
 
     try:
-        buf = await bot.download(file_obj)
-        data = buf.read()
+        data = (await bot.download(file_obj)).read()
     except Exception as e:
         log.warning("Не смог скачать изображение: %s", e)
         return
 
-    # 1) Быстрый слой: точное совпадение с базой спам-картинок.
     h = dhash_from_bytes(data)
     m = best_match(h) if h is not None else None
     if m and m[2] >= config.IMAGE_MATCH_PERCENT:
         name, _, percent = m
-        await handle_violation(
-            message, f"спам-картинка (похожесть {percent:.0f}% на {name})"
-        )
+        await handle_violation(message, f"спам-картинка (похожесть {percent:.0f}% на {name})")
         return
 
-    # 2) Нейросеть: любая нагота/18+ на новой картинке.
     tag = f"{message.chat.id}_{message.message_id}"
     hit = await nsfw_check(data, tag)
     if hit:
         cls, score = hit
         await handle_violation(message, f"18+ контент ({cls}, {score:.0%})")
         return
-
-    log.info("Картинка от %s чистая", message.from_user.id)
 
 
 @dp.callback_query(F.data.startswith("mod:"))
@@ -680,10 +825,23 @@ async def on_moderation(cb: CallbackQuery):
 
 # ---------------------------------------------------------------- команды
 
+async def _admin_only(message: Message) -> bool:
+    return bool(message.from_user and await is_admin(message.chat.id, message.from_user.id))
+
+
+def _target_id(message: Message):
+    r = message.reply_to_message
+    if r and r.from_user:
+        return r.from_user.id
+    parts = (message.text or "").split()
+    if len(parts) > 1 and parts[1].lstrip("-").isdigit():
+        return int(parts[1])
+    return None
+
+
 @dp.message(Command("spam"))
 async def cmd_spam(message: Message):
-    """Ответом на сообщение с картинкой: добавить её в базу спама и наказать автора."""
-    if not message.from_user or not await is_admin(message.chat.id, message.from_user.id):
+    if not await _admin_only(message):
         return
     reply = message.reply_to_message
     if not reply:
@@ -698,12 +856,10 @@ async def cmd_spam(message: Message):
     except Exception as e:
         await message.reply(f"Не смог скачать картинку: {e}")
         return
-
     h = dhash_from_bytes(data)
     if h is None:
         await message.reply("Не смог обработать это изображение.")
         return
-
     fname = f"spam_{reply.message_id}.jpg"
     try:
         with open(os.path.join(photo_dir(), fname), "wb") as f:
@@ -711,53 +867,258 @@ async def cmd_spam(message: Message):
     except OSError as e:
         log.warning("Не смог сохранить эталон: %s", e)
     ref_hashes.append((fname, h))
-
-    # Наказываем автора исходного сообщения (если он не админ).
     punished = ""
     if reply.from_user and not await is_admin(message.chat.id, reply.from_user.id):
         await handle_violation(reply, "картинка отмечена админом как спам")
-        punished = " Автор замучен, его спам вычищен."
-
-    await message.reply(
-        f"✅ Добавил в базу спама (всего {len(ref_hashes)}). "
-        f"Теперь такие картинки ловлю по хешу.{punished}"
-    )
+        punished = " Автор замучен, спам вычищен."
+    await message.reply(f"✅ В базе спама теперь {len(ref_hashes)}.{punished}")
 
 
 @dp.message(Command("reload"))
 async def cmd_reload(message: Message):
-    if not message.from_user or not await is_admin(message.chat.id, message.from_user.id):
+    if not await _admin_only(message):
         return
     load_reference_hashes()
     await message.reply(f"🔄 База перезагружена: {len(ref_hashes)} картинок.")
 
 
+@dp.message(Command("ban"))
+async def cmd_ban(message: Message):
+    if not await _admin_only(message):
+        return
+    uid = _target_id(message)
+    if uid is None:
+        await message.reply("Ответь командой на пользователя или укажи его id.")
+        return
+    await ban_user(message.chat.id, uid)
+    await message.reply("🔨 Забанен.")
+
+
+@dp.message(Command("unban"))
+async def cmd_unban(message: Message):
+    if not await _admin_only(message):
+        return
+    uid = _target_id(message)
+    if uid is None:
+        await message.reply("Ответь командой на пользователя или укажи его id.")
+        return
+    try:
+        await bot.unban_chat_member(message.chat.id, uid, only_if_banned=True)
+        await message.reply("✅ Разбанен.")
+    except TelegramBadRequest as e:
+        await message.reply(f"Не вышло: {e}")
+
+
+@dp.message(Command("mute"))
+async def cmd_mute(message: Message):
+    if not await _admin_only(message):
+        return
+    uid = _target_id(message)
+    if uid is None:
+        await message.reply("Ответь командой на пользователя.")
+        return
+    await mute_user(message.chat.id, uid)
+    await message.reply("🔇 В муте.", reply_markup=mod_keyboard(message.chat.id, uid))
+
+
+@dp.message(Command("unmute"))
+async def cmd_unmute(message: Message):
+    if not await _admin_only(message):
+        return
+    uid = _target_id(message)
+    if uid is None:
+        await message.reply("Ответь командой на пользователя.")
+        return
+    try:
+        await bot.restrict_chat_member(message.chat.id, uid, permissions=FULL)
+        await message.reply("✅ Размучен.")
+    except TelegramBadRequest as e:
+        await message.reply(f"Не вышло: {e}")
+
+
+@dp.message(Command("warn"))
+async def cmd_warn(message: Message):
+    if not await _admin_only(message):
+        return
+    r = message.reply_to_message
+    if not r or not r.from_user:
+        await message.reply("Ответь командой на сообщение нарушителя.")
+        return
+    uid = r.from_user.id
+    n = storage.add_warn(message.chat.id, uid)
+    if n >= config.WARN_LIMIT:
+        storage.reset_warns(message.chat.id, uid)
+        if config.WARN_ACTION == "ban":
+            await ban_user(message.chat.id, uid)
+            await message.reply(f"🔨 {mention(r.from_user)} забанен (лимит предупреждений).")
+        else:
+            await mute_user(message.chat.id, uid)
+            await message.reply(f"🔇 {mention(r.from_user)} в муте (лимит предупреждений).")
+    else:
+        await message.reply(f"⚠️ {mention(r.from_user)}: предупреждение {n}/{config.WARN_LIMIT}.")
+
+
+@dp.message(Command("unwarn"))
+async def cmd_unwarn(message: Message):
+    if not await _admin_only(message):
+        return
+    uid = _target_id(message)
+    if uid is None:
+        await message.reply("Ответь командой на пользователя.")
+        return
+    storage.reset_warns(message.chat.id, uid)
+    await message.reply("✅ Предупреждения сняты.")
+
+
+@dp.message(Command("whitelist"))
+async def cmd_whitelist(message: Message):
+    if not await _admin_only(message):
+        return
+    uid = _target_id(message)
+    if uid is None:
+        await message.reply("Ответь командой на пользователя, чтобы разрешить ему ссылки.")
+        return
+    if storage.allow_link(message.chat.id, uid):
+        await message.reply("✅ Пользователю разрешены ссылки.")
+    else:
+        storage.disallow_link(message.chat.id, uid)
+        await message.reply("🚫 Разрешение на ссылки снято.")
+
+
+@dp.message(Command("addword"))
+async def cmd_addword(message: Message):
+    if not await _admin_only(message):
+        return
+    arg = (message.text or "").split(maxsplit=1)
+    word = arg[1].strip() if len(arg) > 1 else ((message.reply_to_message.text or "").strip()
+                                                 if message.reply_to_message else "")
+    if not word:
+        await message.reply("Использование: /addword слово (или ответом на сообщение).")
+        return
+    if storage.add_stopword(word):
+        await message.reply(f"✅ Добавлено стоп-слово. Всего: {len(storage.stopwords())}.")
+    else:
+        await message.reply("Такое стоп-слово уже есть.")
+
+
+@dp.message(Command("delword"))
+async def cmd_delword(message: Message):
+    if not await _admin_only(message):
+        return
+    arg = (message.text or "").split(maxsplit=1)
+    if len(arg) < 2:
+        await message.reply("Использование: /delword слово")
+        return
+    if storage.del_stopword(arg[1].strip()):
+        await message.reply(f"✅ Удалено. Осталось: {len(storage.stopwords())}.")
+    else:
+        await message.reply("Такого стоп-слова нет.")
+
+
+@dp.message(Command("words"))
+async def cmd_words(message: Message):
+    if not await _admin_only(message):
+        return
+    words = storage.stopwords()
+    if not words:
+        await message.reply("Список стоп-слов пуст.")
+    else:
+        await message.reply("📋 Стоп-слова:\n" + ", ".join(esc(w) for w in words))
+
+
+def _parse_onoff(message: Message) -> bool | None:
+    parts = (message.text or "").lower().split()
+    if len(parts) > 1:
+        if parts[1] in ("on", "вкл", "1", "да"):
+            return True
+        if parts[1] in ("off", "выкл", "0", "нет"):
+            return False
+    return None
+
+
+@dp.message(Command("night"))
+async def cmd_night(message: Message):
+    if not await _admin_only(message):
+        return
+    v = _parse_onoff(message)
+    if v is None:
+        await message.reply(f"Ночной режим: {'вкл' if flag('NIGHT_MODE') else 'выкл'}. "
+                            f"Используй /night on|off. Часы: {config.NIGHT_START}–{config.NIGHT_END}.")
+        return
+    storage.set_flag("NIGHT_MODE", v)
+    await message.reply(f"🌙 Ночной режим: {'включён' if v else 'выключен'}.")
+
+
+@dp.message(Command("quiet"))
+async def cmd_quiet(message: Message):
+    if not await _admin_only(message):
+        return
+    v = _parse_onoff(message)
+    if v is None:
+        await message.reply(f"Тихий режим: {'вкл' if flag('QUIET_MODE') else 'выкл'}. /quiet on|off")
+        return
+    storage.set_flag("QUIET_MODE", v)
+    await message.reply(f"🤫 Тихий режим: {'включён' if v else 'выключен'}.")
+
+
+@dp.message(Command("antimat"))
+async def cmd_antimat(message: Message):
+    if not await _admin_only(message):
+        return
+    v = _parse_onoff(message)
+    if v is None:
+        await message.reply(f"Антимат: {'вкл' if flag('ANTIMAT_ENABLED') else 'выкл'}. /antimat on|off")
+        return
+    storage.set_flag("ANTIMAT_ENABLED", v)
+    await message.reply(f"🤬 Антимат: {'включён' if v else 'выключен'}.")
+
+
+@dp.message(Command("settings"))
+async def cmd_settings(message: Message):
+    if not await _admin_only(message):
+        return
+    def s(name):
+        return "вкл" if flag(name) else "выкл"
+    await message.reply(
+        "⚙️ <b>Настройки</b>\n"
+        f"Антимат: {s('ANTIMAT_ENABLED')} | Ссылки-блок: {s('BLOCK_LINKS')} "
+        f"(упоминания: {s('ALLOW_MENTIONS')})\n"
+        f"Пересылки-блок: {s('BLOCK_FORWARDS')} | Каналы-блок: {s('BLOCK_CHANNEL_MESSAGES')}\n"
+        f".apk-блок: {s('BLOCK_APK')} | Премиум-эмодзи-блок: {s('BLOCK_PREMIUM_EMOJI')}\n"
+        f"Антифлуд: {s('ANTIFLOOD_ENABLED')} ({config.ANTIFLOOD_COUNT}/{config.ANTIFLOOD_SECONDS}с)\n"
+        f"Ночной режим: {s('NIGHT_MODE')} ({config.NIGHT_START}–{config.NIGHT_END}) | "
+        f"Тихий: {s('QUIET_MODE')}\n"
+        f"Проверка имён: {s('CHECK_JOIN_NAMES')} | Приветствие: {s('WELCOME_ENABLED')}\n"
+        f"Стоп-слов: {len(storage.stopwords())} | Эталонов: {len(ref_hashes)} | "
+        f"NudeNet: {'вкл' if nsfw_detector else 'выкл'}"
+    )
+
+
 @dp.message(Command("stats"))
 async def cmd_stats(message: Message):
-    if not message.from_user or not await is_admin(message.chat.id, message.from_user.id):
+    if not await _admin_only(message):
         return
     await message.reply(
         "📊 <b>Статистика</b>\n"
-        f"Выдано капч: {stats['challenged']}\n"
-        f"Прошли: {stats['passed']} | завалили/таймаут: {stats['failed']}\n"
-        f"Мутов за картинки: {stats['img_muted']}\n"
-        f"Банов всего: {stats['banned']}\n"
-        f"Эталонов в базе: {len(ref_hashes)}\n"
-        f"NudeNet: {'вкл' if nsfw_detector else 'выкл'}\n"
+        f"Выдано капч: {stats['challenged']} | прошли: {stats['passed']} | "
+        f"завалили: {stats['failed']}\n"
+        f"Мутов за картинки: {stats['img_muted']} | банов всего: {stats['banned']}\n"
         f"Сейчас на капче: {sum(1 for v in pending.values() if v.get('steps'))}"
     )
 
 
 @dp.message(Command("help"))
 async def cmd_help(message: Message):
-    if not message.from_user or not await is_admin(message.chat.id, message.from_user.id):
+    if not await _admin_only(message):
         return
     await message.reply(
-        "🛡 <b>Команды (только для админов)</b>\n"
-        "/spam — ответом на картинку: добавить в базу спама и наказать автора\n"
-        "/reload — перечитать папку photo/ с эталонами\n"
-        "/stats — статистика\n"
-        "/ping — проверка живости"
+        "🛡 <b>Команды админов</b>\n"
+        "Модерация: /ban /unban /mute /unmute (ответом или с id)\n"
+        "/warn /unwarn — предупреждения | /whitelist — разрешить ссылки\n"
+        "База спама: /spam (ответом на картинку) /reload\n"
+        "Стоп-слова: /addword /delword /words\n"
+        "Режимы: /night on|off /quiet on|off /antimat on|off\n"
+        "Инфо: /settings /stats /ping"
     )
 
 
@@ -766,17 +1127,24 @@ async def cmd_ping(message: Message):
     await message.reply("pong ✅ бот живой")
 
 
+@dp.edited_message()
+async def on_edited(message: Message):
+    # Модерация уже отработала в middleware; здесь ничего не делаем.
+    return
+
+
 # ----------------------------------------------------------------- запуск
 
 async def main():
+    storage.load()
     load_reference_hashes()
     load_nsfw_detector()
-    dp.message.outer_middleware(TrackMiddleware())  # учёт сообщений для зачистки
-    asyncio.create_task(janitor())                  # фоновая уборка памяти
+    dp.message.outer_middleware(TrackMiddleware())
+    dp.message.outer_middleware(ModerationMiddleware())
+    dp.edited_message.outer_middleware(ModerationMiddleware())
+    asyncio.create_task(janitor())
     me = await bot.get_me()
     log.info("Запущен как @%s. Жду новичков…", me.username)
-    # ВАЖНО: chat_member не входит в подписку по умолчанию — без него бот
-    # не видит тех, кто вступил по ссылке (большие группы). Просим явно.
     try:
         await dp.start_polling(bot, allowed_updates=dp.resolve_used_update_types())
     finally:

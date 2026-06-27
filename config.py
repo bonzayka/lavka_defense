@@ -70,3 +70,37 @@ PROXY = None
 # сообщения «спам/18+, [Бан]/[Размут]» уходят туда, а не в саму группу.
 # Оставь None, чтобы постить прямо в группе.
 LOG_CHAT_ID = None
+
+# ============================ A. Антиспам-контент ============================
+BLOCK_LINKS = True            # ссылки/инвайты от обычных юзеров
+ALLOW_MENTIONS = True         # разрешать @упоминания (не считать ссылкой)
+LINK_ACTION = "delete"        # delete | warn | mute | ban
+BLOCK_FORWARDS = True         # пересланные сообщения (forward)
+FORWARD_ACTION = "delete"
+BLOCK_CHANNEL_MESSAGES = True # сообщения «от имени канала»
+BLOCK_APK = True              # файлы .apk
+BLOCK_PREMIUM_EMOJI = False   # премиум/кастомные эмодзи
+ANTIFLOOD_ENABLED = True
+ANTIFLOOD_COUNT = 6           # сообщений...
+ANTIFLOOD_SECONDS = 5         # ...за столько секунд -> наказание
+ANTIFLOOD_ACTION = "mute"
+
+# ========================= B. Стоп-слова / антимат ==========================
+ANTIMAT_ENABLED = True        # фильтр мата (+ подмена символов/гомоглифы)
+TEXT_ACTION = "delete"        # действие за мат/стоп-слово: delete | warn | mute | ban
+CHECK_JOIN_NAMES = True       # проверять имена вступающих на мат/стоп-слова
+
+# ============================== C. Наказания ================================
+WARN_LIMIT = 3                # после стольких предупреждений — наказание ниже
+WARN_ACTION = "ban"           # что делать на лимите варнов: ban | mute
+
+# ============================ D. Режимы и сервис ============================
+NIGHT_MODE = False            # ночью обычным юзерам нельзя писать
+NIGHT_START = 23              # час начала (по NIGHT_TZ)
+NIGHT_END = 7                 # час конца
+NIGHT_TZ = 3                  # часовой пояс, смещение от UTC (МСК = 3)
+QUIET_MODE = False            # тихо: уведомления о наказаниях не в группу (только в лог)
+DELETE_SERVICE_MESSAGES = True  # удалять «вошёл/вышел из группы»
+WELCOME_ENABLED = False       # приветствие после прохождения капчи
+WELCOME_TEXT = "Добро пожаловать! Ознакомься с правилами и будь вежлив 🙂"
+WELCOME_BUTTONS = []          # [["Текст кнопки", "https://ссылка"], ...]
