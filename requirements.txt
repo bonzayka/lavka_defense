@@ -1,0 +1,5 @@
+# NSFW-detection (nudenet) pulls onnxruntime, opencv-python-headless, numpy
+aiogram>=3.15
+aiohttp_socks>=0.9
+Pillow>=11
+nudenet>=3.4

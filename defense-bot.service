@@ -1,0 +1,15 @@
+[Unit]
+Description=Defense Telegram anti-spam bot
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+# Если бот лежит не в /root/defense — поправь оба пути ниже.
+WorkingDirectory=/root/defense
+ExecStart=/root/defense/venv/bin/python /root/defense/bot.py
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

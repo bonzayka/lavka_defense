@@ -1,0 +1,21 @@
+# НЕ копировать в образ — окружение ставится из requirements.txt
+venv/
+.venv/
+env/
+__pycache__/
+*.pyc
+*.pyo
+
+# Архивы и мусор
+*.rar
+*.zip
+*.7z
+defense.rar
+
+# Временные файлы детектора
+nsfw_*.jpg
+
+# Гит/IDE
+.git/
+.idea/
+.vscode/

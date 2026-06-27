@@ -1,0 +1,26 @@
+# Окружение Python — НЕ коммитим, ставится из requirements.txt
+venv/
+.venv/
+env/
+
+# Кэш Python
+__pycache__/
+*.pyc
+*.pyo
+
+# Архивы
+*.rar
+*.zip
+*.7z
+
+# Временные файлы NSFW-детектора
+nsfw_*.jpg
+
+# Модели/кэш (скачиваются автоматически)
+*.onnx
+
+# IDE/ОС
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db
