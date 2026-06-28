@@ -77,6 +77,8 @@ def spawn(entry: dict) -> None:
         "PHOTO_DIR": photo,
         "CHILD_BOT": "1",
         "NSFW_ENABLED": "1" if CHILD_NSFW else "0",
+        # У каждого дочернего — СВОЙ пароль панели (не родительский «Benny»).
+        "PANEL_PASSWORD": entry.get("password") or "",
     })
     _procs[bid] = subprocess.Popen([sys.executable, BOT_SCRIPT], env=env)
 
@@ -102,25 +104,38 @@ def stop_all() -> None:
         stop(bid)
 
 
-def add(token: str, username: str = "") -> bool:
-    """Добавить и запустить бота. False — если уже есть."""
+def add(token: str, username: str = "", owner: int = 0, password: str = "") -> bool:
+    """Добавить и запустить бота. False — если уже есть. owner — id создателя."""
     token = token.strip()
     bid = bot_id(token)
     items = _load()
     if any(i["id"] == bid for i in items):
         return False
-    entry = {"id": bid, "token": token, "username": username}
+    entry = {"id": bid, "token": token, "username": username,
+             "owner": owner, "password": password}
     items.append(entry)
     _save(items)
     spawn(entry)
     return True
 
 
-def remove(bid: str) -> None:
+def owns(bid: str, owner: int) -> bool:
+    """Принадлежит ли бот этому владельцу."""
+    return any(i["id"] == bid and i.get("owner") == owner for i in _load())
+
+
+def remove(bid: str, owner: int | None = None) -> bool:
+    """Удалить бота. Если owner задан — только если он владелец."""
+    if owner is not None and not owns(bid, owner):
+        return False
     stop(bid)
     _save([i for i in _load() if i["id"] != bid])
+    return True
 
 
-def children() -> list[dict]:
-    """Список с пометкой alive для панели."""
-    return [{**e, "alive": alive(e["id"])} for e in _load()]
+def children(owner: int | None = None) -> list[dict]:
+    """Список ботов (с пометкой alive). Если owner задан — только его боты."""
+    items = _load()
+    if owner is not None:
+        items = [i for i in items if i.get("owner") == owner]
+    return [{**e, "alive": alive(e["id"])} for e in items]

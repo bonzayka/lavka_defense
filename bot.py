@@ -83,6 +83,7 @@ report_votes: dict[tuple[int, int], dict] = {}     # (chat, msg_id) -> {voters:s
 report_times: dict[tuple[int, int], deque] = {}    # (chat, reporter) -> deque[dt] (лимит/час)
 panel_auth: set[int] = set()                       # кто прошёл пароль панели
 panel_state: dict[int, str] = {}                   # ожидание ввода в панели
+panel_newbot: dict[int, dict] = {}                 # черновик создаваемого бота (токен+юзернейм)
 nsfw_detector = None
 stats = {"challenged": 0, "passed": 0, "failed": 0, "img_muted": 0,
          "banned": 0, "reports": 0, "raids": 0}
@@ -1383,7 +1384,7 @@ async def cmd_report(message: Message):
         await message.delete()
     except TelegramBadRequest:
         pass
-    await _ack(chat_id, "✅ Жалоба учтена.")
+    await _ack(chat_id, "✅ Жалоба учтена.", 40)
 
 
 # Тайм-наказания текстом в чате: «мут 3 дня», «бан 2 часа» (ответом на юзера).
@@ -1649,9 +1650,9 @@ def panel_keyboard() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
-def bots_keyboard() -> InlineKeyboardMarkup:
+def bots_keyboard(owner: int) -> InlineKeyboardMarkup:
     rows = []
-    for c in manager.children():
+    for c in manager.children(owner):
         mark = "🟢" if c["alive"] else "🔴"
         label = f"{mark} @{c['username']}" if c.get("username") else f"{mark} {c['id']}"
         rows.append([
@@ -1720,6 +1721,15 @@ async def panel_private(message: Message):
             await message.answer("🔒 Неверный пароль. Попробуй ещё раз:")
         return
     st = panel_state.get(uid)
+
+    # Двухшаговое создание дочернего бота: токен -> свой пароль.
+    if st == "add_bot" and message.text:
+        await _bot_token_step(message)
+        return
+    if st == "add_bot_pass" and message.text:
+        await _bot_password_step(message)
+        return
+
     if st and message.text:
         val = message.text.strip()
         panel_state.pop(uid, None)
@@ -1738,34 +1748,65 @@ async def panel_private(message: Message):
                 await message.answer(f"✅ {key} = {val}.")
             else:
                 await message.answer("Нужно число.")
-        elif st == "add_bot":
-            await _add_child_bot(message, val)
         await open_panel(message.chat.id)
         return
     await open_panel(message.chat.id)
 
 
-async def _add_child_bot(message: Message, token: str):
-    if IS_CHILD:
-        await message.answer("Дочерний бот не может управлять другими.")
+async def _bot_token_step(message: Message):
+    """Шаг 1: принять токен, проверить, спросить пароль для НОВОГО бота."""
+    uid = message.from_user.id
+    token = message.text.strip()
+    if token.startswith("/"):
+        panel_state.pop(uid, None)
+        await message.answer("Отменено.")
+        await open_panel(message.chat.id)
         return
-    if not manager.valid_token(token):
-        await message.answer("Это не похоже на токен бота. Формат: 123456:AA...")
+    if IS_CHILD or not manager.valid_token(token):
+        panel_state.pop(uid, None)
+        await message.answer("Это не похоже на токен бота. Формат: 123456:AA…")
+        await open_panel(message.chat.id)
         return
     from aiogram import Bot as _Bot
     test = _Bot(token)
     try:
         me = await test.get_me()
     except Exception:
+        panel_state.pop(uid, None)
         await message.answer("Токен недействителен (getMe не прошёл).")
+        await open_panel(message.chat.id)
         return
     finally:
         await test.session.close()
-    if manager.add(token, me.username or ""):
-        await message.answer(f"✅ Бот @{esc(me.username)} добавлен и запущен. "
-                             "У него своя база и настройки.")
+    panel_newbot[uid] = {"token": token, "username": me.username or ""}
+    panel_state[uid] = "add_bot_pass"
+    await message.answer(
+        f"Бот @{esc(me.username)} проверен ✅\n"
+        "Теперь придумай <b>пароль</b> для этого нового бота (он будет свой, "
+        "не общий) — пришли его одним сообщением:")
+
+
+async def _bot_password_step(message: Message):
+    """Шаг 2: задать пароль и запустить нового бота под этим владельцем."""
+    uid = message.from_user.id
+    pw = message.text.strip()
+    draft = panel_newbot.pop(uid, None)
+    panel_state.pop(uid, None)
+    if not draft:
+        await open_panel(message.chat.id)
+        return
+    if pw.startswith("/") or len(pw) < 3:
+        await message.answer("Пароль слишком короткий (минимум 3 символа). Создание отменено.")
+        await open_panel(message.chat.id)
+        return
+    if manager.add(draft["token"], draft["username"], owner=uid, password=pw):
+        await message.answer(
+            f"✅ Бот @{esc(draft['username'])} создан и запущен.\n"
+            f"Это <b>отдельный</b> бот: свой пароль <code>{esc(pw)}</code>, "
+            "своя база и настройки. Заходи в него и открывай /admin с этим паролем.")
     else:
         await message.answer("Такой бот уже есть в списке.")
+    await open_panel(message.chat.id)
 
 
 @dp.callback_query(F.data.startswith("panel:"))
@@ -1873,12 +1914,12 @@ async def panel_cb(cb: CallbackQuery):
         await bot.send_message(cb.message.chat.id, "✍️ Пришли текст правил одним сообщением:")
     elif action == "bots":
         await cb.answer()
-        ch = manager.children()
+        ch = manager.children(uid)
         txt = (f"🤖 <b>Мои боты</b> ({len(ch)})\n"
                "🟢 работает · 🔴 остановлен · ⏹ стоп · 🗑 удалить.\n"
-               "У каждого свои данные и база — не пересекаются.")
+               "Каждый — отдельный бот со своим паролем и базой.")
         try:
-            await cb.message.edit_text(txt, reply_markup=bots_keyboard())
+            await cb.message.edit_text(txt, reply_markup=bots_keyboard(uid))
         except TelegramBadRequest:
             pass
     elif action == "addbot":
@@ -1887,17 +1928,22 @@ async def panel_cb(cb: CallbackQuery):
         await bot.send_message(cb.message.chat.id,
                                "✍️ Пришли <b>токен</b> нового бота от @BotFather одним сообщением:")
     elif action == "bstop":
-        manager.stop(parts[2])
-        await cb.answer("Остановлен")
+        if manager.owns(parts[2], uid):
+            manager.stop(parts[2])
+            await cb.answer("Остановлен")
+        else:
+            await cb.answer("Это не твой бот.", show_alert=True)
         try:
-            await cb.message.edit_reply_markup(reply_markup=bots_keyboard())
+            await cb.message.edit_reply_markup(reply_markup=bots_keyboard(uid))
         except TelegramBadRequest:
             pass
     elif action == "bdel":
-        manager.remove(parts[2])
-        await cb.answer("Удалён")
+        if manager.remove(parts[2], owner=uid):
+            await cb.answer("Удалён")
+        else:
+            await cb.answer("Это не твой бот.", show_alert=True)
         try:
-            await cb.message.edit_reply_markup(reply_markup=bots_keyboard())
+            await cb.message.edit_reply_markup(reply_markup=bots_keyboard(uid))
         except TelegramBadRequest:
             pass
     elif action == "noop":
