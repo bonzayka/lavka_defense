@@ -11,7 +11,9 @@ import os
 import threading
 
 _LOCK = threading.Lock()
-_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "data.json")
+# Путь к данным можно задать через env DATA_FILE (для дочерних ботов — свой файл).
+_PATH = os.environ.get("DATA_FILE") or os.path.join(
+    os.path.dirname(os.path.abspath(__file__)), "data.json")
 
 _DEFAULT = {
     "stopwords": [],          # список запрещённых слов/подстрок (нижний регистр)
@@ -25,7 +27,11 @@ _DEFAULT = {
     "rules": "",              # текст правил группы
 }
 
-_data: dict = {}
+def _fresh() -> dict:
+    return {k: json.loads(json.dumps(v)) for k, v in _DEFAULT.items()}
+
+
+_data: dict = _fresh()  # безопасно ещё до load()
 
 
 def _key(chat_id: int, user_id: int) -> str:

@@ -20,6 +20,10 @@ nsfw_*.jpg
 data.json
 data.json.tmp
 
+# Мульти-бот: список токенов дочерних ботов и их данные
+children.json
+children/
+
 # Модели/кэш (скачиваются автоматически)
 *.onnx
 

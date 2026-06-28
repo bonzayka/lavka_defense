@@ -47,8 +47,11 @@ from aiogram.types import (
 from aiogram.exceptions import TelegramBadRequest
 
 import config
+import manager
 import storage
 import textguard
+
+IS_CHILD = manager.is_child()  # дочерний бот не поднимает свой менеджер
 
 logging.basicConfig(
     level=logging.INFO,
@@ -1506,7 +1509,24 @@ def panel_keyboard() -> InlineKeyboardMarkup:
                  InlineKeyboardButton(text="📜 Правила", callback_data="panel:rules")])
     rows.append([InlineKeyboardButton(text="📊 Статистика", callback_data="panel:stats"),
                  InlineKeyboardButton(text="🔄 Обновить базу", callback_data="panel:reload")])
+    if not IS_CHILD:
+        rows.append([InlineKeyboardButton(text="🤖 Мои боты", callback_data="panel:bots")])
     rows.append([InlineKeyboardButton(text="❌ Закрыть", callback_data="panel:close")])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def bots_keyboard() -> InlineKeyboardMarkup:
+    rows = []
+    for c in manager.children():
+        mark = "🟢" if c["alive"] else "🔴"
+        label = f"{mark} @{c['username']}" if c.get("username") else f"{mark} {c['id']}"
+        rows.append([
+            InlineKeyboardButton(text=label, callback_data="panel:noop"),
+            InlineKeyboardButton(text="⏹", callback_data=f"panel:bstop:{c['id']}"),
+            InlineKeyboardButton(text="🗑", callback_data=f"panel:bdel:{c['id']}"),
+        ])
+    rows.append([InlineKeyboardButton(text="➕ Добавить бота", callback_data="panel:addbot")])
+    rows.append([InlineKeyboardButton(text="⬅️ Назад", callback_data="panel:back")])
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
@@ -1584,9 +1604,34 @@ async def panel_private(message: Message):
                 await message.answer(f"✅ {key} = {val}.")
             else:
                 await message.answer("Нужно число.")
+        elif st == "add_bot":
+            await _add_child_bot(message, val)
         await open_panel(message.chat.id)
         return
     await open_panel(message.chat.id)
+
+
+async def _add_child_bot(message: Message, token: str):
+    if IS_CHILD:
+        await message.answer("Дочерний бот не может управлять другими.")
+        return
+    if not manager.valid_token(token):
+        await message.answer("Это не похоже на токен бота. Формат: 123456:AA...")
+        return
+    from aiogram import Bot as _Bot
+    test = _Bot(token)
+    try:
+        me = await test.get_me()
+    except Exception:
+        await message.answer("Токен недействителен (getMe не прошёл).")
+        return
+    finally:
+        await test.session.close()
+    if manager.add(token, me.username or ""):
+        await message.answer(f"✅ Бот @{esc(me.username)} добавлен и запущен. "
+                             "У него своя база и настройки.")
+    else:
+        await message.answer("Такой бот уже есть в списке.")
 
 
 @dp.callback_query(F.data.startswith("panel:"))
@@ -1692,6 +1737,37 @@ async def panel_cb(cb: CallbackQuery):
         panel_state[uid] = "set_rules"
         await cb.answer()
         await bot.send_message(cb.message.chat.id, "✍️ Пришли текст правил одним сообщением:")
+    elif action == "bots":
+        await cb.answer()
+        ch = manager.children()
+        txt = (f"🤖 <b>Мои боты</b> ({len(ch)})\n"
+               "🟢 работает · 🔴 остановлен · ⏹ стоп · 🗑 удалить.\n"
+               "У каждого свои данные и база — не пересекаются.")
+        try:
+            await cb.message.edit_text(txt, reply_markup=bots_keyboard())
+        except TelegramBadRequest:
+            pass
+    elif action == "addbot":
+        panel_state[uid] = "add_bot"
+        await cb.answer()
+        await bot.send_message(cb.message.chat.id,
+                               "✍️ Пришли <b>токен</b> нового бота от @BotFather одним сообщением:")
+    elif action == "bstop":
+        manager.stop(parts[2])
+        await cb.answer("Остановлен")
+        try:
+            await cb.message.edit_reply_markup(reply_markup=bots_keyboard())
+        except TelegramBadRequest:
+            pass
+    elif action == "bdel":
+        manager.remove(parts[2])
+        await cb.answer("Удалён")
+        try:
+            await cb.message.edit_reply_markup(reply_markup=bots_keyboard())
+        except TelegramBadRequest:
+            pass
+    elif action == "noop":
+        await cb.answer()
     elif action == "close":
         panel_state.pop(uid, None)
         await cb.answer("Закрыто")
@@ -1715,11 +1791,18 @@ async def main():
     dp.message.outer_middleware(ModerationMiddleware())
     dp.edited_message.outer_middleware(ModerationMiddleware())
     asyncio.create_task(janitor())
+    if not IS_CHILD:
+        n = manager.start_all()  # поднять дочерних ботов
+        if n:
+            log.info("Запущено дочерних ботов: %d", n)
     me = await bot.get_me()
-    log.info("Запущен как @%s. Жду новичков…", me.username)
+    role = "дочерний" if IS_CHILD else "родительский"
+    log.info("Запущен как @%s (%s). Жду новичков…", me.username, role)
     try:
         await dp.start_polling(bot, allowed_updates=dp.resolve_used_update_types())
     finally:
+        if not IS_CHILD:
+            manager.stop_all()
         storage.save_stats(stats)
         await bot.session.close()
 
