@@ -17,7 +17,12 @@ _DEFAULT = {
     "stopwords": [],          # список запрещённых слов/подстрок (нижний регистр)
     "warns": {},              # "chat:user" -> int
     "link_whitelist": [],     # ["chat:user", ...] — кому можно ссылки
+    "trusted": [],            # ["chat:user", ...] — «свои», мимо всех проверок
     "flags": {},              # рантайм-оверрайды булевых настроек: name -> bool
+    "nums": {},               # рантайм-оверрайды числовых настроек: name -> int
+    "strs": {},               # рантайм-оверрайды строковых (действия и т.п.)
+    "stats": {},              # сохранённая статистика
+    "rules": "",              # текст правил группы
 }
 
 _data: dict = {}
@@ -113,7 +118,25 @@ def disallow_link(chat_id: int, user_id: int) -> bool:
     return False
 
 
-# --- флаги-оверрайды (вкл/выкл фич в рантайме поверх config) ---
+# --- доверенные пользователи (мимо всех проверок) ---
+
+def is_trusted(chat_id: int, user_id: int) -> bool:
+    return _key(chat_id, user_id) in _data["trusted"]
+
+
+def toggle_trusted(chat_id: int, user_id: int) -> bool:
+    """Вернёт True если добавили, False если убрали."""
+    k = _key(chat_id, user_id)
+    if k in _data["trusted"]:
+        _data["trusted"].remove(k)
+        save()
+        return False
+    _data["trusted"].append(k)
+    save()
+    return True
+
+
+# --- флаги/числа/строки-оверрайды (поверх config, меняются в рантайме) ---
 
 def get_flag(name: str, default: bool) -> bool:
     return bool(_data["flags"].get(name, default))
@@ -121,4 +144,44 @@ def get_flag(name: str, default: bool) -> bool:
 
 def set_flag(name: str, value: bool) -> None:
     _data["flags"][name] = bool(value)
+    save()
+
+
+def get_num(name: str, default: int) -> int:
+    return int(_data["nums"].get(name, default))
+
+
+def set_num(name: str, value: int) -> None:
+    _data["nums"][name] = int(value)
+    save()
+
+
+def get_str(name: str, default: str) -> str:
+    return str(_data["strs"].get(name, default))
+
+
+def set_str(name: str, value: str) -> None:
+    _data["strs"][name] = str(value)
+    save()
+
+
+# --- правила группы ---
+
+def get_rules() -> str:
+    return _data.get("rules", "")
+
+
+def set_rules(text: str) -> None:
+    _data["rules"] = text
+    save()
+
+
+# --- статистика (переживает перезапуск) ---
+
+def load_stats() -> dict:
+    return dict(_data.get("stats", {}))
+
+
+def save_stats(stats: dict) -> None:
+    _data["stats"] = dict(stats)
     save()

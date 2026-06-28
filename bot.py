@@ -72,8 +72,15 @@ flagged: dict[tuple[int, int], datetime] = {}      # антидубль увед
 admins_cache: dict[int, tuple[set, datetime]] = {} # кэш админов
 flood: dict[tuple[int, int], deque] = {}           # тайминги сообщений (антифлуд)
 night_notice: dict[int, datetime] = {}             # троттлинг уведомления ночного режима
+newcomer: dict[tuple[int, int], datetime] = {}     # когда юзер вошёл (ограничение новичков)
+raid_joins: dict[int, deque] = {}                  # тайминги входов (антирейд)
+raid_until: dict[int, datetime] = {}               # до какого времени активен локдаун
+report_cooldown: dict[tuple[int, int], datetime] = {}  # антиспам жалоб
+panel_auth: set[int] = set()                       # кто прошёл пароль панели
+panel_state: dict[int, str] = {}                   # ожидание ввода в панели
 nsfw_detector = None
-stats = {"challenged": 0, "passed": 0, "failed": 0, "img_muted": 0, "banned": 0}
+stats = {"challenged": 0, "passed": 0, "failed": 0, "img_muted": 0,
+         "banned": 0, "reports": 0, "raids": 0}
 
 MUTE = ChatPermissions(can_send_messages=False)
 FULL = ChatPermissions(
@@ -114,6 +121,87 @@ def mention(user) -> str:
 def flag(name: str) -> bool:
     """Булева настройка с рантайм-оверрайдом из storage (команды /night и т.п.)."""
     return storage.get_flag(name, getattr(config, name))
+
+
+def num(name: str) -> int:
+    """Числовая настройка с рантайм-оверрайдом."""
+    return storage.get_num(name, getattr(config, name))
+
+
+def action_for(name: str) -> str:
+    """Действие за фильтр (delete/warn/mute/ban) с рантайм-оверрайдом."""
+    return storage.get_str(name, getattr(config, name))
+
+
+def fmt_when(dt: datetime | None = None) -> str:
+    """Время в местном поясе до секунды."""
+    dt = dt or now()
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    local = dt.astimezone(timezone(timedelta(hours=config.NIGHT_TZ)))
+    return local.strftime("%Y-%m-%d %H:%M:%S")
+
+
+_DUR_RE = re.compile(r"(\d+)\s*([а-яёa-z]*)", re.I)
+
+
+def parse_duration(text: str) -> int | None:
+    """'3 дня' -> 259200 сек. Нет числа -> None (навсегда)."""
+    m = _DUR_RE.search(text.lower())
+    if not m:
+        return None
+    n = int(m.group(1))
+    u = m.group(2)
+    if u.startswith(("нед", "week", "w")):
+        k = 604800
+    elif u.startswith(("д", "d")):
+        k = 86400
+    elif u.startswith(("ч", "h")):
+        k = 3600
+    elif u.startswith(("сек", "s")):
+        k = 1
+    elif u.startswith(("мин", "м", "min", "m")):
+        k = 60
+    else:
+        k = 3600  # без единицы — считаем часами
+    return n * k
+
+
+def human_duration(seconds: int | None) -> str:
+    if not seconds:
+        return "навсегда"
+    for unit, label in ((604800, "нед"), (86400, "дн"), (3600, "ч"), (60, "мин"), (1, "сек")):
+        if seconds % unit == 0 and seconds >= unit:
+            return f"{seconds // unit} {label}"
+    return f"{seconds} сек"
+
+
+async def notify_panel(text: str):
+    """Разослать уведомление всем, кто авторизован в панели бота."""
+    for uid in list(panel_auth):
+        try:
+            await bot.send_message(uid, text)
+        except TelegramBadRequest:
+            pass
+
+
+def event_card(title: str, user, *, text: str = "", reason: str = "",
+               when: datetime | None = None) -> str:
+    """Карточка события для уведомлений: id, имя, юзернейм, текст, время до секунды."""
+    uname = f"@{user.username}" if getattr(user, "username", None) else "—"
+    lines = [
+        f"<b>{esc(title)}</b>",
+        f"ID: <code>{user.id}</code>",
+        f"Имя: {mention(user)}",
+        f"Юзер: {esc(uname)}",
+    ]
+    if reason:
+        lines.append(f"Причина: {esc(reason)}")
+    if text:
+        snippet = text if len(text) <= 300 else text[:300] + "…"
+        lines.append(f"Сообщение: {esc(snippet)}")
+    lines.append(f"Время: {fmt_when(when)}")
+    return "\n".join(lines)
 
 
 # ----------------------------------------------------------------- админы
@@ -299,11 +387,15 @@ async def janitor():
                 recent.pop(k, None)
         for k in list(flood.keys()):
             buf = flood.get(k)
-            fcut = n - timedelta(seconds=config.ANTIFLOOD_SECONDS)
+            fcut = n - timedelta(seconds=num("ANTIFLOOD_SECONDS"))
             while buf and buf[0] < fcut:
                 buf.popleft()
             if not buf:
                 flood.pop(k, None)
+        ncut = n - timedelta(hours=max(1, num("RESTRICT_NEWCOMERS_HOURS")))
+        for k in [k for k, t in list(newcomer.items()) if t < ncut]:
+            newcomer.pop(k, None)
+        storage.save_stats(stats)
 
 
 # ----------------------------------------------------------- наказания
@@ -331,18 +423,20 @@ async def report(chat_id: int, text: str, kb: InlineKeyboardMarkup | None = None
                 pass
 
 
-async def ban_user(chat_id: int, user_id: int):
+async def ban_user(chat_id: int, user_id: int, seconds: int | None = None):
+    until = (now() + timedelta(seconds=seconds)) if seconds else None
     try:
-        await bot.ban_chat_member(chat_id, user_id)
+        await bot.ban_chat_member(chat_id, user_id, until_date=until)
         stats["banned"] += 1
-        log.info("Забанен %s в чате %s", user_id, chat_id)
+        log.info("Забанен %s в чате %s на %s", user_id, chat_id, human_duration(seconds))
     except TelegramBadRequest as e:
         log.warning("Не смог забанить %s (админ? бот не админ?): %s", user_id, e)
 
 
-async def mute_user(chat_id: int, user_id: int):
+async def mute_user(chat_id: int, user_id: int, seconds: int | None = None):
+    until = (now() + timedelta(seconds=seconds)) if seconds else None
     try:
-        await bot.restrict_chat_member(chat_id, user_id, permissions=MUTE)
+        await bot.restrict_chat_member(chat_id, user_id, permissions=MUTE, until_date=until)
     except TelegramBadRequest as e:
         log.warning("Не смог замутить %s: %s", user_id, e)
 
@@ -352,16 +446,18 @@ async def apply_punishment(message: Message, reason: str, action: str):
     chat_id = message.chat.id
     user = message.from_user
     uid = user.id
+    msg_text = message.text or message.caption or ""
     try:
         await message.delete()
     except TelegramBadRequest:
         pass
 
+    limit = num("WARN_LIMIT")
     if action == "warn":
         n = storage.add_warn(chat_id, uid)
-        if n >= config.WARN_LIMIT:
+        if n >= limit:
             storage.reset_warns(chat_id, uid)
-            if config.WARN_ACTION == "ban":
+            if action_for("WARN_ACTION") == "ban":
                 await ban_user(chat_id, uid)
                 await report(chat_id, f"🔨 {mention(user)} забанен: лимит предупреждений ({esc(reason)}).")
             else:
@@ -369,14 +465,17 @@ async def apply_punishment(message: Message, reason: str, action: str):
                 await report(chat_id, f"🔇 {mention(user)} в муте: лимит предупреждений ({esc(reason)}).",
                              mod_keyboard(chat_id, uid))
         else:
-            await report(chat_id, f"⚠️ {mention(user)}: предупреждение {n}/{config.WARN_LIMIT} — {esc(reason)}.")
+            await report(chat_id, f"⚠️ {mention(user)}: предупреждение {n}/{limit} — {esc(reason)}.")
     elif action == "mute":
         await mute_user(chat_id, uid)
         await report(chat_id, f"🔇 {mention(user)} в муте: {esc(reason)}.", mod_keyboard(chat_id, uid))
     elif action == "ban":
         await ban_user(chat_id, uid)
         await report(chat_id, f"🔨 {mention(user)} забанен: {esc(reason)}.")
-    # action == "delete": тихо удаляем, без уведомления (чтобы не флудить)
+    # action == "delete": тихо удаляем, без уведомления в чат
+
+    if flag("NOTIFY_VIOLATIONS"):
+        await notify_panel(event_card("🚨 Нарушение", user, text=msg_text, reason=reason))
 
 
 # --------------------------------------------------- проверки сообщений
@@ -419,14 +518,20 @@ def has_premium_emoji(msg: Message) -> bool:
                for e in (msg.entities or []) + (msg.caption_entities or []))
 
 
+def has_media(msg: Message) -> bool:
+    return bool(msg.photo or msg.video or msg.animation or msg.sticker
+                or msg.document or msg.audio or msg.voice or msg.video_note)
+
+
 def antiflood_hit(chat_id: int, user_id: int) -> bool:
+    secs = num("ANTIFLOOD_SECONDS")
     buf = flood.setdefault((chat_id, user_id), deque(maxlen=50))
     t = now()
     buf.append(t)
-    cut = t - timedelta(seconds=config.ANTIFLOOD_SECONDS)
+    cut = t - timedelta(seconds=secs)
     while buf and buf[0] < cut:
         buf.popleft()
-    if len(buf) > config.ANTIFLOOD_COUNT:
+    if len(buf) > num("ANTIFLOOD_COUNT"):
         buf.clear()
         return True
     return False
@@ -460,7 +565,8 @@ class ModerationMiddleware(BaseMiddleware):
             return True
 
         user = msg.from_user
-        if not user or user.is_bot or await is_admin(chat_id, user.id):
+        if (not user or user.is_bot or await is_admin(chat_id, user.id)
+                or storage.is_trusted(chat_id, user.id)):
             return False
 
         # Ночной режим.
@@ -475,9 +581,18 @@ class ModerationMiddleware(BaseMiddleware):
                 await report(chat_id, "🌙 Ночной режим: сейчас писать могут только админы.")
             return True
 
+        # Ограничение новичков: первые N часов нельзя ссылки/медиа.
+        hrs = num("RESTRICT_NEWCOMERS_HOURS")
+        if hrs > 0:
+            joined = newcomer.get((chat_id, user.id))
+            if joined and (now() - joined).total_seconds() < hrs * 3600:
+                if has_link(msg) or has_media(msg):
+                    await apply_punishment(msg, f"новичок (первые {hrs}ч): ссылки/медиа запрещены", "delete")
+                    return True
+
         # Пересылки.
         if flag("BLOCK_FORWARDS") and (msg.forward_origin is not None or msg.forward_date is not None):
-            await apply_punishment(msg, "пересылка сообщений", config.FORWARD_ACTION)
+            await apply_punishment(msg, "пересылка сообщений", action_for("FORWARD_ACTION"))
             return True
 
         # Файлы .apk.
@@ -493,23 +608,23 @@ class ModerationMiddleware(BaseMiddleware):
         # Ссылки (если не в белом списке).
         if (flag("BLOCK_LINKS") and not storage.link_allowed(chat_id, user.id)
                 and has_link(msg)):
-            await apply_punishment(msg, "ссылка/инвайт", config.LINK_ACTION)
+            await apply_punishment(msg, "ссылка/инвайт", action_for("LINK_ACTION"))
             return True
 
         # Антифлуд.
         if flag("ANTIFLOOD_ENABLED") and antiflood_hit(chat_id, user.id):
-            await apply_punishment(msg, "флуд", config.ANTIFLOOD_ACTION)
+            await apply_punishment(msg, "флуд", action_for("ANTIFLOOD_ACTION"))
             return True
 
         # Мат и стоп-слова.
         text = msg.text or msg.caption or ""
         if text:
             if flag("ANTIMAT_ENABLED") and textguard.has_profanity(text):
-                await apply_punishment(msg, "мат", config.TEXT_ACTION)
+                await apply_punishment(msg, "мат", action_for("TEXT_ACTION"))
                 return True
             sw = textguard.find_stopword(text, storage.stopwords())
             if sw:
-                await apply_punishment(msg, f"стоп-слово «{sw}»", config.TEXT_ACTION)
+                await apply_punishment(msg, f"стоп-слово «{sw}»", action_for("TEXT_ACTION"))
                 return True
         return False
 
@@ -565,7 +680,7 @@ async def cleanup(chat_id: int, user_id: int, *, delete_msg: bool = True):
 
 async def captcha_timeout(chat_id: int, user_id: int):
     try:
-        await asyncio.sleep(config.CAPTCHA_TIMEOUT)
+        await asyncio.sleep(num("CAPTCHA_TIMEOUT"))
     except asyncio.CancelledError:
         return
     if (chat_id, user_id) in pending:
@@ -588,6 +703,30 @@ async def send_welcome(chat_id: int, user):
         pass
 
 
+async def check_raid(chat_id: int) -> bool:
+    """Зарегистрировать вход и вернуть True, если идёт рейд/локдаун."""
+    active = raid_until.get(chat_id)
+    if active and active > now():
+        return True
+    if not flag("ANTIRAID_ENABLED"):
+        return False
+    buf = raid_joins.setdefault(chat_id, deque(maxlen=200))
+    t = now()
+    buf.append(t)
+    cut = t - timedelta(seconds=config.RAID_WINDOW)
+    while buf and buf[0] < cut:
+        buf.popleft()
+    if len(buf) >= config.RAID_JOINS:
+        raid_until[chat_id] = t + timedelta(seconds=config.RAID_LOCKDOWN)
+        stats["raids"] += 1
+        await report(chat_id, f"🛡 Похоже на рейд: {len(buf)} входов за {config.RAID_WINDOW}с. "
+                              f"Локдаун на {config.RAID_LOCKDOWN // 60} мин.")
+        await notify_panel(f"🛡 РЕЙД в чате <code>{chat_id}</code>: "
+                           f"{len(buf)} входов за {config.RAID_WINDOW}с.")
+        return True
+    return False
+
+
 async def challenge(chat_id: int, user) -> None:
     if user.is_bot:
         return
@@ -597,8 +736,20 @@ async def challenge(chat_id: int, user) -> None:
     pending[key] = {"steps": None, "idx": 0, "msg_id": None, "task": None}
 
     try:
-        if await is_admin(chat_id, user.id):
+        if await is_admin(chat_id, user.id) or storage.is_trusted(chat_id, user.id):
             pending.pop(key, None)
+            return
+
+        newcomer[key] = now()
+        if flag("NOTIFY_JOINS"):
+            await notify_panel(event_card("👤 Вход в группу", user))
+
+        # Антирейд: при рейде либо баним входящих, либо просто продолжаем капчу.
+        raid = await check_raid(chat_id)
+        if raid and config.RAID_AUTOBAN:
+            pending.pop(key, None)
+            await ban_user(chat_id, user.id)
+            await notify_panel(event_card("🛡 Бан по антирейду", user))
             return
 
         # Стоп-слова/мат в имени вступающего.
@@ -618,7 +769,7 @@ async def challenge(chat_id: int, user) -> None:
         text = (
             f"👋 {mention(user)}, добро пожаловать!\n"
             f"Пройди проверку из <b>3 заданий</b> за "
-            f"<b>{config.CAPTCHA_TIMEOUT} сек</b>. Ошибка или тишина — бан.\n\n"
+            f"<b>{num('CAPTCHA_TIMEOUT')} сек</b>. Ошибка или тишина — бан.\n\n"
             f"{first['q']}"
         )
         sent = await bot.send_message(chat_id, text, reply_markup=captcha_markup(0, options_for(first)))
@@ -753,6 +904,8 @@ async def handle_violation(message: Message, reason: str) -> None:
         f"Админ, проверь лог нарушения (Управление группой → Недавние действия) и реши:"
     )
     await report(chat_id, text, mod_keyboard(chat_id, user_id))
+    if flag("NOTIFY_VIOLATIONS"):
+        await notify_panel(event_card("🚨 Спам-картинка / 18+", message.from_user, reason=reason))
     log.info("МУТ %s — %s, удалено %d сообщ.", user_id, reason, deleted)
 
 
@@ -760,7 +913,8 @@ async def handle_violation(message: Message, reason: str) -> None:
 async def on_media(message: Message):
     if not message.from_user:
         return
-    if await is_admin(message.chat.id, message.from_user.id):
+    if (await is_admin(message.chat.id, message.from_user.id)
+            or storage.is_trusted(message.chat.id, message.from_user.id)):
         return
 
     file_obj = pick_image_file(message)
@@ -839,6 +993,17 @@ def _target_id(message: Message):
     return None
 
 
+def _target_and_duration(message: Message):
+    """(uid, seconds|None) из reply+длительность или '<id> <длительность>'."""
+    r = message.reply_to_message
+    parts = (message.text or "").split()
+    if r and r.from_user:
+        return r.from_user.id, parse_duration(" ".join(parts[1:]))
+    if len(parts) > 1 and parts[1].lstrip("-").isdigit():
+        return int(parts[1]), parse_duration(" ".join(parts[2:]))
+    return None, None
+
+
 @dp.message(Command("spam"))
 async def cmd_spam(message: Message):
     if not await _admin_only(message):
@@ -886,12 +1051,12 @@ async def cmd_reload(message: Message):
 async def cmd_ban(message: Message):
     if not await _admin_only(message):
         return
-    uid = _target_id(message)
+    uid, seconds = _target_and_duration(message)
     if uid is None:
-        await message.answer("Ответь командой на пользователя или укажи его id.")
+        await message.answer("Ответь командой на пользователя или укажи его id. Можно срок: /ban 3 дня.")
         return
-    await ban_user(message.chat.id, uid)
-    await message.answer("🔨 Забанен.")
+    await ban_user(message.chat.id, uid, seconds)
+    await message.answer(f"🔨 Забанен ({human_duration(seconds)}).")
 
 
 @dp.message(Command("unban"))
@@ -913,12 +1078,13 @@ async def cmd_unban(message: Message):
 async def cmd_mute(message: Message):
     if not await _admin_only(message):
         return
-    uid = _target_id(message)
+    uid, seconds = _target_and_duration(message)
     if uid is None:
-        await message.answer("Ответь командой на пользователя.")
+        await message.answer("Ответь командой на пользователя. Можно срок: /mute 3 часа.")
         return
-    await mute_user(message.chat.id, uid)
-    await message.answer("🔇 В муте.", reply_markup=mod_keyboard(message.chat.id, uid))
+    await mute_user(message.chat.id, uid, seconds)
+    await message.answer(f"🔇 В муте ({human_duration(seconds)}).",
+                         reply_markup=mod_keyboard(message.chat.id, uid))
 
 
 @dp.message(Command("unmute"))
@@ -1026,6 +1192,122 @@ async def cmd_words(message: Message):
         await message.answer("📋 Стоп-слова:\n" + ", ".join(esc(w) for w in words))
 
 
+@dp.message(Command("trust"))
+async def cmd_trust(message: Message):
+    if not await _admin_only(message):
+        return
+    uid = _target_id(message)
+    if uid is None:
+        await message.answer("Ответь /trust на пользователя (он будет мимо всех проверок).")
+        return
+    added = storage.toggle_trusted(message.chat.id, uid)
+    await message.answer("✅ Добавлен в доверенные." if added else "➖ Убран из доверенных.")
+
+
+@dp.message(Command("rules"))
+async def cmd_rules(message: Message):
+    await message.answer(storage.get_rules() or "📜 Правила пока не заданы.")
+
+
+@dp.message(Command("setrules"))
+async def cmd_setrules(message: Message):
+    if not await _admin_only(message):
+        return
+    arg = (message.text or "").split(maxsplit=1)
+    txt = (arg[1].strip() if len(arg) > 1
+           else ((message.reply_to_message.text or "").strip() if message.reply_to_message else ""))
+    if not txt:
+        await message.answer("Использование: /setrules текст (или ответом на сообщение).")
+        return
+    storage.set_rules(txt)
+    await message.answer("✅ Правила сохранены. Показ: /rules")
+
+
+@dp.message(Command("report"))
+async def cmd_report(message: Message):
+    if not flag("REPORT_ENABLED"):
+        return
+    r = message.reply_to_message
+    if not r or not r.from_user:
+        await message.answer("Ответь /report на сообщение нарушителя.")
+        return
+    reporter = message.from_user
+    last = report_cooldown.get((message.chat.id, reporter.id))
+    if last and (now() - last).total_seconds() < config.REPORT_COOLDOWN:
+        return
+    report_cooldown[(message.chat.id, reporter.id)] = now()
+    stats["reports"] += 1
+    card = event_card("⚠️ Жалоба на пользователя", r.from_user,
+                      text=(r.text or r.caption or ""), when=r.date)
+    card += f"\nЖалуется: {mention(reporter)}"
+    if flag("NOTIFY_REPORTS"):
+        await notify_panel(card)
+    await report(message.chat.id, card)
+    try:
+        await message.delete()
+    except TelegramBadRequest:
+        pass
+
+
+# Тайм-наказания текстом в чате: «мут 3 дня», «бан 2 часа» (ответом на юзера).
+# Жёсткий шаблон: ВСЁ сообщение = слово + необяз. срок, иначе не срабатывает
+# (поэтому «я тебе сейчас мут дам» НЕ триггерит).
+NL_PATTERN = (r"(?i)^\s*(мут|размут|бан|разбан|варн|кик|mute|unmute|ban|unban|warn|kick)"
+              r"(?:\s+\d+\s*[а-яёa-z.]*)?\s*$")
+
+
+@dp.message(F.reply_to_message, F.text.regexp(NL_PATTERN))
+async def nl_command(message: Message):
+    if not await _admin_only(message):
+        return
+    target = message.reply_to_message.from_user
+    if not target:
+        return
+    chat_id, uid = message.chat.id, target.id
+    text = message.text.strip().lower()
+    word = re.match(r"^\s*([а-яёa-z]+)", text).group(1)
+    seconds = parse_duration(text)
+    try:
+        await message.delete()
+    except TelegramBadRequest:
+        pass
+
+    if word in ("мут", "mute"):
+        await mute_user(chat_id, uid, seconds)
+        await report(chat_id, f"🔇 {mention(target)} в муте ({human_duration(seconds)}).",
+                     mod_keyboard(chat_id, uid))
+    elif word in ("размут", "unmute"):
+        try:
+            await bot.restrict_chat_member(chat_id, uid, permissions=FULL)
+        except TelegramBadRequest:
+            pass
+        await report(chat_id, f"✅ {mention(target)} размучен.")
+    elif word in ("бан", "ban"):
+        await ban_user(chat_id, uid, seconds)
+        await report(chat_id, f"🔨 {mention(target)} забанен ({human_duration(seconds)}).")
+    elif word in ("разбан", "unban"):
+        try:
+            await bot.unban_chat_member(chat_id, uid, only_if_banned=True)
+        except TelegramBadRequest:
+            pass
+        await report(chat_id, f"✅ {mention(target)} разбанен.")
+    elif word in ("варн", "warn"):
+        n = storage.add_warn(chat_id, uid)
+        if n >= num("WARN_LIMIT"):
+            storage.reset_warns(chat_id, uid)
+            await (ban_user if action_for("WARN_ACTION") == "ban" else mute_user)(chat_id, uid)
+            await report(chat_id, f"🔨 {mention(target)} — лимит предупреждений.")
+        else:
+            await report(chat_id, f"⚠️ {mention(target)}: предупреждение {n}/{num('WARN_LIMIT')}.")
+    elif word in ("кик", "kick"):
+        await bot.ban_chat_member(chat_id, uid)
+        try:
+            await bot.unban_chat_member(chat_id, uid)
+        except TelegramBadRequest:
+            pass
+        await report(chat_id, f"👢 {mention(target)} кикнут.")
+
+
 def _parse_onoff(message: Message) -> bool | None:
     parts = (message.text or "").lower().split()
     if len(parts) > 1:
@@ -1118,12 +1400,16 @@ async def cmd_help(message: Message):
         return
     await message.answer(
         "🛡 <b>Команды админов</b>\n"
-        "Модерация: /ban /unban /mute /unmute (ответом или с id)\n"
-        "/warn /unwarn — предупреждения | /whitelist — разрешить ссылки\n"
+        "Модерация: /ban /unban /mute /unmute (ответом; можно срок: /mute 3 дня)\n"
+        "Текстом ответом: <code>мут 3 часа</code>, <code>бан 2 дня</code>, "
+        "<code>размут</code>, <code>варн</code>, <code>кик</code>\n"
+        "/warn /unwarn — предупреждения | /whitelist — ссылки | /trust — доверенный\n"
         "База спама: /spam (ответом на картинку) /reload\n"
-        "Стоп-слова: /addword /delword /words\n"
-        "Режимы: /night on|off /quiet on|off /antimat on|off\n"
-        "Инфо: /settings /stats /ping"
+        "Стоп-слова: /addword /delword /words | Правила: /rules /setrules\n"
+        "Режимы: /night /quiet /antimat on|off\n"
+        "Инфо: /settings /stats /ping\n"
+        "Жалоба участника: /report (ответом)\n\n"
+        "⚙️ Всё это удобнее в личке бота — команда /admin (пароль)."
     )
 
 
@@ -1159,9 +1445,6 @@ class CommandCleanupMiddleware(BaseMiddleware):
 
 # ----------------------------------------- админ-панель в личке (пароль)
 
-panel_auth: set[int] = set()        # кто прошёл пароль (сбрасывается при рестарте)
-panel_state: dict[int, str] = {}    # ожидание ввода (например, нового стоп-слова)
-
 PANEL_TEXT = ("🛠 <b>Панель управления</b>\n"
               "Зелёная галочка — функция включена. Жми, чтобы переключить.")
 
@@ -1174,13 +1457,37 @@ PANEL_FLAGS = [
     ("BLOCK_APK", ".apk"),
     ("BLOCK_PREMIUM_EMOJI", "Прем.эмодзи"),
     ("ANTIFLOOD_ENABLED", "Антифлуд"),
+    ("ANTIRAID_ENABLED", "Антирейд"),
     ("CHECK_JOIN_NAMES", "Имена"),
     ("WELCOME_ENABLED", "Приветствие"),
+    ("REPORT_ENABLED", "Жалобы /report"),
     ("NIGHT_MODE", "Ночной режим"),
     ("QUIET_MODE", "Тихий режим"),
     ("DELETE_SERVICE_MESSAGES", "Чистка сервиса"),
     ("DELETE_ADMIN_COMMANDS", "Чистка команд"),
+    ("NOTIFY_JOINS", "Увед. входы"),
+    ("NOTIFY_VIOLATIONS", "Увед. нарушения"),
+    ("NOTIFY_REPORTS", "Увед. жалобы"),
 ]
+
+# Числовые настройки, редактируемые из панели.
+PANEL_NUMS = [
+    ("CAPTCHA_TIMEOUT", "Таймаут капчи (сек)"),
+    ("ANTIFLOOD_COUNT", "Антифлуд: сообщений"),
+    ("ANTIFLOOD_SECONDS", "Антифлуд: секунд"),
+    ("WARN_LIMIT", "Лимит предупреждений"),
+    ("RESTRICT_NEWCOMERS_HOURS", "Новичкам без ссылок (ч)"),
+]
+
+# Действия за фильтры (циклически delete -> warn -> mute -> ban).
+PANEL_ACTS = [
+    ("LINK_ACTION", "Ссылки"),
+    ("FORWARD_ACTION", "Пересылки"),
+    ("TEXT_ACTION", "Мат/стоп-слова"),
+    ("ANTIFLOOD_ACTION", "Флуд"),
+    ("WARN_ACTION", "Лимит варнов →"),
+]
+ACT_CYCLE = ["delete", "warn", "mute", "ban"]
 
 
 def panel_keyboard() -> InlineKeyboardMarkup:
@@ -1193,10 +1500,13 @@ def panel_keyboard() -> InlineKeyboardMarkup:
             buf = []
     if buf:
         rows.append(buf)
+    rows.append([InlineKeyboardButton(text="🔢 Числа", callback_data="panel:nums"),
+                 InlineKeyboardButton(text="⚙️ Действия", callback_data="panel:acts")])
+    rows.append([InlineKeyboardButton(text="📋 Стоп-слова", callback_data="panel:words"),
+                 InlineKeyboardButton(text="📜 Правила", callback_data="panel:rules")])
     rows.append([InlineKeyboardButton(text="📊 Статистика", callback_data="panel:stats"),
-                 InlineKeyboardButton(text="📋 Стоп-слова", callback_data="panel:words")])
-    rows.append([InlineKeyboardButton(text="🔄 Обновить базу", callback_data="panel:reload"),
-                 InlineKeyboardButton(text="❌ Закрыть", callback_data="panel:close")])
+                 InlineKeyboardButton(text="🔄 Обновить базу", callback_data="panel:reload")])
+    rows.append([InlineKeyboardButton(text="❌ Закрыть", callback_data="panel:close")])
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
@@ -1209,6 +1519,20 @@ def words_keyboard() -> InlineKeyboardMarkup:
     rows = [[InlineKeyboardButton(text=f"❌ {w[:24]}", callback_data=f"panel:dw:{i}")]
             for i, w in enumerate(storage.stopwords())]
     rows.append([InlineKeyboardButton(text="➕ Добавить слово", callback_data="panel:addword")])
+    rows.append([InlineKeyboardButton(text="⬅️ Назад", callback_data="panel:back")])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def nums_keyboard() -> InlineKeyboardMarkup:
+    rows = [[InlineKeyboardButton(text=f"{label}: {num(key)}", callback_data=f"panel:sn:{key}")]
+            for key, label in PANEL_NUMS]
+    rows.append([InlineKeyboardButton(text="⬅️ Назад", callback_data="panel:back")])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def acts_keyboard() -> InlineKeyboardMarkup:
+    rows = [[InlineKeyboardButton(text=f"{label}: {action_for(key)}", callback_data=f"panel:ac:{key}")]
+            for key, label in PANEL_ACTS]
     rows.append([InlineKeyboardButton(text="⬅️ Назад", callback_data="panel:back")])
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
@@ -1241,15 +1565,25 @@ async def panel_private(message: Message):
         else:
             await message.answer("🔒 Неверный пароль. Попробуй ещё раз:")
         return
-    if panel_state.get(uid) == "add_word" and message.text:
+    st = panel_state.get(uid)
+    if st and message.text:
+        val = message.text.strip()
         panel_state.pop(uid, None)
-        w = message.text.strip()
-        if w.startswith("/"):
+        if val.startswith("/"):
             await message.answer("Отменено.")
-        elif storage.add_stopword(w):
-            await message.answer(f"✅ Добавлено стоп-слово «{esc(w)}».")
-        else:
-            await message.answer("Такое стоп-слово уже есть.")
+        elif st == "add_word":
+            ok = storage.add_stopword(val)
+            await message.answer(f"✅ Добавлено «{esc(val)}»." if ok else "Уже есть.")
+        elif st == "set_rules":
+            storage.set_rules(val)
+            await message.answer("✅ Правила сохранены.")
+        elif st.startswith("setnum:"):
+            key = st.split(":", 1)[1]
+            if val.lstrip("-").isdigit():
+                storage.set_num(key, int(val))
+                await message.answer(f"✅ {key} = {val}.")
+            else:
+                await message.answer("Нужно число.")
         await open_panel(message.chat.id)
         return
     await open_panel(message.chat.id)
@@ -1313,6 +1647,51 @@ async def panel_cb(cb: CallbackQuery):
     elif action == "reload":
         load_reference_hashes()
         await cb.answer(f"База обновлена: {len(ref_hashes)} картинок.", show_alert=True)
+    elif action == "nums":
+        await cb.answer()
+        try:
+            await cb.message.edit_text("🔢 Числовые настройки. Нажми, чтобы изменить:",
+                                       reply_markup=nums_keyboard())
+        except TelegramBadRequest:
+            pass
+    elif action == "sn":
+        key = parts[2]
+        panel_state[uid] = f"setnum:{key}"
+        await cb.answer()
+        await bot.send_message(cb.message.chat.id, f"✍️ Введи новое значение для <b>{esc(key)}</b> числом:")
+    elif action == "acts":
+        await cb.answer()
+        try:
+            await cb.message.edit_text("⚙️ Действие за каждый фильтр (тап — следующее):",
+                                       reply_markup=acts_keyboard())
+        except TelegramBadRequest:
+            pass
+    elif action == "ac":
+        key = parts[2]
+        cur = action_for(key)
+        cycle = ["mute", "ban"] if key == "WARN_ACTION" else ACT_CYCLE
+        nxt = cycle[(cycle.index(cur) + 1) % len(cycle)] if cur in cycle else cycle[0]
+        storage.set_str(key, nxt)
+        await cb.answer(f"{key}: {nxt}")
+        try:
+            await cb.message.edit_text("⚙️ Действие за каждый фильтр (тап — следующее):",
+                                       reply_markup=acts_keyboard())
+        except TelegramBadRequest:
+            pass
+    elif action == "rules":
+        await cb.answer()
+        rules = storage.get_rules() or "(не заданы)"
+        kb = InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="✏️ Изменить", callback_data="panel:setrules")],
+            [InlineKeyboardButton(text="⬅️ Назад", callback_data="panel:back")]])
+        try:
+            await cb.message.edit_text(f"📜 <b>Правила</b>\n\n{esc(rules)}", reply_markup=kb)
+        except TelegramBadRequest:
+            pass
+    elif action == "setrules":
+        panel_state[uid] = "set_rules"
+        await cb.answer()
+        await bot.send_message(cb.message.chat.id, "✍️ Пришли текст правил одним сообщением:")
     elif action == "close":
         panel_state.pop(uid, None)
         await cb.answer("Закрыто")
@@ -1328,6 +1707,7 @@ async def panel_cb(cb: CallbackQuery):
 
 async def main():
     storage.load()
+    stats.update(storage.load_stats())  # восстановить счётчики
     load_reference_hashes()
     load_nsfw_detector()
     dp.message.outer_middleware(CommandCleanupMiddleware())  # самый внешний: удаляет команду после обработки
@@ -1340,6 +1720,7 @@ async def main():
     try:
         await dp.start_polling(bot, allowed_updates=dp.resolve_used_update_types())
     finally:
+        storage.save_stats(stats)
         await bot.session.close()
 
 
