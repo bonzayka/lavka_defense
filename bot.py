@@ -845,20 +845,20 @@ async def cmd_spam(message: Message):
         return
     reply = message.reply_to_message
     if not reply:
-        await message.reply("Ответь этой командой на сообщение с картинкой-спамом.")
+        await message.answer("Ответь этой командой на сообщение с картинкой-спамом.")
         return
     file_obj = pick_image_file(reply)
     if file_obj is None:
-        await message.reply("В том сообщении нет подходящей картинки.")
+        await message.answer("В том сообщении нет подходящей картинки.")
         return
     try:
         data = (await bot.download(file_obj)).read()
     except Exception as e:
-        await message.reply(f"Не смог скачать картинку: {e}")
+        await message.answer(f"Не смог скачать картинку: {e}")
         return
     h = dhash_from_bytes(data)
     if h is None:
-        await message.reply("Не смог обработать это изображение.")
+        await message.answer("Не смог обработать это изображение.")
         return
     fname = f"spam_{reply.message_id}.jpg"
     try:
@@ -871,7 +871,7 @@ async def cmd_spam(message: Message):
     if reply.from_user and not await is_admin(message.chat.id, reply.from_user.id):
         await handle_violation(reply, "картинка отмечена админом как спам")
         punished = " Автор замучен, спам вычищен."
-    await message.reply(f"✅ В базе спама теперь {len(ref_hashes)}.{punished}")
+    await message.answer(f"✅ В базе спама теперь {len(ref_hashes)}.{punished}")
 
 
 @dp.message(Command("reload"))
@@ -879,7 +879,7 @@ async def cmd_reload(message: Message):
     if not await _admin_only(message):
         return
     load_reference_hashes()
-    await message.reply(f"🔄 База перезагружена: {len(ref_hashes)} картинок.")
+    await message.answer(f"🔄 База перезагружена: {len(ref_hashes)} картинок.")
 
 
 @dp.message(Command("ban"))
@@ -888,10 +888,10 @@ async def cmd_ban(message: Message):
         return
     uid = _target_id(message)
     if uid is None:
-        await message.reply("Ответь командой на пользователя или укажи его id.")
+        await message.answer("Ответь командой на пользователя или укажи его id.")
         return
     await ban_user(message.chat.id, uid)
-    await message.reply("🔨 Забанен.")
+    await message.answer("🔨 Забанен.")
 
 
 @dp.message(Command("unban"))
@@ -900,13 +900,13 @@ async def cmd_unban(message: Message):
         return
     uid = _target_id(message)
     if uid is None:
-        await message.reply("Ответь командой на пользователя или укажи его id.")
+        await message.answer("Ответь командой на пользователя или укажи его id.")
         return
     try:
         await bot.unban_chat_member(message.chat.id, uid, only_if_banned=True)
-        await message.reply("✅ Разбанен.")
+        await message.answer("✅ Разбанен.")
     except TelegramBadRequest as e:
-        await message.reply(f"Не вышло: {e}")
+        await message.answer(f"Не вышло: {e}")
 
 
 @dp.message(Command("mute"))
@@ -915,10 +915,10 @@ async def cmd_mute(message: Message):
         return
     uid = _target_id(message)
     if uid is None:
-        await message.reply("Ответь командой на пользователя.")
+        await message.answer("Ответь командой на пользователя.")
         return
     await mute_user(message.chat.id, uid)
-    await message.reply("🔇 В муте.", reply_markup=mod_keyboard(message.chat.id, uid))
+    await message.answer("🔇 В муте.", reply_markup=mod_keyboard(message.chat.id, uid))
 
 
 @dp.message(Command("unmute"))
@@ -927,13 +927,13 @@ async def cmd_unmute(message: Message):
         return
     uid = _target_id(message)
     if uid is None:
-        await message.reply("Ответь командой на пользователя.")
+        await message.answer("Ответь командой на пользователя.")
         return
     try:
         await bot.restrict_chat_member(message.chat.id, uid, permissions=FULL)
-        await message.reply("✅ Размучен.")
+        await message.answer("✅ Размучен.")
     except TelegramBadRequest as e:
-        await message.reply(f"Не вышло: {e}")
+        await message.answer(f"Не вышло: {e}")
 
 
 @dp.message(Command("warn"))
@@ -942,7 +942,7 @@ async def cmd_warn(message: Message):
         return
     r = message.reply_to_message
     if not r or not r.from_user:
-        await message.reply("Ответь командой на сообщение нарушителя.")
+        await message.answer("Ответь командой на сообщение нарушителя.")
         return
     uid = r.from_user.id
     n = storage.add_warn(message.chat.id, uid)
@@ -950,12 +950,12 @@ async def cmd_warn(message: Message):
         storage.reset_warns(message.chat.id, uid)
         if config.WARN_ACTION == "ban":
             await ban_user(message.chat.id, uid)
-            await message.reply(f"🔨 {mention(r.from_user)} забанен (лимит предупреждений).")
+            await message.answer(f"🔨 {mention(r.from_user)} забанен (лимит предупреждений).")
         else:
             await mute_user(message.chat.id, uid)
-            await message.reply(f"🔇 {mention(r.from_user)} в муте (лимит предупреждений).")
+            await message.answer(f"🔇 {mention(r.from_user)} в муте (лимит предупреждений).")
     else:
-        await message.reply(f"⚠️ {mention(r.from_user)}: предупреждение {n}/{config.WARN_LIMIT}.")
+        await message.answer(f"⚠️ {mention(r.from_user)}: предупреждение {n}/{config.WARN_LIMIT}.")
 
 
 @dp.message(Command("unwarn"))
@@ -964,10 +964,10 @@ async def cmd_unwarn(message: Message):
         return
     uid = _target_id(message)
     if uid is None:
-        await message.reply("Ответь командой на пользователя.")
+        await message.answer("Ответь командой на пользователя.")
         return
     storage.reset_warns(message.chat.id, uid)
-    await message.reply("✅ Предупреждения сняты.")
+    await message.answer("✅ Предупреждения сняты.")
 
 
 @dp.message(Command("whitelist"))
@@ -976,13 +976,13 @@ async def cmd_whitelist(message: Message):
         return
     uid = _target_id(message)
     if uid is None:
-        await message.reply("Ответь командой на пользователя, чтобы разрешить ему ссылки.")
+        await message.answer("Ответь командой на пользователя, чтобы разрешить ему ссылки.")
         return
     if storage.allow_link(message.chat.id, uid):
-        await message.reply("✅ Пользователю разрешены ссылки.")
+        await message.answer("✅ Пользователю разрешены ссылки.")
     else:
         storage.disallow_link(message.chat.id, uid)
-        await message.reply("🚫 Разрешение на ссылки снято.")
+        await message.answer("🚫 Разрешение на ссылки снято.")
 
 
 @dp.message(Command("addword"))
@@ -993,12 +993,12 @@ async def cmd_addword(message: Message):
     word = arg[1].strip() if len(arg) > 1 else ((message.reply_to_message.text or "").strip()
                                                  if message.reply_to_message else "")
     if not word:
-        await message.reply("Использование: /addword слово (или ответом на сообщение).")
+        await message.answer("Использование: /addword слово (или ответом на сообщение).")
         return
     if storage.add_stopword(word):
-        await message.reply(f"✅ Добавлено стоп-слово. Всего: {len(storage.stopwords())}.")
+        await message.answer(f"✅ Добавлено стоп-слово. Всего: {len(storage.stopwords())}.")
     else:
-        await message.reply("Такое стоп-слово уже есть.")
+        await message.answer("Такое стоп-слово уже есть.")
 
 
 @dp.message(Command("delword"))
@@ -1007,12 +1007,12 @@ async def cmd_delword(message: Message):
         return
     arg = (message.text or "").split(maxsplit=1)
     if len(arg) < 2:
-        await message.reply("Использование: /delword слово")
+        await message.answer("Использование: /delword слово")
         return
     if storage.del_stopword(arg[1].strip()):
-        await message.reply(f"✅ Удалено. Осталось: {len(storage.stopwords())}.")
+        await message.answer(f"✅ Удалено. Осталось: {len(storage.stopwords())}.")
     else:
-        await message.reply("Такого стоп-слова нет.")
+        await message.answer("Такого стоп-слова нет.")
 
 
 @dp.message(Command("words"))
@@ -1021,9 +1021,9 @@ async def cmd_words(message: Message):
         return
     words = storage.stopwords()
     if not words:
-        await message.reply("Список стоп-слов пуст.")
+        await message.answer("Список стоп-слов пуст.")
     else:
-        await message.reply("📋 Стоп-слова:\n" + ", ".join(esc(w) for w in words))
+        await message.answer("📋 Стоп-слова:\n" + ", ".join(esc(w) for w in words))
 
 
 def _parse_onoff(message: Message) -> bool | None:
@@ -1042,11 +1042,11 @@ async def cmd_night(message: Message):
         return
     v = _parse_onoff(message)
     if v is None:
-        await message.reply(f"Ночной режим: {'вкл' if flag('NIGHT_MODE') else 'выкл'}. "
+        await message.answer(f"Ночной режим: {'вкл' if flag('NIGHT_MODE') else 'выкл'}. "
                             f"Используй /night on|off. Часы: {config.NIGHT_START}–{config.NIGHT_END}.")
         return
     storage.set_flag("NIGHT_MODE", v)
-    await message.reply(f"🌙 Ночной режим: {'включён' if v else 'выключен'}.")
+    await message.answer(f"🌙 Ночной режим: {'включён' if v else 'выключен'}.")
 
 
 @dp.message(Command("quiet"))
@@ -1055,10 +1055,10 @@ async def cmd_quiet(message: Message):
         return
     v = _parse_onoff(message)
     if v is None:
-        await message.reply(f"Тихий режим: {'вкл' if flag('QUIET_MODE') else 'выкл'}. /quiet on|off")
+        await message.answer(f"Тихий режим: {'вкл' if flag('QUIET_MODE') else 'выкл'}. /quiet on|off")
         return
     storage.set_flag("QUIET_MODE", v)
-    await message.reply(f"🤫 Тихий режим: {'включён' if v else 'выключен'}.")
+    await message.answer(f"🤫 Тихий режим: {'включён' if v else 'выключен'}.")
 
 
 @dp.message(Command("antimat"))
@@ -1067,10 +1067,10 @@ async def cmd_antimat(message: Message):
         return
     v = _parse_onoff(message)
     if v is None:
-        await message.reply(f"Антимат: {'вкл' if flag('ANTIMAT_ENABLED') else 'выкл'}. /antimat on|off")
+        await message.answer(f"Антимат: {'вкл' if flag('ANTIMAT_ENABLED') else 'выкл'}. /antimat on|off")
         return
     storage.set_flag("ANTIMAT_ENABLED", v)
-    await message.reply(f"🤬 Антимат: {'включён' if v else 'выключен'}.")
+    await message.answer(f"🤬 Антимат: {'включён' if v else 'выключен'}.")
 
 
 @dp.message(Command("settings"))
@@ -1079,7 +1079,7 @@ async def cmd_settings(message: Message):
         return
     def s(name):
         return "вкл" if flag(name) else "выкл"
-    await message.reply(
+    await message.answer(
         "⚙️ <b>Настройки</b>\n"
         f"Антимат: {s('ANTIMAT_ENABLED')} | Ссылки-блок: {s('BLOCK_LINKS')} "
         f"(упоминания: {s('ALLOW_MENTIONS')})\n"
@@ -1094,24 +1094,29 @@ async def cmd_settings(message: Message):
     )
 
 
-@dp.message(Command("stats"))
-async def cmd_stats(message: Message):
-    if not await _admin_only(message):
-        return
-    await message.reply(
+def stats_text() -> str:
+    return (
         "📊 <b>Статистика</b>\n"
         f"Выдано капч: {stats['challenged']} | прошли: {stats['passed']} | "
         f"завалили: {stats['failed']}\n"
         f"Мутов за картинки: {stats['img_muted']} | банов всего: {stats['banned']}\n"
+        f"Эталонов: {len(ref_hashes)} | стоп-слов: {len(storage.stopwords())}\n"
         f"Сейчас на капче: {sum(1 for v in pending.values() if v.get('steps'))}"
     )
+
+
+@dp.message(Command("stats"))
+async def cmd_stats(message: Message):
+    if not await _admin_only(message):
+        return
+    await message.answer(stats_text())
 
 
 @dp.message(Command("help"))
 async def cmd_help(message: Message):
     if not await _admin_only(message):
         return
-    await message.reply(
+    await message.answer(
         "🛡 <b>Команды админов</b>\n"
         "Модерация: /ban /unban /mute /unmute (ответом или с id)\n"
         "/warn /unwarn — предупреждения | /whitelist — разрешить ссылки\n"
@@ -1124,7 +1129,7 @@ async def cmd_help(message: Message):
 
 @dp.message(Command("ping"))
 async def cmd_ping(message: Message):
-    await message.reply("pong ✅ бот живой")
+    await message.answer("pong ✅ бот живой")
 
 
 @dp.edited_message()
@@ -1133,12 +1138,199 @@ async def on_edited(message: Message):
     return
 
 
+# --------------------------------- удаление команд админов после выполнения
+
+class CommandCleanupMiddleware(BaseMiddleware):
+    """После обработки удаляет в группе сообщение-команду админа (чистый чат)."""
+
+    async def __call__(self, handler, event, data):
+        result = await handler(event, data)
+        msg = event
+        try:
+            if (flag("DELETE_ADMIN_COMMANDS") and getattr(msg, "text", None)
+                    and msg.text.startswith("/")
+                    and msg.chat.type in ("group", "supergroup")
+                    and msg.from_user and await is_admin(msg.chat.id, msg.from_user.id)):
+                await bot.delete_message(msg.chat.id, msg.message_id)
+        except TelegramBadRequest:
+            pass
+        return result
+
+
+# ----------------------------------------- админ-панель в личке (пароль)
+
+panel_auth: set[int] = set()        # кто прошёл пароль (сбрасывается при рестарте)
+panel_state: dict[int, str] = {}    # ожидание ввода (например, нового стоп-слова)
+
+PANEL_TEXT = ("🛠 <b>Панель управления</b>\n"
+              "Зелёная галочка — функция включена. Жми, чтобы переключить.")
+
+PANEL_FLAGS = [
+    ("ANTIMAT_ENABLED", "Антимат"),
+    ("BLOCK_LINKS", "Ссылки"),
+    ("ALLOW_MENTIONS", "Упоминания"),
+    ("BLOCK_FORWARDS", "Пересылки"),
+    ("BLOCK_CHANNEL_MESSAGES", "Каналы"),
+    ("BLOCK_APK", ".apk"),
+    ("BLOCK_PREMIUM_EMOJI", "Прем.эмодзи"),
+    ("ANTIFLOOD_ENABLED", "Антифлуд"),
+    ("CHECK_JOIN_NAMES", "Имена"),
+    ("WELCOME_ENABLED", "Приветствие"),
+    ("NIGHT_MODE", "Ночной режим"),
+    ("QUIET_MODE", "Тихий режим"),
+    ("DELETE_SERVICE_MESSAGES", "Чистка сервиса"),
+    ("DELETE_ADMIN_COMMANDS", "Чистка команд"),
+]
+
+
+def panel_keyboard() -> InlineKeyboardMarkup:
+    rows, buf = [], []
+    for key, label in PANEL_FLAGS:
+        mark = "✅" if flag(key) else "❌"
+        buf.append(InlineKeyboardButton(text=f"{mark} {label}", callback_data=f"panel:t:{key}"))
+        if len(buf) == 2:
+            rows.append(buf)
+            buf = []
+    if buf:
+        rows.append(buf)
+    rows.append([InlineKeyboardButton(text="📊 Статистика", callback_data="panel:stats"),
+                 InlineKeyboardButton(text="📋 Стоп-слова", callback_data="panel:words")])
+    rows.append([InlineKeyboardButton(text="🔄 Обновить базу", callback_data="panel:reload"),
+                 InlineKeyboardButton(text="❌ Закрыть", callback_data="panel:close")])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def back_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(inline_keyboard=[[
+        InlineKeyboardButton(text="⬅️ Назад", callback_data="panel:back")]])
+
+
+def words_keyboard() -> InlineKeyboardMarkup:
+    rows = [[InlineKeyboardButton(text=f"❌ {w[:24]}", callback_data=f"panel:dw:{i}")]
+            for i, w in enumerate(storage.stopwords())]
+    rows.append([InlineKeyboardButton(text="➕ Добавить слово", callback_data="panel:addword")])
+    rows.append([InlineKeyboardButton(text="⬅️ Назад", callback_data="panel:back")])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+async def open_panel(chat_id: int):
+    await bot.send_message(chat_id, PANEL_TEXT, reply_markup=panel_keyboard())
+
+
+@dp.message(Command("admin", "start"), F.chat.type == "private")
+async def panel_entry(message: Message):
+    uid = message.from_user.id
+    if uid in panel_auth:
+        await open_panel(message.chat.id)
+    else:
+        panel_state[uid] = "await_pass"
+        await message.answer("🔒 Введи пароль для доступа к панели управления:")
+
+
+@dp.message(F.chat.type == "private")
+async def panel_private(message: Message):
+    if not message.from_user:
+        return
+    uid = message.from_user.id
+    if uid not in panel_auth:
+        if message.text and message.text.strip() == config.PANEL_PASSWORD:
+            panel_auth.add(uid)
+            panel_state.pop(uid, None)
+            await message.answer("✅ Доступ открыт.")
+            await open_panel(message.chat.id)
+        else:
+            await message.answer("🔒 Неверный пароль. Попробуй ещё раз:")
+        return
+    if panel_state.get(uid) == "add_word" and message.text:
+        panel_state.pop(uid, None)
+        w = message.text.strip()
+        if w.startswith("/"):
+            await message.answer("Отменено.")
+        elif storage.add_stopword(w):
+            await message.answer(f"✅ Добавлено стоп-слово «{esc(w)}».")
+        else:
+            await message.answer("Такое стоп-слово уже есть.")
+        await open_panel(message.chat.id)
+        return
+    await open_panel(message.chat.id)
+
+
+@dp.callback_query(F.data.startswith("panel:"))
+async def panel_cb(cb: CallbackQuery):
+    uid = cb.from_user.id
+    if uid not in panel_auth:
+        await cb.answer("Нет доступа. Открой панель командой /admin в личке.", show_alert=True)
+        return
+    parts = cb.data.split(":")
+    action = parts[1]
+
+    if action == "t":
+        key = parts[2]
+        storage.set_flag(key, not flag(key))
+        await cb.answer("Переключено")
+        try:
+            await cb.message.edit_text(PANEL_TEXT, reply_markup=panel_keyboard())
+        except TelegramBadRequest:
+            pass
+    elif action == "back":
+        await cb.answer()
+        try:
+            await cb.message.edit_text(PANEL_TEXT, reply_markup=panel_keyboard())
+        except TelegramBadRequest:
+            pass
+    elif action == "stats":
+        await cb.answer()
+        try:
+            await cb.message.edit_text(stats_text(), reply_markup=back_keyboard())
+        except TelegramBadRequest:
+            pass
+    elif action == "words":
+        await cb.answer()
+        n = len(storage.stopwords())
+        try:
+            await cb.message.edit_text(
+                f"📋 Стоп-слова ({n}). Нажми на слово, чтобы удалить:",
+                reply_markup=words_keyboard())
+        except TelegramBadRequest:
+            pass
+    elif action == "addword":
+        panel_state[uid] = "add_word"
+        await cb.answer()
+        await bot.send_message(cb.message.chat.id, "✍️ Напиши новое стоп-слово одним сообщением:")
+    elif action == "dw":
+        words = storage.stopwords()
+        i = int(parts[2])
+        if 0 <= i < len(words):
+            storage.del_stopword(words[i])
+        await cb.answer("Удалено")
+        n = len(storage.stopwords())
+        try:
+            await cb.message.edit_text(
+                f"📋 Стоп-слова ({n}). Нажми на слово, чтобы удалить:",
+                reply_markup=words_keyboard())
+        except TelegramBadRequest:
+            pass
+    elif action == "reload":
+        load_reference_hashes()
+        await cb.answer(f"База обновлена: {len(ref_hashes)} картинок.", show_alert=True)
+    elif action == "close":
+        panel_state.pop(uid, None)
+        await cb.answer("Закрыто")
+        try:
+            await cb.message.delete()
+        except TelegramBadRequest:
+            pass
+    else:
+        await cb.answer()
+
+
 # ----------------------------------------------------------------- запуск
 
 async def main():
     storage.load()
     load_reference_hashes()
     load_nsfw_detector()
+    dp.message.outer_middleware(CommandCleanupMiddleware())  # самый внешний: удаляет команду после обработки
     dp.message.outer_middleware(TrackMiddleware())
     dp.message.outer_middleware(ModerationMiddleware())
     dp.edited_message.outer_middleware(ModerationMiddleware())
