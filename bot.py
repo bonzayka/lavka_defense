@@ -1272,6 +1272,47 @@ async def cmd_reload(message: Message):
     await message.answer(f"🔄 База перезагружена: {len(ref_hashes)} картинок.")
 
 
+@dp.message(Command("check", "checkgore"))
+async def cmd_check(message: Message):
+    """Диагностика: ответом на картинку показать баллы хеша/NudeNet/гора."""
+    if not await _admin_only(message):
+        return
+    reply = message.reply_to_message
+    file_obj = pick_image_file(reply) if reply else None
+    if file_obj is None:
+        await message.answer("Ответь /check на сообщение с картинкой.")
+        return
+    try:
+        data = (await bot.download(file_obj)).read()
+    except Exception as e:
+        await message.answer(f"Не смог скачать: {e}")
+        return
+
+    h = dhash_from_bytes(data)
+    m = best_match(h) if h is not None else None
+    hashline = f"{m[2]:.0f}% на {esc(m[0])}" if m else "база пуста/нет совпадений"
+
+    nsfw = await nsfw_check(data, f"chk_{reply.message_id}")
+    nsfwline = (f"{esc(nsfw[0])} {nsfw[1]:.0%}" if nsfw
+                else ("чисто" if nsfw_detector else "детектор выключен"))
+
+    if gore.available():
+        g = await asyncio.to_thread(gore.detect, data, 0.0)
+        goreline = f"вероятность гора {g[1]:.0%}" if g else "—"
+        gore_status = "✅ загружен"
+    else:
+        goreline = "—"
+        gore_status = "❌ НЕ загружен (нет torch/transformers или GORE_ENABLED=0)"
+
+    await message.answer(
+        "🔎 <b>Проверка картинки</b>\n"
+        f"Хеш-база: {hashline} (порог {config.IMAGE_MATCH_PERCENT}%)\n"
+        f"NudeNet 18+: {nsfwline}\n"
+        f"Гор-детектор: {gore_status}\n"
+        f"Гор: {goreline} (порог {config.GORE_THRESHOLD:.0%})"
+    )
+
+
 @dp.message(Command("ban"))
 async def cmd_ban(message: Message):
     if not await _admin_only(message):
