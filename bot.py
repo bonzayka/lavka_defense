@@ -39,6 +39,7 @@ from aiogram.filters import Command, ChatMemberUpdatedFilter, JOIN_TRANSITION
 from aiogram.types import (
     Message,
     CallbackQuery,
+    ChatJoinRequest,
     ChatMemberUpdated,
     ChatPermissions,
     InlineKeyboardButton,
@@ -954,6 +955,30 @@ async def challenge(chat_id: int, user) -> None:
         pending.pop(key, None)
 
 
+@dp.chat_join_request()
+async def on_join_request(req: ChatJoinRequest):
+    """Авто-приём заявок на вступление (мат/стоп-слова в имени -> отклонить)."""
+    if not flag("AUTO_ACCEPT"):
+        return
+    chat_id, user = req.chat.id, req.from_user
+    if flag("CHECK_JOIN_NAMES"):
+        bad = textguard.is_bad_name(
+            f"{user.full_name or ''} {user.username or ''}", storage.stopwords())
+        if bad:
+            try:
+                await bot.decline_chat_join_request(chat_id, user.id)
+            except TelegramBadRequest:
+                pass
+            audit("заявки", "отклонена", user.id, user.full_name, bad)
+            await report(chat_id, f"🚫 Заявка отклонена: {mention(user)} — {esc(bad)}.")
+            return
+    try:
+        await bot.approve_chat_join_request(chat_id, user.id)
+        audit("заявки", "принята", user.id, user.full_name)
+    except TelegramBadRequest as e:
+        log.warning("Не смог принять заявку %s: %s", user.id, e)
+
+
 @dp.chat_member(ChatMemberUpdatedFilter(member_status_changed=JOIN_TRANSITION))
 async def on_member_joined(event: ChatMemberUpdated):
     await challenge(event.chat.id, event.new_chat_member.user)
@@ -1774,6 +1799,7 @@ PANEL_FLAGS = [
     ("ANTIFLOOD_ENABLED", "Антифлуд"),
     ("ANTIRAID_ENABLED", "Антирейд"),
     ("CHECK_JOIN_NAMES", "Имена"),
+    ("AUTO_ACCEPT", "Автоприём заявок"),
     ("WELCOME_ENABLED", "Приветствие"),
     ("REPORT_ENABLED", "Жалобы /report"),
     ("NIGHT_MODE", "Ночной режим"),
@@ -1811,7 +1837,8 @@ PANEL_CATEGORIES = [
     ("spam", "🛡 Антиспам", ["ANTIMAT_ENABLED", "BLOCK_LINKS", "ALLOW_MENTIONS",
                              "BLOCK_FORWARDS", "BLOCK_CHANNEL_MESSAGES", "BLOCK_APK",
                              "BLOCK_PREMIUM_EMOJI", "ANTIFLOOD_ENABLED"]),
-    ("entry", "🚪 Вход и капча", ["CHECK_JOIN_NAMES", "WELCOME_ENABLED", "ANTIRAID_ENABLED"]),
+    ("entry", "🚪 Вход и капча", ["CHECK_JOIN_NAMES", "AUTO_ACCEPT", "WELCOME_ENABLED",
+                                  "ANTIRAID_ENABLED"]),
     ("modes", "🌙 Режимы", ["NIGHT_MODE", "QUIET_MODE", "DELETE_SERVICE_MESSAGES",
                             "DELETE_ADMIN_COMMANDS"]),
     ("notify", "🔔 Уведомления", ["NOTIFY_JOINS", "NOTIFY_VIOLATIONS", "NOTIFY_REPORTS",
