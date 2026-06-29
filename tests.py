@@ -127,6 +127,14 @@ bot.nums_keyboard()
 bot.acts_keyboard()
 check("панель: клавиатуры строятся", True)
 
+# ---- кастомные правила со ссылкой ----
+r = bot.render_rules("Привет [канал](https://t.me/x) и <b>текст</b>")
+check("rules: ссылка кликабельна", '<a href="https://t.me/x">канал</a>' in r)
+check("rules: html экранируется", "&lt;b&gt;" in r)
+check("rules: t.me без схемы -> https", 'href="https://t.me/y"'
+      in bot.render_rules("[c](t.me/y)"))
+check("rules: javascript не линкуется", "<a" not in bot.render_rules("[x](javascript:alert(1))"))
+
 
 # ---- детект потери прав (по тексту ошибки) ----
 async def run_rights():

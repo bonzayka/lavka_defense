@@ -135,6 +135,26 @@ def mention(user) -> str:
     return f'<a href="tg://user?id={user.id}">{esc(name)}</a>'
 
 
+_MD_LINK = re.compile(r"\[([^\]]+)\]\(([^)\s]+)\)")
+
+
+def render_rules(text: str) -> str:
+    """Текст со ссылками вида [текст](https://...) -> кликабельный HTML. Безопасно."""
+    out, last = [], 0
+    for m in _MD_LINK.finditer(text or ""):
+        out.append(esc(text[last:m.start()]))
+        label, url = m.group(1), m.group(2)
+        if url.startswith(("http://", "https://", "tg://", "t.me/")):
+            if url.startswith("t.me/"):
+                url = "https://" + url
+            out.append(f'<a href="{html.escape(url, quote=True)}">{esc(label)}</a>')
+        else:  # не ссылка — оставляем как обычный текст
+            out.append(esc(m.group(0)))
+        last = m.end()
+    out.append(esc(text[last:]))
+    return "".join(out)
+
+
 def flag(name: str) -> bool:
     """Булева настройка с рантайм-оверрайдом из storage (команды /night и т.п.)."""
     return storage.get_flag(name, getattr(config, name))
@@ -1377,7 +1397,9 @@ async def cmd_trust(message: Message):
 
 @dp.message(Command("rules"))
 async def cmd_rules(message: Message):
-    await message.answer(storage.get_rules() or "📜 Правила пока не заданы.")
+    rules = storage.get_rules()
+    await message.answer(render_rules(rules) if rules else "📜 Правила пока не заданы.",
+                         disable_web_page_preview=True)
 
 
 @dp.message(Command("setrules"))
@@ -1388,10 +1410,13 @@ async def cmd_setrules(message: Message):
     txt = (arg[1].strip() if len(arg) > 1
            else ((message.reply_to_message.text or "").strip() if message.reply_to_message else ""))
     if not txt:
-        await message.answer("Использование: /setrules текст (или ответом на сообщение).")
+        await message.answer(
+            "Использование: /setrules текст (или ответом на сообщение).\n"
+            "Ссылку вшивай так: <code>[наш канал](https://t.me/...)</code> — "
+            "станет кликабельной.")
         return
     storage.set_rules(txt)
-    await message.answer("✅ Правила сохранены. Показ: /rules")
+    await message.answer("✅ Правила сохранены. Проверь: /rules", disable_web_page_preview=True)
 
 
 async def _ack(chat_id: int, text: str, seconds: int = 5):
@@ -2137,18 +2162,23 @@ async def panel_cb(cb: CallbackQuery):
             pass
     elif action == "rules":
         await cb.answer()
-        rules = storage.get_rules() or "(не заданы)"
+        rules = storage.get_rules()
+        body = render_rules(rules) if rules else "(не заданы)"
         kb = InlineKeyboardMarkup(inline_keyboard=[
             [InlineKeyboardButton(text="✏️ Изменить", callback_data="panel:setrules")],
             [InlineKeyboardButton(text="⬅️ Назад", callback_data="panel:back")]])
         try:
-            await cb.message.edit_text(f"📜 <b>Правила</b>\n\n{esc(rules)}", reply_markup=kb)
+            await cb.message.edit_text(f"📜 <b>Правила</b>\n\n{body}", reply_markup=kb,
+                                       disable_web_page_preview=True)
         except TelegramBadRequest:
             pass
     elif action == "setrules":
         panel_state[uid] = "set_rules"
         await cb.answer()
-        await bot.send_message(cb.message.chat.id, "✍️ Пришли текст правил одним сообщением:")
+        await bot.send_message(
+            cb.message.chat.id,
+            "✍️ Пришли текст правил одним сообщением.\n"
+            "Ссылку вшивай так: <code>[наш канал](https://t.me/...)</code>")
     elif action == "bots":
         await cb.answer()
         ch = manager.children(uid)
