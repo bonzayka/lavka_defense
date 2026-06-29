@@ -44,7 +44,7 @@ from aiogram.types import (
     InlineKeyboardButton,
     InlineKeyboardMarkup,
 )
-from aiogram.exceptions import TelegramBadRequest
+from aiogram.exceptions import TelegramBadRequest, TelegramRetryAfter, TelegramForbiddenError
 
 import config
 import manager
@@ -53,10 +53,18 @@ import textguard
 
 IS_CHILD = manager.is_child()  # дочерний бот не поднимает свой менеджер
 
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s | %(levelname)s | %(message)s",
-)
+_LOG_FMT = "%(asctime)s | %(levelname)s | %(message)s"
+_handlers: list = [logging.StreamHandler()]
+try:
+    from logging.handlers import RotatingFileHandler
+    # Лог рядом с данными бота (у дочерних — свой файл).
+    _log_dir = os.path.dirname(os.environ.get("DATA_FILE") or __file__) or "."
+    _log_path = os.path.join(_log_dir, "bot.log")
+    _handlers.append(RotatingFileHandler(_log_path, maxBytes=2_000_000,
+                                         backupCount=3, encoding="utf-8"))
+except Exception:
+    pass
+logging.basicConfig(level=logging.INFO, format=_LOG_FMT, handlers=_handlers)
 log = logging.getLogger("antispam")
 
 session = AiohttpSession(proxy=config.PROXY) if config.PROXY else None
@@ -79,11 +87,14 @@ newcomer: dict[tuple[int, int], datetime] = {}     # когда юзер вош�
 raid_joins: dict[int, deque] = {}                  # тайминги входов (антирейд)
 raid_until: dict[int, datetime] = {}               # до какого времени активен локдаун
 report_cooldown: dict[tuple[int, int], datetime] = {}  # антиспам жалоб
+child_restarts: dict[str, int] = {}                # watchdog: счётчик перезапусков
+rights_alert: dict[int, datetime] = {}             # троттлинг алерта о потере прав
 report_votes: dict[tuple[int, int], dict] = {}     # (chat, msg_id) -> {voters:set, ts, done}
 report_times: dict[tuple[int, int], deque] = {}    # (chat, reporter) -> deque[dt] (лимит/час)
 panel_auth: set[int] = set()                       # кто прошёл пароль панели
 panel_state: dict[int, str] = {}                   # ожидание ввода в панели
 panel_newbot: dict[int, dict] = {}                 # черновик создаваемого бота (токен+юзернейм)
+msgcount: dict[tuple[int, int], int] = {}          # счётчик сообщений юзеров (с момента старта)
 nsfw_detector = None
 stats = {"challenged": 0, "passed": 0, "failed": 0, "img_muted": 0,
          "banned": 0, "reports": 0, "raids": 0}
@@ -180,6 +191,14 @@ def human_duration(seconds: int | None) -> str:
         if seconds % unit == 0 and seconds >= unit:
             return f"{seconds // unit} {label}"
     return f"{seconds} сек"
+
+
+def audit(actor: str, action: str, target_id: int, target_name: str = "", reason: str = ""):
+    """Записать действие модерации в журнал (для /log и панели)."""
+    storage.add_audit({
+        "ts": fmt_when(), "actor": actor, "action": action,
+        "target_id": target_id, "target_name": target_name, "reason": reason,
+    })
 
 
 async def notify_panel(text: str):
@@ -370,8 +389,10 @@ class TrackMiddleware(BaseMiddleware):
         msg = event
         if (msg.from_user and not msg.from_user.is_bot
                 and msg.chat.type in ("group", "supergroup")):
-            buf = recent.setdefault((msg.chat.id, msg.from_user.id), deque(maxlen=200))
+            key = (msg.chat.id, msg.from_user.id)
+            buf = recent.setdefault(key, deque(maxlen=200))
             buf.append((msg.message_id, now()))
+            msgcount[key] = msgcount.get(key, 0) + 1
         return await handler(event, data)
 
 
@@ -387,6 +408,13 @@ async def purge_recent(chat_id: int, user_id: int) -> int:
         try:
             await bot.delete_messages(chat_id, chunk)
             deleted += len(chunk)
+        except TelegramRetryAfter as e:          # флуд-лимит — подождать и повторить
+            await asyncio.sleep(e.retry_after + 1)
+            try:
+                await bot.delete_messages(chat_id, chunk)
+                deleted += len(chunk)
+            except TelegramBadRequest:
+                pass
         except TelegramBadRequest:
             for mid in chunk:
                 try:
@@ -406,6 +434,42 @@ async def delayed_purge(chat_id: int, user_id: int, delay: float = 3.0):
     n = await purge_recent(chat_id, user_id)
     if n:
         log.info("Догнал и удалил ещё %d сообщений от %s", n, user_id)
+
+
+async def _safe_dm(uid: int, text: str):
+    try:
+        await bot.send_message(uid, text)
+    except (TelegramBadRequest, TelegramForbiddenError):
+        pass
+
+
+async def watchdog():
+    """Родитель следит за дочерними: упал -> перезапуск + уведомление владельцу."""
+    if IS_CHILD:
+        return
+    while True:
+        try:
+            await asyncio.sleep(60)
+        except asyncio.CancelledError:
+            return
+        for c in manager.children():
+            bid, owner = c["id"], c.get("owner")
+            name = c.get("username") or bid
+            if manager.alive(bid):
+                child_restarts.pop(bid, None)
+                continue
+            cnt = child_restarts.get(bid, 0) + 1
+            child_restarts[bid] = cnt
+            if cnt <= 5:
+                try:
+                    manager.spawn(c)
+                except Exception as e:
+                    log.warning("watchdog: не смог поднять %s: %s", bid, e)
+                if owner:
+                    await _safe_dm(owner, f"⚠️ Бот @{esc(name)} падал — перезапустил (попытка {cnt}).")
+            elif cnt == 6 and owner:
+                await _safe_dm(owner, f"🛑 Бот @{esc(name)} постоянно падает — больше не "
+                                      "перезапускаю. Проверь токен и логи.")
 
 
 async def janitor():
@@ -490,6 +554,19 @@ async def _autodelete(chat_id: int, message_id: int, seconds: float):
         pass
 
 
+async def _maybe_rights_alert(chat_id: int, err: Exception):
+    """Если ошибка похожа на потерю прав админа — разово предупредить владельцев."""
+    s = str(err).lower()
+    if not ("not enough rights" in s or "chat_admin_required" in s
+            or "need administrator" in s or "can't remove chat owner" in s):
+        return
+    last = rights_alert.get(chat_id)
+    if not last or (now() - last).total_seconds() > 3600:
+        rights_alert[chat_id] = now()
+        await notify_panel(f"⚠️ Бот, похоже, потерял права админа в чате "
+                           f"<code>{chat_id}</code> — модерация не работает. Верни админку.")
+
+
 async def ban_user(chat_id: int, user_id: int, seconds: int | None = None):
     until = (now() + timedelta(seconds=seconds)) if seconds else None
     try:
@@ -498,6 +575,7 @@ async def ban_user(chat_id: int, user_id: int, seconds: int | None = None):
         log.info("Забанен %s в чате %s на %s", user_id, chat_id, human_duration(seconds))
     except TelegramBadRequest as e:
         log.warning("Не смог забанить %s (админ? бот не админ?): %s", user_id, e)
+        await _maybe_rights_alert(chat_id, e)
 
 
 async def mute_user(chat_id: int, user_id: int, seconds: int | None = None):
@@ -506,6 +584,7 @@ async def mute_user(chat_id: int, user_id: int, seconds: int | None = None):
         await bot.restrict_chat_member(chat_id, user_id, permissions=MUTE, until_date=until)
     except TelegramBadRequest as e:
         log.warning("Не смог замутить %s: %s", user_id, e)
+        await _maybe_rights_alert(chat_id, e)
 
 
 async def apply_punishment(message: Message, reason: str, action: str):
@@ -541,6 +620,7 @@ async def apply_punishment(message: Message, reason: str, action: str):
         await report(chat_id, f"🔨 {mention(user)} забанен: {esc(reason)}.")
     # action == "delete": тихо удаляем, без уведомления в чат
 
+    audit("авто-фильтр", action, uid, user.full_name, reason)
     if flag("NOTIFY_VIOLATIONS"):
         await notify_panel(event_card("🚨 Нарушение", user, text=msg_text, reason=reason))
 
@@ -753,6 +833,7 @@ async def captcha_timeout(chat_id: int, user_id: int):
     if (chat_id, user_id) in pending:
         stats["failed"] += 1
         await ban_user(chat_id, user_id)
+        audit("капча", "ban (таймаут)", user_id)
         await cleanup(chat_id, user_id)
 
 
@@ -904,6 +985,7 @@ async def on_captcha_answer(cb: CallbackQuery):
         await cb.answer("Неверно. Бан.", show_alert=True)
         stats["failed"] += 1
         await ban_user(chat_id, user_id)
+        audit("капча", "ban (неверный ответ)", user_id, cb.from_user.full_name)
         await cleanup(chat_id, user_id)
         return
 
@@ -1024,17 +1106,21 @@ async def on_moderation(cb: CallbackQuery):
         return
 
     admin = esc(cb.from_user.full_name)
+    actor = f"админ {cb.from_user.full_name}"
     if action == "ban":
         await ban_user(gid, uid)
+        audit(actor, "ban", uid)
         await cb.answer("Забанен")
         result = f"🔨 Забанен. Решение: {admin}."
     elif action == "banwipe":
         await ban_user(gid, uid)
         n = await purge_recent(gid, uid)
+        audit(actor, "ban+чистка", uid)
         await cb.answer("Бан + чистка")
         result = f"🧹 Забанен, удалено сообщений: {n}. Решение: {admin}."
     elif action == "mute":
         await mute_user(gid, uid, secs)
+        audit(actor, f"mute {human_duration(secs)}", uid)
         await cb.answer("Замучен")
         result = f"🔇 Мут ({human_duration(secs)}). Решение: {admin}."
     elif action == "unmute":
@@ -1377,6 +1463,7 @@ async def cmd_report(message: Message):
             await bot.delete_message(chat_id, r.message_id)
         except TelegramBadRequest:
             pass
+        audit("голосование", f"{act} ({votes} жалоб)", target.id, target.full_name)
         await report(chat_id, f"⚖️ {mention(target)} — авто-{act} по {votes} жалобам.")
         await notify_panel(f"⚖️ Авто-{act}: {mention(target)} набрал {votes} жалоб.")
 
@@ -1405,6 +1492,8 @@ async def nl_command(message: Message):
     text = message.text.strip().lower()
     word = re.match(r"^\s*([а-яёa-z]+)", text).group(1)
     seconds = parse_duration(text)
+    audit(f"админ {message.from_user.full_name}", f"{word} {human_duration(seconds)}",
+          uid, target.full_name)
     try:
         await message.delete()
     except TelegramBadRequest:
@@ -1520,9 +1609,24 @@ def stats_text() -> str:
         f"Выдано капч: {stats['challenged']} | прошли: {stats['passed']} | "
         f"завалили: {stats['failed']}\n"
         f"Мутов за картинки: {stats['img_muted']} | банов всего: {stats['banned']}\n"
+        f"Жалоб: {stats.get('reports', 0)} | рейдов: {stats.get('raids', 0)}\n"
         f"Эталонов: {len(ref_hashes)} | стоп-слов: {len(storage.stopwords())}\n"
         f"Сейчас на капче: {sum(1 for v in pending.values() if v.get('steps'))}"
     )
+
+
+def audit_text(n: int = 15) -> str:
+    items = storage.get_audit(n)
+    if not items:
+        return "📒 Журнал действий пуст."
+    lines = ["📒 <b>Журнал действий</b> (свежие сверху)"]
+    for e in items:
+        who = e.get("target_name") or e.get("target_id")
+        line = f"{e['ts']} · {esc(e['actor'])} → <b>{esc(e['action'])}</b> · {esc(str(who))}"
+        if e.get("reason"):
+            line += f" ({esc(e['reason'])})"
+        lines.append(line)
+    return "\n".join(lines)
 
 
 @dp.message(Command("stats"))
@@ -1530,6 +1634,45 @@ async def cmd_stats(message: Message):
     if not await _admin_only(message):
         return
     await message.answer(stats_text())
+
+
+@dp.message(Command("log"))
+async def cmd_log(message: Message):
+    if not await _admin_only(message):
+        return
+    await message.answer(audit_text(20))
+
+
+@dp.message(Command("info"))
+async def cmd_info(message: Message):
+    if not await _admin_only(message):
+        return
+    uid = _target_id(message)
+    if uid is None:
+        await message.answer("Ответь /info на пользователя или укажи id.")
+        return
+    chat_id = message.chat.id
+    name, uname, status = str(uid), "—", "?"
+    try:
+        m = await bot.get_chat_member(chat_id, uid)
+        name = m.user.full_name
+        uname = f"@{m.user.username}" if m.user.username else "—"
+        status = str(m.status)
+    except TelegramBadRequest:
+        pass
+    joined = newcomer.get((chat_id, uid))
+    txt = (
+        "👤 <b>Досье</b>\n"
+        f"ID: <code>{uid}</code>\nИмя: {esc(name)}\nЮзер: {esc(uname)}\n"
+        f"Статус в чате: {esc(status)}\n"
+        f"Предупреждений: {storage.get_warns(chat_id, uid)}/{num('WARN_LIMIT')}\n"
+        f"Доверенный: {'да' if storage.is_trusted(chat_id, uid) else 'нет'} | "
+        f"ссылки: {'разрешены' if storage.link_allowed(chat_id, uid) else 'нет'}\n"
+        f"Сообщений (с запуска бота): {msgcount.get((chat_id, uid), 0)}"
+    )
+    if joined:
+        txt += f"\nВошёл: {fmt_when(joined)}"
+    await message.answer(txt)
 
 
 @dp.message(Command("help"))
@@ -1545,7 +1688,7 @@ async def cmd_help(message: Message):
         "База спама: /spam (ответом на картинку) /reload\n"
         "Стоп-слова: /addword /delword /words | Правила: /rules /setrules\n"
         "Режимы: /night /quiet /antimat on|off\n"
-        "Инфо: /settings /stats /ping\n"
+        "Инфо: /info (досье) /log (журнал) /settings /stats /ping\n"
         "Жалоба участника: /report (ответом)\n\n"
         "⚙️ Всё это удобнее в личке бота — команда /admin (пароль)."
     )
@@ -1584,7 +1727,7 @@ class CommandCleanupMiddleware(BaseMiddleware):
 # ----------------------------------------- админ-панель в личке (пароль)
 
 PANEL_TEXT = ("🛠 <b>Панель управления</b>\n"
-              "Зелёная галочка — функция включена. Жми, чтобы переключить.")
+              "Выбери раздел. ✅ — функция включена, ❌ — выключена.")
 
 PANEL_FLAGS = [
     ("ANTIMAT_ENABLED", "Антимат"),
@@ -1627,27 +1770,61 @@ PANEL_ACTS = [
 ]
 ACT_CYCLE = ["delete", "warn", "mute", "ban"]
 
+FLAG_LABELS = dict(PANEL_FLAGS)
+
+# Тумблеры, сгруппированные по разделам (чтобы не «всё в кучу»).
+PANEL_CATEGORIES = [
+    ("spam", "🛡 Антиспам", ["ANTIMAT_ENABLED", "BLOCK_LINKS", "ALLOW_MENTIONS",
+                             "BLOCK_FORWARDS", "BLOCK_CHANNEL_MESSAGES", "BLOCK_APK",
+                             "BLOCK_PREMIUM_EMOJI", "ANTIFLOOD_ENABLED"]),
+    ("entry", "🚪 Вход и капча", ["CHECK_JOIN_NAMES", "WELCOME_ENABLED", "ANTIRAID_ENABLED"]),
+    ("modes", "🌙 Режимы", ["NIGHT_MODE", "QUIET_MODE", "DELETE_SERVICE_MESSAGES",
+                            "DELETE_ADMIN_COMMANDS"]),
+    ("notify", "🔔 Уведомления", ["NOTIFY_JOINS", "NOTIFY_VIOLATIONS", "NOTIFY_REPORTS",
+                                  "REPORT_ENABLED"]),
+]
+CAT_FLAGS = {c: keys for c, _, keys in PANEL_CATEGORIES}
+CAT_TITLES = {c: title for c, title, _ in PANEL_CATEGORIES}
+
 
 def panel_keyboard() -> InlineKeyboardMarkup:
-    rows, buf = [], []
-    for key, label in PANEL_FLAGS:
-        mark = "✅" if flag(key) else "❌"
-        buf.append(InlineKeyboardButton(text=f"{mark} {label}", callback_data=f"panel:t:{key}"))
-        if len(buf) == 2:
-            rows.append(buf)
-            buf = []
-    if buf:
-        rows.append(buf)
+    """Главный экран — только разделы, без свалки тумблеров."""
+    rows = [[InlineKeyboardButton(text=title, callback_data=f"panel:cat:{c}")]
+            for c, title, _ in PANEL_CATEGORIES]
     rows.append([InlineKeyboardButton(text="🔢 Числа", callback_data="panel:nums"),
                  InlineKeyboardButton(text="⚙️ Действия", callback_data="panel:acts")])
     rows.append([InlineKeyboardButton(text="📋 Стоп-слова", callback_data="panel:words"),
                  InlineKeyboardButton(text="📜 Правила", callback_data="panel:rules")])
     rows.append([InlineKeyboardButton(text="📊 Статистика", callback_data="panel:stats"),
-                 InlineKeyboardButton(text="🔄 Обновить базу", callback_data="panel:reload")])
+                 InlineKeyboardButton(text="📒 Журнал", callback_data="panel:log")])
+    rows.append([InlineKeyboardButton(text="💾 Бэкап", callback_data="panel:backup"),
+                 InlineKeyboardButton(text="🔄 База картинок", callback_data="panel:reload")])
     if not IS_CHILD:
         rows.append([InlineKeyboardButton(text="🤖 Мои боты", callback_data="panel:bots")])
     rows.append([InlineKeyboardButton(text="❌ Закрыть", callback_data="panel:close")])
     return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def category_keyboard(cat: str) -> InlineKeyboardMarkup:
+    rows, buf = [], []
+    for key in CAT_FLAGS.get(cat, []):
+        mark = "✅" if flag(key) else "❌"
+        buf.append(InlineKeyboardButton(text=f"{mark} {FLAG_LABELS.get(key, key)}",
+                                        callback_data=f"panel:t:{key}:{cat}"))
+        if len(buf) == 2:
+            rows.append(buf)
+            buf = []
+    if buf:
+        rows.append(buf)
+    rows.append([InlineKeyboardButton(text="⬅️ Назад", callback_data="panel:back")])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def backup_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="⬇️ Выгрузить настройки", callback_data="panel:bkp_exp")],
+        [InlineKeyboardButton(text="⬆️ Загрузить (пришли файл)", callback_data="panel:bkp_imp")],
+        [InlineKeyboardButton(text="⬅️ Назад", callback_data="panel:back")]])
 
 
 def bots_keyboard(owner: int) -> InlineKeyboardMarkup:
@@ -1656,7 +1833,7 @@ def bots_keyboard(owner: int) -> InlineKeyboardMarkup:
         mark = "🟢" if c["alive"] else "🔴"
         label = f"{mark} @{c['username']}" if c.get("username") else f"{mark} {c['id']}"
         rows.append([
-            InlineKeyboardButton(text=label, callback_data="panel:noop"),
+            InlineKeyboardButton(text=label, callback_data=f"panel:binfo:{c['id']}"),
             InlineKeyboardButton(text="⏹", callback_data=f"panel:bstop:{c['id']}"),
             InlineKeyboardButton(text="🗑", callback_data=f"panel:bdel:{c['id']}"),
         ])
@@ -1692,6 +1869,17 @@ def acts_keyboard() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
+def _child_stats(bid: str) -> dict:
+    """Прочитать статистику дочернего бота из его data.json."""
+    import json
+    path = os.path.join(manager.CHILDREN_DIR, bid, "data.json")
+    try:
+        with open(path, encoding="utf-8") as f:
+            return json.load(f).get("stats", {})
+    except Exception:
+        return {}
+
+
 async def open_panel(chat_id: int):
     await bot.send_message(chat_id, PANEL_TEXT, reply_markup=panel_keyboard())
 
@@ -1721,6 +1909,22 @@ async def panel_private(message: Message):
             await message.answer("🔒 Неверный пароль. Попробуй ещё раз:")
         return
     st = panel_state.get(uid)
+
+    # Восстановление настроек из присланного файла.
+    if st == "restore" and message.document:
+        panel_state.pop(uid, None)
+        try:
+            data = (await bot.download(message.document)).read()
+            import json
+            json.loads(data.decode("utf-8"))  # проверка, что валидный JSON
+            with open(storage._PATH, "wb") as f:
+                f.write(data)
+            storage.load()
+            await message.answer("✅ Настройки восстановлены из файла.")
+        except Exception as e:
+            await message.answer(f"Не вышло (нужен валидный data.json): {esc(str(e))}")
+        await open_panel(message.chat.id)
+        return
 
     # Двухшаговое создание дочернего бота: токен -> свой пароль.
     if st == "add_bot" and message.text:
@@ -1818,12 +2022,24 @@ async def panel_cb(cb: CallbackQuery):
     parts = cb.data.split(":")
     action = parts[1]
 
-    if action == "t":
+    if action == "cat":
+        cat = parts[2]
+        await cb.answer()
+        try:
+            await cb.message.edit_text(f"{CAT_TITLES.get(cat, 'Раздел')}\nЖми, чтобы переключить:",
+                                       reply_markup=category_keyboard(cat))
+        except TelegramBadRequest:
+            pass
+    elif action == "t":
         key = parts[2]
+        cat = parts[3] if len(parts) > 3 else None
         storage.set_flag(key, not flag(key))
         await cb.answer("Переключено")
+        kb = category_keyboard(cat) if cat else panel_keyboard()
+        title = (f"{CAT_TITLES.get(cat, 'Раздел')}\nЖми, чтобы переключить:"
+                 if cat else PANEL_TEXT)
         try:
-            await cb.message.edit_text(PANEL_TEXT, reply_markup=panel_keyboard())
+            await cb.message.edit_text(title, reply_markup=kb)
         except TelegramBadRequest:
             pass
     elif action == "back":
@@ -1832,6 +2048,27 @@ async def panel_cb(cb: CallbackQuery):
             await cb.message.edit_text(PANEL_TEXT, reply_markup=panel_keyboard())
         except TelegramBadRequest:
             pass
+    elif action == "backup":
+        await cb.answer()
+        try:
+            await cb.message.edit_text(
+                "💾 <b>Бэкап настроек</b>\nВыгрузи файл настроек или загрузи свой "
+                "(стоп-слова, варны, флаги, правила).", reply_markup=backup_keyboard())
+        except TelegramBadRequest:
+            pass
+    elif action == "bkp_exp":
+        await cb.answer("Отправляю файл…")
+        from aiogram.types import FSInputFile
+        try:
+            storage.save()  # сбросить актуальное на диск
+            await bot.send_document(cb.message.chat.id, FSInputFile(storage._PATH, filename="data.json"))
+        except Exception as e:
+            await bot.send_message(cb.message.chat.id, f"Не вышло: {esc(str(e))}")
+    elif action == "bkp_imp":
+        panel_state[uid] = "restore"
+        await cb.answer()
+        await bot.send_message(cb.message.chat.id,
+                               "⬆️ Пришли файл <code>data.json</code> документом — заменю настройки.")
     elif action == "stats":
         await cb.answer()
         try:
@@ -1946,6 +2183,31 @@ async def panel_cb(cb: CallbackQuery):
             await cb.message.edit_reply_markup(reply_markup=bots_keyboard(uid))
         except TelegramBadRequest:
             pass
+    elif action == "log":
+        await cb.answer()
+        try:
+            await cb.message.edit_text(audit_text(20), reply_markup=back_keyboard())
+        except TelegramBadRequest:
+            pass
+    elif action == "binfo":
+        bid = parts[2]
+        if not manager.owns(bid, uid):
+            await cb.answer("Это не твой бот.", show_alert=True)
+            return
+        await cb.answer()
+        s = _child_stats(bid)
+        running = "🟢 работает" if manager.alive(bid) else "🔴 остановлен"
+        txt = (f"🤖 <b>Бот {bid}</b> — {running}\n"
+               f"Банов: {s.get('banned', 0)} | мутов за картинки: {s.get('img_muted', 0)}\n"
+               f"Капч: {s.get('challenged', 0)} (прошли {s.get('passed', 0)}, "
+               f"завалили {s.get('failed', 0)})\n"
+               f"Жалоб: {s.get('reports', 0)} | рейдов: {s.get('raids', 0)}")
+        kb = InlineKeyboardMarkup(inline_keyboard=[[
+            InlineKeyboardButton(text="⬅️ К ботам", callback_data="panel:bots")]])
+        try:
+            await cb.message.edit_text(txt, reply_markup=kb)
+        except TelegramBadRequest:
+            pass
     elif action == "noop":
         await cb.answer()
     elif action == "close":
@@ -1975,6 +2237,7 @@ async def main():
         n = manager.start_all()  # поднять дочерних ботов
         if n:
             log.info("Запущено дочерних ботов: %d", n)
+        asyncio.create_task(watchdog())  # следить за дочерними
     me = await bot.get_me()
     role = "дочерний" if IS_CHILD else "родительский"
     log.info("Запущен как @%s (%s). Жду новичков…", me.username, role)

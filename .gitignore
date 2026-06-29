@@ -24,6 +24,10 @@ data.json.tmp
 children.json
 children/
 
+# Логи
+*.log
+*.log.*
+
 # Модели/кэш (скачиваются автоматически)
 *.onnx
 

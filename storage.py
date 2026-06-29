@@ -25,7 +25,10 @@ _DEFAULT = {
     "strs": {},               # рантайм-оверрайды строковых (действия и т.п.)
     "stats": {},              # сохранённая статистика
     "rules": "",              # текст правил группы
+    "audit": [],              # журнал действий модерации (последние N)
 }
+
+AUDIT_LIMIT = 200
 
 def _fresh() -> dict:
     return {k: json.loads(json.dumps(v)) for k, v in _DEFAULT.items()}
@@ -191,3 +194,16 @@ def load_stats() -> dict:
 def save_stats(stats: dict) -> None:
     _data["stats"] = dict(stats)
     save()
+
+
+# --- журнал действий (audit log) ---
+
+def add_audit(entry: dict) -> None:
+    log = _data.setdefault("audit", [])
+    log.append(entry)
+    del log[:-AUDIT_LIMIT]  # держим только последние AUDIT_LIMIT
+    save()
+
+
+def get_audit(n: int = 15) -> list[dict]:
+    return list(reversed(_data.get("audit", [])[-n:]))
