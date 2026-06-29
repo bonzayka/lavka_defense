@@ -47,6 +47,7 @@ from aiogram.types import (
 from aiogram.exceptions import TelegramBadRequest, TelegramRetryAfter, TelegramForbiddenError
 
 import config
+import gore
 import manager
 import storage
 import textguard
@@ -1109,6 +1110,14 @@ async def on_media(message: Message):
         cls, score = hit
         await handle_violation(message, f"18+ контент ({cls}, {score:.0%})")
         return
+
+    # 3) Шок-контент / гор (CLIP, если установлен).
+    if gore.available():
+        g = await asyncio.to_thread(gore.detect, data, config.GORE_THRESHOLD)
+        if g:
+            label, score = g
+            await handle_violation(message, f"шок-контент/гор ({score:.0%})")
+            return
 
 
 @dp.callback_query(F.data.startswith("mod:"))
@@ -2258,6 +2267,8 @@ async def main():
     stats.update(storage.load_stats())  # восстановить счётчики
     load_reference_hashes()
     load_nsfw_detector()
+    if config.GORE_ENABLED:
+        gore.load(config.GORE_MODEL)
     dp.message.outer_middleware(CommandCleanupMiddleware())  # самый внешний: удаляет команду после обработки
     dp.message.outer_middleware(TrackMiddleware())
     dp.message.outer_middleware(ModerationMiddleware())

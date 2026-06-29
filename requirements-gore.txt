@@ -1,0 +1,9 @@
+# Тяжёлый стек для детектора шок-контента/гора (CLIP). Ставить ОТДЕЛЬНО и
+# только если нужен гор-слой. ~1 ГБ ОЗУ, ~1 ГБ на диске.
+#
+# На Linux сначала поставь CPU-версию torch (иначе подтянется огромный CUDA):
+#   pip install torch --index-url https://download.pytorch.org/whl/cpu
+# затем:
+#   pip install -r requirements-gore.txt
+torch>=2.2
+transformers>=4.40

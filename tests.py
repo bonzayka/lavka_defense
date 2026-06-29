@@ -135,6 +135,12 @@ check("rules: t.me без схемы -> https", 'href="https://t.me/y"'
       in bot.render_rules("[c](t.me/y)"))
 check("rules: javascript не линкуется", "<a" not in bot.render_rules("[x](javascript:alert(1))"))
 
+# ---- gore-детектор: опционален и мягко деградирует ----
+import gore as _gore
+check("gore: без load недоступен", _gore.available() is False)
+check("gore: detect без модели -> None", _gore.detect(b"x", 0.6) is None)
+check("gore: bot подключил модуль", hasattr(bot, "gore"))
+
 
 # ---- детект потери прав (по тексту ошибки) ----
 async def run_rights():

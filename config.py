@@ -51,6 +51,13 @@ NSFW_BAD_CLASSES = [
     "FEMALE_BREAST_EXPOSED",
 ]
 
+# --- Распознавание шок-контента / гора (CLIP, локально) ---
+# Кровь, трупы, расчленёнка, насилие. Требует torch+transformers
+# (requirements-gore.txt). Дочерним отключается через env GORE_ENABLED=0.
+GORE_ENABLED = os.environ.get("GORE_ENABLED", "1") not in ("0", "false", "False")
+GORE_MODEL = "openai/clip-vit-base-patch32"
+GORE_THRESHOLD = 0.60   # вероятность «плохой» группы (0..1); меньше = строже
+
 # Удалять ли сообщение капчи после прохождения/бана (чтобы не засорять чат).
 DELETE_CAPTCHA_MESSAGE = True
 

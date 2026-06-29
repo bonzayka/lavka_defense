@@ -19,9 +19,10 @@ CHILDREN_FILE = os.path.join(BASE, "children.json")
 CHILDREN_DIR = os.path.join(BASE, "children")
 BOT_SCRIPT = os.path.join(BASE, "bot.py")
 
-# По умолчанию у дочерних ботов NudeNet выключен (экономия ОЗУ). Поставь True,
-# если ОЗУ хватает и нужна проверка 18+ на каждом боте.
+# По умолчанию у дочерних ботов тяжёлые ИИ-модели выключены (экономия ОЗУ):
+# NudeNet (~400 МБ) и CLIP-гор (~1 ГБ). Включи, если памяти хватает.
 CHILD_NSFW = False
+CHILD_GORE = False
 
 TOKEN_RE = re.compile(r"^\d{6,}:[\w-]{30,}$")
 
@@ -77,6 +78,7 @@ def spawn(entry: dict) -> None:
         "PHOTO_DIR": photo,
         "CHILD_BOT": "1",
         "NSFW_ENABLED": "1" if CHILD_NSFW else "0",
+        "GORE_ENABLED": "1" if CHILD_GORE else "0",
         # У каждого дочернего — СВОЙ пароль панели (не родительский «Benny»).
         "PANEL_PASSWORD": entry.get("password") or "",
     })
