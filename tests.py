@@ -140,6 +140,18 @@ import gore as _gore
 check("gore: без load недоступен", _gore.available() is False)
 check("gore: detect без модели -> None", _gore.detect(b"x", 0.6) is None)
 check("gore: bot подключил модуль", hasattr(bot, "gore"))
+check("gore: status() строка", isinstance(_gore.status(), str))
+check("gore: size-guard есть", _gore.MAX_BYTES > 0)
+
+# ---- триггеры / автоответы ----
+storage.add_trigger("Привет", "Здравствуй, [правила](https://t.me/x)")
+check("trigger: сохранён (lower)", "привет" in storage.triggers())
+check("trigger: del", storage.del_trigger("привет") and "привет" not in storage.triggers())
+
+# ---- новые команды зарегистрированы ----
+cmd_names = {getattr(h.callback, "__name__", "") for h in bot.dp.message.handlers}
+for c in ("cmd_diag", "cmd_check", "cmd_addtrigger", "cmd_setwelcome", "on_trigger"):
+    check(f"handler {c}", c in cmd_names)
 
 
 # ---- детект потери прав (по тексту ошибки) ----

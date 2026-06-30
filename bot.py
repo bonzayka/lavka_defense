@@ -84,6 +84,8 @@ recent: dict[tuple[int, int], deque] = {}          # последние сооб
 flagged: dict[tuple[int, int], datetime] = {}      # антидубль уведомлений
 admins_cache: dict[int, tuple[set, datetime]] = {} # кэш админов
 flood: dict[tuple[int, int], deque] = {}           # тайминги сообщений (антифлуд)
+repeat: dict[tuple[int, int], list] = {}           # [последний_текст, счётчик] (анти-повтор)
+trigger_cooldown: dict[int, datetime] = {}         # троттлинг автоответов по чату
 night_notice: dict[int, datetime] = {}             # троттлинг уведомления ночного режима
 newcomer: dict[tuple[int, int], datetime] = {}     # когда юзер вошёл (ограничение новичков)
 raid_joins: dict[int, deque] = {}                  # тайминги входов (антирейд)
@@ -785,6 +787,21 @@ class ModerationMiddleware(BaseMiddleware):
             await apply_punishment(msg, "флуд", action_for("ANTIFLOOD_ACTION"))
             return True
 
+        # Анти-повтор: одинаковые сообщения подряд.
+        body = (msg.text or msg.caption or "").strip().lower()
+        if flag("ANTIREPEAT_ENABLED") and body:
+            rk = (chat_id, user.id)
+            st = repeat.get(rk)
+            if st and st[0] == body:
+                st[1] += 1
+            else:
+                repeat[rk] = [body, 1]
+                st = repeat[rk]
+            if st[1] >= num("ANTIREPEAT_COUNT"):
+                repeat.pop(rk, None)
+                await apply_punishment(msg, "повтор сообщений", action_for("ANTIREPEAT_ACTION"))
+                return True
+
         # Мат и стоп-слова.
         text = msg.text or msg.caption or ""
         if text:
@@ -867,8 +884,10 @@ async def send_welcome(chat_id: int, user):
         kb = InlineKeyboardMarkup(inline_keyboard=[
             [InlineKeyboardButton(text=b[0], url=b[1])] for b in config.WELCOME_BUTTONS
         ])
+    text = storage.get_str("WELCOME_TEXT", config.WELCOME_TEXT)
     try:
-        await bot.send_message(chat_id, f"{mention(user)}, {esc(config.WELCOME_TEXT)}", reply_markup=kb)
+        await bot.send_message(chat_id, f"{mention(user)}, {render_rules(text)}",
+                               reply_markup=kb, disable_web_page_preview=True)
     except TelegramBadRequest:
         pass
 
@@ -958,9 +977,10 @@ async def challenge(chat_id: int, user) -> None:
 @dp.chat_join_request()
 async def on_join_request(req: ChatJoinRequest):
     """Авто-приём заявок на вступление (мат/стоп-слова в имени -> отклонить)."""
+    chat_id, user = req.chat.id, req.from_user
+    log.info("Заявка на вступление: %s (%s) в чат %s", user.id, user.full_name, chat_id)
     if not flag("AUTO_ACCEPT"):
         return
-    chat_id, user = req.chat.id, req.from_user
     if flag("CHECK_JOIN_NAMES"):
         bad = textguard.is_bad_name(
             f"{user.full_name or ''} {user.username or ''}", storage.stopwords())
@@ -1136,9 +1156,9 @@ async def on_media(message: Message):
         await handle_violation(message, f"18+ контент ({cls}, {score:.0%})")
         return
 
-    # 3) Шок-контент / гор (CLIP, если установлен).
-    if gore.available():
-        g = await asyncio.to_thread(gore.detect, data, config.GORE_THRESHOLD)
+    # 3) Шок-контент / гор (CLIP, если установлен и включён).
+    if gore.available() and flag("GORE_ON"):
+        g = await asyncio.to_thread(gore.detect, data, num("GORE_THRESHOLD_PCT") / 100)
         if g:
             label, score = g
             await handle_violation(message, f"шок-контент/гор ({score:.0%})")
@@ -1299,17 +1319,71 @@ async def cmd_check(message: Message):
     if gore.available():
         g = await asyncio.to_thread(gore.detect, data, 0.0)
         goreline = f"вероятность гора {g[1]:.0%}" if g else "—"
-        gore_status = "✅ загружен"
     else:
         goreline = "—"
-        gore_status = "❌ НЕ загружен (нет torch/transformers или GORE_ENABLED=0)"
 
     await message.answer(
         "🔎 <b>Проверка картинки</b>\n"
         f"Хеш-база: {hashline} (порог {config.IMAGE_MATCH_PERCENT}%)\n"
         f"NudeNet 18+: {nsfwline}\n"
-        f"Гор-детектор: {gore_status}\n"
-        f"Гор: {goreline} (порог {config.GORE_THRESHOLD:.0%})"
+        f"Гор-детектор: {esc(gore.status())} | проверка: {'вкл' if flag('GORE_ON') else 'выкл'}\n"
+        f"Гор: {goreline} (порог {num('GORE_THRESHOLD_PCT')}%)\n\n"
+        "Если детектор не загружен или что-то не так — команда /diag."
+    )
+
+
+@dp.message(Command("diag"))
+async def cmd_diag(message: Message):
+    """Полная самодиагностика: ИИ-модели, апдейты, права бота в этом чате."""
+    if not await _admin_only(message):
+        return
+    # torch
+    try:
+        import torch
+        torch_line = f"✅ torch {torch.__version__}"
+    except Exception as e:
+        torch_line = f"❌ {type(e).__name__}: {e}"
+    # transformers
+    try:
+        import transformers
+        tr_line = f"✅ transformers {transformers.__version__}"
+    except Exception as e:
+        tr_line = f"❌ {type(e).__name__}: {e}"
+
+    updates = ", ".join(dp.resolve_used_update_types())
+
+    # права бота в текущем чате
+    rights = "не в группе"
+    if message.chat.type in ("group", "supergroup"):
+        try:
+            me = await bot.get_me()
+            cm = await bot.get_chat_member(message.chat.id, me.id)
+            st = str(cm.status)
+            if st == "administrator":
+                rights = (f"админ | бан:{'✅' if cm.can_restrict_members else '❌'} "
+                          f"удаление:{'✅' if cm.can_delete_messages else '❌'} "
+                          f"приём заявок:{'✅' if cm.can_invite_users else '❌'}")
+            else:
+                rights = f"⚠️ НЕ админ ({st}) — модерация не работает"
+        except TelegramBadRequest as e:
+            rights = f"не смог проверить: {e}"
+
+    await message.answer(
+        "🩺 <b>Диагностика</b>\n"
+        f"<b>Картинки/ИИ:</b>\n"
+        f"• {torch_line}\n• {tr_line}\n"
+        f"• Гор (CLIP): {esc(gore.status())} | GORE_ENABLED={config.GORE_ENABLED}\n"
+        f"• NudeNet: {'✅' if nsfw_detector else '❌'} | NSFW_ENABLED={config.NSFW_ENABLED}\n"
+        f"• Эталонов в базе: {len(ref_hashes)}\n\n"
+        f"<b>Заявки/апдейты:</b>\n"
+        f"• Автоприём (AUTO_ACCEPT): {'вкл' if flag('AUTO_ACCEPT') else 'выкл'}\n"
+        f"• Подписка на апдейты: {esc(updates)}\n"
+        f"• chat_join_request в подписке: "
+        f"{'✅' if 'chat_join_request' in updates else '❌'}\n\n"
+        f"<b>Права бота в этом чате:</b>\n• {esc(rights)}\n\n"
+        "Если «приём заявок ❌» — выдай боту право «Добавление участников» и включи "
+        "в настройках группы «Заявки на вступление». Гор не загружен → /check покажет ошибку, "
+        "ставь torch+transformers (requirements-gore.txt)."
     )
 
 
@@ -1492,6 +1566,64 @@ async def cmd_setrules(message: Message):
         return
     storage.set_rules(txt)
     await message.answer("✅ Правила сохранены. Проверь: /rules", disable_web_page_preview=True)
+
+
+@dp.message(Command("setwelcome"))
+async def cmd_setwelcome(message: Message):
+    if not await _admin_only(message):
+        return
+    arg = (message.text or "").split(maxsplit=1)
+    txt = (arg[1].strip() if len(arg) > 1
+           else ((message.reply_to_message.text or "").strip() if message.reply_to_message else ""))
+    if not txt:
+        await message.answer("Использование: /setwelcome текст. Ссылки: [текст](https://...).")
+        return
+    storage.set_str("WELCOME_TEXT", txt)
+    storage.set_flag("WELCOME_ENABLED", True)
+    await message.answer("✅ Приветствие сохранено и включено.", disable_web_page_preview=True)
+
+
+@dp.message(Command("addtrigger"))
+async def cmd_addtrigger(message: Message):
+    if not await _admin_only(message):
+        return
+    arg = (message.text or "").split(maxsplit=1)
+    if len(arg) < 2 or "|" not in arg[1]:
+        await message.answer("Использование: /addtrigger ключ | ответ\n"
+                             "Пример: /addtrigger правила | Читай [тут](https://t.me/...)")
+        return
+    key, reply = arg[1].split("|", 1)
+    key, reply = key.strip(), reply.strip()
+    if not key or not reply:
+        await message.answer("Нужны и ключ, и ответ через | .")
+        return
+    storage.add_trigger(key, reply)
+    await message.answer(f"✅ Автоответ на «{esc(key)}» сохранён ({len(storage.triggers())} всего).")
+
+
+@dp.message(Command("deltrigger"))
+async def cmd_deltrigger(message: Message):
+    if not await _admin_only(message):
+        return
+    arg = (message.text or "").split(maxsplit=1)
+    if len(arg) < 2:
+        await message.answer("Использование: /deltrigger ключ")
+        return
+    if storage.del_trigger(arg[1]):
+        await message.answer("✅ Удалено.")
+    else:
+        await message.answer("Такого триггера нет.")
+
+
+@dp.message(Command("triggers"))
+async def cmd_triggers(message: Message):
+    if not await _admin_only(message):
+        return
+    trg = storage.triggers()
+    if not trg:
+        await message.answer("Автоответов нет. Добавить: /addtrigger ключ | ответ")
+    else:
+        await message.answer("🔔 Автоответы:\n" + "\n".join(f"• {esc(k)}" for k in trg))
 
 
 async def _ack(chat_id: int, text: str, seconds: int = 5):
@@ -1787,8 +1919,9 @@ async def cmd_help(message: Message):
         "/warn /unwarn — предупреждения | /whitelist — ссылки | /trust — доверенный\n"
         "База спама: /spam (ответом на картинку) /reload\n"
         "Стоп-слова: /addword /delword /words | Правила: /rules /setrules\n"
+        "Приветствие: /setwelcome | Автоответы: /addtrigger ключ | ответ, /deltrigger, /triggers\n"
         "Режимы: /night /quiet /antimat on|off\n"
-        "Инфо: /info (досье) /log (журнал) /settings /stats /ping\n"
+        "Инфо: /info (досье) /log (журнал) /diag /check (ответом на фото) /settings /stats /ping\n"
         "Жалоба участника: /report (ответом)\n\n"
         "⚙️ Всё это удобнее в личке бота — команда /admin (пароль)."
     )
@@ -1797,6 +1930,28 @@ async def cmd_help(message: Message):
 @dp.message(Command("ping"))
 async def cmd_ping(message: Message):
     await message.answer("pong ✅ бот живой")
+
+
+@dp.message(F.text, F.chat.type.in_({"group", "supergroup"}))
+async def on_trigger(message: Message):
+    """Автоответы на ключевые слова. Регистрируется ПОСЛЕ всех команд."""
+    if not flag("TRIGGERS_ENABLED"):
+        return
+    trg = storage.triggers()
+    if not trg:
+        return
+    low = textguard.normalize(message.text)
+    for key, reply in trg.items():
+        if key in low:
+            last = trigger_cooldown.get(message.chat.id)
+            if last and (now() - last).total_seconds() < 5:
+                return
+            trigger_cooldown[message.chat.id] = now()
+            try:
+                await message.reply(render_rules(reply), disable_web_page_preview=True)
+            except TelegramBadRequest:
+                pass
+            return
 
 
 @dp.edited_message()
@@ -1837,7 +1992,10 @@ PANEL_FLAGS = [
     ("BLOCK_CHANNEL_MESSAGES", "Каналы"),
     ("BLOCK_APK", ".apk"),
     ("BLOCK_PREMIUM_EMOJI", "Прем.эмодзи"),
+    ("GORE_ON", "Шок-контент/гор"),
     ("ANTIFLOOD_ENABLED", "Антифлуд"),
+    ("ANTIREPEAT_ENABLED", "Анти-повтор"),
+    ("TRIGGERS_ENABLED", "Автоответы"),
     ("ANTIRAID_ENABLED", "Антирейд"),
     ("CHECK_JOIN_NAMES", "Имена"),
     ("AUTO_ACCEPT", "Автоприём заявок"),
@@ -1859,6 +2017,8 @@ PANEL_NUMS = [
     ("ANTIFLOOD_SECONDS", "Антифлуд: секунд"),
     ("WARN_LIMIT", "Лимит предупреждений"),
     ("RESTRICT_NEWCOMERS_HOURS", "Новичкам без ссылок (ч)"),
+    ("GORE_THRESHOLD_PCT", "Порог гора (%)"),
+    ("ANTIREPEAT_COUNT", "Анти-повтор: одинаковых"),
 ]
 
 # Действия за фильтры (циклически delete -> warn -> mute -> ban).
@@ -1877,7 +2037,8 @@ FLAG_LABELS = dict(PANEL_FLAGS)
 PANEL_CATEGORIES = [
     ("spam", "🛡 Антиспам", ["ANTIMAT_ENABLED", "BLOCK_LINKS", "ALLOW_MENTIONS",
                              "BLOCK_FORWARDS", "BLOCK_CHANNEL_MESSAGES", "BLOCK_APK",
-                             "BLOCK_PREMIUM_EMOJI", "ANTIFLOOD_ENABLED"]),
+                             "BLOCK_PREMIUM_EMOJI", "GORE_ON", "ANTIFLOOD_ENABLED",
+                             "ANTIREPEAT_ENABLED", "TRIGGERS_ENABLED"]),
     ("entry", "🚪 Вход и капча", ["CHECK_JOIN_NAMES", "AUTO_ACCEPT", "WELCOME_ENABLED",
                                   "ANTIRAID_ENABLED"]),
     ("modes", "🌙 Режимы", ["NIGHT_MODE", "QUIET_MODE", "DELETE_SERVICE_MESSAGES",
@@ -2349,9 +2510,14 @@ async def main():
         asyncio.create_task(watchdog())  # следить за дочерними
     me = await bot.get_me()
     role = "дочерний" if IS_CHILD else "родительский"
-    log.info("Запущен как @%s (%s). Жду новичков…", me.username, role)
+    updates = list(dp.resolve_used_update_types())
+    for u in ("chat_join_request", "chat_member"):  # подстраховка: точно подписаны
+        if u not in updates:
+            updates.append(u)
+    log.info("Запущен как @%s (%s). Подписка на апдейты: %s", me.username, role, updates)
+    log.info("Гор-детектор: %s", gore.status())
     try:
-        await dp.start_polling(bot, allowed_updates=dp.resolve_used_update_types())
+        await dp.start_polling(bot, allowed_updates=updates)
     finally:
         if not IS_CHILD:
             manager.stop_all()

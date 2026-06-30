@@ -14,6 +14,7 @@
 
 import io
 import logging
+import traceback
 
 from PIL import Image
 
@@ -22,6 +23,7 @@ log = logging.getLogger("antispam")
 _model = None
 _processor = None
 _loaded = False
+load_error = ""   # текст ошибки последней попытки загрузки (для /diag)
 
 # Описания «плохого» контента (что ловим) и «нормального» (фон).
 BAD_PROMPTS = [
@@ -45,7 +47,7 @@ SAFE_PROMPTS = [
 
 def load(model_name: str = "openai/clip-vit-base-patch32") -> None:
     """Поднять CLIP (один раз). Тихо отключается, если зависимостей нет."""
-    global _model, _processor, _loaded
+    global _model, _processor, _loaded, load_error
     try:
         import torch  # noqa: F401
         from transformers import CLIPModel, CLIPProcessor
@@ -53,18 +55,31 @@ def load(model_name: str = "openai/clip-vit-base-patch32") -> None:
         _model.eval()
         _processor = CLIPProcessor.from_pretrained(model_name)
         _loaded = True
+        load_error = ""
         log.info("Gore-детектор (CLIP) загружен: %s", model_name)
     except Exception as e:
-        log.warning("Gore-детектор не загрузился (нет torch/transformers?): %s", e)
+        load_error = f"{type(e).__name__}: {e}"
+        log.warning("Gore-детектор НЕ загрузился: %s", load_error)
+        log.debug("gore load traceback:\n%s", traceback.format_exc())
+
+
+def status() -> str:
+    """Короткий статус для диагностики."""
+    if _loaded:
+        return "✅ загружен"
+    return f"❌ не загружен ({load_error})" if load_error else "❌ выключен"
 
 
 def available() -> bool:
     return _loaded
 
 
+MAX_BYTES = 12 * 1024 * 1024  # очень большие картинки не гоняем (CPU медленный)
+
+
 def detect(data: bytes, threshold: float):
     """Синхронно (звать через asyncio.to_thread). (метка, вероятность) или None."""
-    if not _loaded:
+    if not _loaded or len(data) > MAX_BYTES:
         return None
     try:
         import torch

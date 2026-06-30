@@ -26,6 +26,7 @@ _DEFAULT = {
     "stats": {},              # сохранённая статистика
     "rules": "",              # текст правил группы
     "audit": [],              # журнал действий модерации (последние N)
+    "triggers": {},           # ключевое_слово -> ответ (автоответы)
 }
 
 AUDIT_LIMIT = 200
@@ -194,6 +195,25 @@ def load_stats() -> dict:
 def save_stats(stats: dict) -> None:
     _data["stats"] = dict(stats)
     save()
+
+
+# --- триггеры / автоответы ---
+
+def triggers() -> dict:
+    return _data.setdefault("triggers", {})
+
+
+def add_trigger(key: str, reply: str) -> None:
+    triggers()[key.strip().lower()] = reply
+    save()
+
+
+def del_trigger(key: str) -> bool:
+    if key.strip().lower() in triggers():
+        del triggers()[key.strip().lower()]
+        save()
+        return True
+    return False
 
 
 # --- журнал действий (audit log) ---

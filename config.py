@@ -56,7 +56,9 @@ NSFW_BAD_CLASSES = [
 # (requirements-gore.txt). Дочерним отключается через env GORE_ENABLED=0.
 GORE_ENABLED = os.environ.get("GORE_ENABLED", "1") not in ("0", "false", "False")
 GORE_MODEL = "openai/clip-vit-base-patch32"
-GORE_THRESHOLD = 0.60   # вероятность «плохой» группы (0..1); меньше = строже
+GORE_THRESHOLD = 0.60   # (устар.) дублируется числом GORE_THRESHOLD_PCT ниже
+GORE_ON = True          # рантайм-вкл/выкл проверки гора (тумблер в панели)
+GORE_THRESHOLD_PCT = 60  # порог в %, редактируется из панели; меньше = строже
 
 # Удалять ли сообщение капчи после прохождения/бана (чтобы не засорять чат).
 DELETE_CAPTCHA_MESSAGE = True
@@ -93,6 +95,10 @@ ANTIFLOOD_ENABLED = True
 ANTIFLOOD_COUNT = 6           # сообщений...
 ANTIFLOOD_SECONDS = 5         # ...за столько секунд -> наказание
 ANTIFLOOD_ACTION = "mute"
+ANTIREPEAT_ENABLED = True     # одинаковые сообщения подряд = флуд
+ANTIREPEAT_COUNT = 4          # столько одинаковых подряд -> наказание
+ANTIREPEAT_ACTION = "delete"  # delete | warn | mute | ban
+TRIGGERS_ENABLED = True       # автоответы на ключевые слова (/addtrigger)
 
 # ========================= B. Стоп-слова / антимат ==========================
 ANTIMAT_ENABLED = False       # фильтр мата (+ подмена символов/гомоглифы); /antimat on — включить
