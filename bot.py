@@ -87,6 +87,7 @@ admins_cache: dict[int, tuple[set, datetime]] = {} # кэш админов
 flood: dict[tuple[int, int], deque] = {}           # тайминги сообщений (антифлуд)
 repeat: dict[tuple[int, int], list] = {}           # [последний_текст, счётчик] (анти-повтор)
 trigger_cooldown: dict[int, datetime] = {}         # троттлинг автоответов по чату
+accept_burst: dict[int, deque] = {}                # тайминги принятых заявок (антирейд автоприёма)
 night_notice: dict[int, datetime] = {}             # троттлинг уведомления ночного режима
 newcomer: dict[tuple[int, int], datetime] = {}     # когда юзер вошёл (ограничение новичков)
 raid_joins: dict[int, deque] = {}                  # тайминги входов (антирейд)
@@ -531,6 +532,13 @@ async def janitor():
                 buf.popleft()
             if not buf:
                 flood.pop(k, None)
+        for k in list(accept_burst.keys()):
+            buf = accept_burst.get(k)
+            acut = n - timedelta(seconds=num("ACCEPT_BURST_WINDOW"))
+            while buf and buf[0] < acut:
+                buf.popleft()
+            if not buf:
+                accept_burst.pop(k, None)
         ncut = n - timedelta(hours=max(1, num("RESTRICT_NEWCOMERS_HOURS")))
         for k in [k for k, t in list(newcomer.items()) if t < ncut]:
             newcomer.pop(k, None)
@@ -1043,6 +1051,25 @@ async def on_join_request(req: ChatJoinRequest):
         audit("заявки", "принята", user.id, user.full_name)
     except TelegramBadRequest as e:
         log.warning("Не смог принять заявку %s: %s", user.id, e)
+        return
+
+    # Антирейд: слишком много принятых заявок за короткое время -> выключить автоприём.
+    buf = accept_burst.setdefault(chat_id, deque(maxlen=200))
+    buf.append(now())
+    cut = now() - timedelta(seconds=num("ACCEPT_BURST_WINDOW"))
+    while buf and buf[0] < cut:
+        buf.popleft()
+    if len(buf) > num("ACCEPT_BURST_LIMIT"):
+        buf.clear()
+        storage.set_flag("AUTO_ACCEPT", False)
+        stats["raids"] += 1
+        audit("антирейд", "автоприём авто-выключен (всплеск заявок)", 0)
+        await report(chat_id, "🚨 Всплеск заявок — <b>автоприём выключен автоматически</b>. "
+                              "Новые заявки ждут ручного одобрения. Похоже на рейд — "
+                              "рекомендую /lockdown on.")
+        await notify_panel(f"🚨 В чате <code>{chat_id}</code> всплеск заявок "
+                           f"(>{num('ACCEPT_BURST_LIMIT')} за {num('ACCEPT_BURST_WINDOW')}с). "
+                           "Автоприём выключен.")
 
 
 @dp.chat_member(ChatMemberUpdatedFilter(member_status_changed=JOIN_TRANSITION))
@@ -2151,6 +2178,8 @@ PANEL_NUMS = [
     ("RESTRICT_NEWCOMERS_HOURS", "Новичкам без ссылок (ч)"),
     ("GORE_THRESHOLD_PCT", "Порог гора (%)"),
     ("ANTIREPEAT_COUNT", "Анти-повтор: одинаковых"),
+    ("ACCEPT_BURST_LIMIT", "Заявок до стопа автоприёма"),
+    ("ACCEPT_BURST_WINDOW", "Окно всплеска заявок (с)"),
 ]
 
 # Действия за фильтры (циклически delete -> warn -> mute -> ban).

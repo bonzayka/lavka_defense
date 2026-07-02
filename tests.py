@@ -199,6 +199,40 @@ async def run_rights():
 asyncio.run(run_rights())
 
 
+# ---- антирейд автоприёма: всплеск заявок -> AUTO_ACCEPT выкл ----
+async def run_burst():
+    async def no_admin(c, u):
+        return False
+    bot.is_admin = no_admin
+
+    async def user_dc(u):
+        return None  # DC не мешает
+    bot.user_dc = user_dc
+
+    async def approve(c, u):
+        return True
+
+    async def noop(*a, **k):
+        return None
+    bot.bot.approve_chat_join_request = approve
+    bot.bot.decline_chat_join_request = noop
+    bot.report = noop
+    bot.notify_panel = noop
+    bot.storage.set_flag("AUTO_ACCEPT", True)
+    bot.storage.set_flag("CHECK_JOIN_NAMES", False)
+    bot.accept_burst.clear()
+    bot.config.ACCEPT_BURST_LIMIT = 10
+    bot.config.ACCEPT_BURST_WINDOW = 15
+    C = types.SimpleNamespace
+    for i in range(11):
+        req = C(chat=C(id=-500), from_user=C(id=1000 + i, full_name="U", username=None))
+        await bot.on_join_request(req)
+    check("burst: автоприём авто-выключился", bot.storage.get_flag("AUTO_ACCEPT", True) is False)
+
+
+asyncio.run(run_burst())
+
+
 # ---- асинхронные: голосование по жалобам ----
 async def run_async():
     async def no_admin(c, u):
