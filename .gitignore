@@ -28,6 +28,10 @@ children/
 *.log
 *.log.*
 
+# Telethon-сессии (логин аккаунта!) от purge_raid.py
+*.session
+*.session-journal
+
 # Модели/кэш (скачиваются автоматически)
 *.onnx
 

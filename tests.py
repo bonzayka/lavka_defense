@@ -150,8 +150,35 @@ check("trigger: del", storage.del_trigger("привет") and "привет" not
 
 # ---- новые команды зарегистрированы ----
 cmd_names = {getattr(h.callback, "__name__", "") for h in bot.dp.message.handlers}
-for c in ("cmd_diag", "cmd_check", "cmd_addtrigger", "cmd_setwelcome", "on_trigger"):
+for c in ("cmd_diag", "cmd_check", "cmd_addtrigger", "cmd_setwelcome", "on_trigger",
+          "cmd_lockdown", "cmd_checkdc", "cmd_purgedc"):
     check(f"handler {c}", c in cmd_names)
+
+# ---- DC-декодер (round-trip) ----
+import base64 as _b64m, struct as _st
+import dcguard as _dc
+
+
+def _rle_enc(data):
+    out = bytearray(); i = 0
+    while i < len(data):
+        if data[i] == 0:
+            j = i
+            while j < len(data) and data[j] == 0 and (j - i) < 255:
+                j += 1
+            out += bytes([0, j - i]); i = j
+        else:
+            out.append(data[i]); i += 1
+    return bytes(out)
+
+
+def _fake_fid(dc):
+    payload = _st.pack("<II", 2, dc) + b"\x11\x22\x33\x44"
+    return _b64m.urlsafe_b64encode(_rle_enc(payload)).decode().rstrip("=")
+
+
+check("dc: round-trip DC1..5", all(_dc.dc_from_file_id(_fake_fid(d)) == d for d in (1, 2, 3, 4, 5)))
+check("dc: мусор -> None", _dc.dc_from_file_id("zzz!!!") is None)
 
 
 # ---- детект потери прав (по тексту ошибки) ----

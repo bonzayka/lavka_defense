@@ -48,6 +48,7 @@ from aiogram.types import (
 from aiogram.exceptions import TelegramBadRequest, TelegramRetryAfter, TelegramForbiddenError
 
 import config
+import dcguard
 import gore
 import manager
 import storage
@@ -303,6 +304,17 @@ async def get_admins(chat_id: int) -> set:
 
 async def is_admin(chat_id: int, user_id: int) -> bool:
     return user_id in await get_admins(chat_id)
+
+
+async def user_dc(user_id: int) -> int | None:
+    """DC (1..5) пользователя по его профильному фото или None (нет фото/скрыто)."""
+    try:
+        photos = await bot.get_user_profile_photos(user_id, limit=1)
+    except TelegramBadRequest:
+        return None
+    if not photos.total_count or not photos.photos or not photos.photos[0]:
+        return None
+    return dcguard.dc_from_file_id(photos.photos[0][-1].file_id)
 
 
 # ---------------------------------------------------------------- картинки
@@ -933,6 +945,13 @@ async def challenge(chat_id: int, user) -> None:
         if flag("NOTIFY_JOINS"):
             await notify_panel(event_card("👤 Вход в группу", user))
 
+        # ПАНИКА (/lockdown): банить всех входящих без капчи.
+        if flag("LOCKDOWN"):
+            pending.pop(key, None)
+            await ban_user(chat_id, user.id)
+            audit("локдаун", "бан входа", user.id, user.full_name)
+            return
+
         # Антирейд: при рейде либо баним входящих, либо просто продолжаем капчу.
         raid = await check_raid(chat_id)
         if raid and config.RAID_AUTOBAN:
@@ -940,6 +959,15 @@ async def challenge(chat_id: int, user) -> None:
             await ban_user(chat_id, user.id)
             await notify_panel(event_card("🛡 Бан по антирейду", user))
             return
+
+        # Фильтр по датацентру (DC5 = частый у ботов).
+        if config.DC_BLOCK and flag("DC_CHECK_JOIN"):
+            dc = await user_dc(user.id)
+            if dc in config.DC_BLOCK:
+                pending.pop(key, None)
+                await ban_user(chat_id, user.id)
+                audit("DC-фильтр", f"бан DC{dc}", user.id, user.full_name)
+                return
 
         # Стоп-слова/мат в имени вступающего.
         if flag("CHECK_JOIN_NAMES"):
@@ -979,6 +1007,24 @@ async def on_join_request(req: ChatJoinRequest):
     """Авто-приём заявок на вступление (мат/стоп-слова в имени -> отклонить)."""
     chat_id, user = req.chat.id, req.from_user
     log.info("Заявка на вступление: %s (%s) в чат %s", user.id, user.full_name, chat_id)
+
+    # Локдаун или DC-фильтр — отклоняем заявку сразу.
+    if flag("LOCKDOWN"):
+        try:
+            await bot.decline_chat_join_request(chat_id, user.id)
+        except TelegramBadRequest:
+            pass
+        return
+    if config.DC_BLOCK and flag("DC_CHECK_JOIN"):
+        dc = await user_dc(user.id)
+        if dc in config.DC_BLOCK:
+            try:
+                await bot.decline_chat_join_request(chat_id, user.id)
+            except TelegramBadRequest:
+                pass
+            audit("DC-фильтр", f"деклайн заявки DC{dc}", user.id, user.full_name)
+            return
+
     if not flag("AUTO_ACCEPT"):
         return
     if flag("CHECK_JOIN_NAMES"):
@@ -1385,6 +1431,75 @@ async def cmd_diag(message: Message):
         "в настройках группы «Заявки на вступление». Гор не загружен → /check покажет ошибку, "
         "ставь torch+transformers (requirements-gore.txt)."
     )
+
+
+@dp.message(Command("lockdown"))
+async def cmd_lockdown(message: Message):
+    """Паника: банить ВСЕХ входящих без капчи. /lockdown on|off."""
+    if not await _admin_only(message):
+        return
+    v = _parse_onoff(message)
+    if v is None:
+        await message.answer(f"🚨 Локдаун: {'ВКЛ' if flag('LOCKDOWN') else 'выкл'}. "
+                             "/lockdown on — банить всех входящих (при рейде), /lockdown off — снять.")
+        return
+    storage.set_flag("LOCKDOWN", v)
+    await message.answer("🚨 ЛОКДАУН ВКЛЮЧЁН — все входящие банятся без капчи."
+                         if v else "✅ Локдаун снят, обычный режим.")
+
+
+@dp.message(Command("checkdc"))
+async def cmd_checkdc(message: Message):
+    """Показать датацентр пользователя (ответом или по id)."""
+    if not await _admin_only(message):
+        return
+    uid = _target_id(message)
+    if uid is None:
+        await message.answer("Ответь /checkdc на пользователя или укажи id.")
+        return
+    dc = await user_dc(uid)
+    if dc is None:
+        await message.answer("DC не определить (нет фото или скрыто приватностью).")
+    else:
+        flag_bad = " ⚠️ в списке блокировки" if dc in config.DC_BLOCK else ""
+        await message.answer(f"Пользователь <code>{uid}</code>: <b>DC{dc}</b>{flag_bad}.")
+
+
+@dp.message(Command("purgedc"))
+async def cmd_purgedc(message: Message):
+    """Вычистить из чата DC-блок среди тех, кого бот видел (новички/писавшие)."""
+    if not await _admin_only(message):
+        return
+    if not config.DC_BLOCK:
+        await message.answer("DC_BLOCK пуст — нечего чистить.")
+        return
+    chat_id = message.chat.id
+    # кандидаты: кого бот видел входящим или писавшим в этом чате
+    cands = {u for (c, u) in newcomer if c == chat_id}
+    cands |= {u for (c, u) in recent if c == chat_id}
+    cands -= await get_admins(chat_id)
+    arg = (message.text or "").split()
+    confirm = len(arg) > 1 and arg[1].lower() in ("confirm", "go", "да")
+
+    if not confirm:
+        await message.answer(
+            f"🔎 Кандидатов на проверку DC (видел бот): <b>{len(cands)}</b>.\n"
+            f"Блокируемые DC: {config.DC_BLOCK}.\n"
+            "Это лишь те, кого бот успел увидеть — НЕ все 2к. Для полной зачистки нужен "
+            "MTProto-скрипт purge_raid.py.\n\n"
+            "Запустить бан здесь: <code>/purgedc confirm</code>")
+        return
+
+    await message.answer(f"⏳ Проверяю {len(cands)} аккаунтов по DC… (медленно из-за лимитов)")
+    banned = 0
+    for uid in cands:
+        dc = await user_dc(uid)
+        if dc in config.DC_BLOCK:
+            await ban_user(chat_id, uid)
+            banned += 1
+        await asyncio.sleep(0.3)  # троттлинг под лимиты Telegram
+    audit("DC-purge", f"бан {banned} (DC{config.DC_BLOCK})", message.from_user.id)
+    await message.answer(f"✅ Забанено по DC: <b>{banned}</b> из {len(cands)} проверенных.")
 
 
 @dp.message(Command("ban"))
@@ -1921,6 +2036,8 @@ async def cmd_help(message: Message):
         "Стоп-слова: /addword /delword /words | Правила: /rules /setrules\n"
         "Приветствие: /setwelcome | Автоответы: /addtrigger ключ | ответ, /deltrigger, /triggers\n"
         "Режимы: /night /quiet /antimat on|off\n"
+        "🚨 Рейд: /lockdown on|off (бан всех входящих) | /checkdc (DC юзера) | "
+        "/purgedc (вычистить DC5 из виденных)\n"
         "Инфо: /info (досье) /log (журнал) /diag /check (ответом на фото) /settings /stats /ping\n"
         "Жалоба участника: /report (ответом)\n\n"
         "⚙️ Всё это удобнее в личке бота — команда /admin (пароль)."
@@ -1999,6 +2116,8 @@ PANEL_FLAGS = [
     ("ANTIRAID_ENABLED", "Антирейд"),
     ("CHECK_JOIN_NAMES", "Имена"),
     ("AUTO_ACCEPT", "Автоприём заявок"),
+    ("DC_CHECK_JOIN", "DC-фильтр (DC5)"),
+    ("LOCKDOWN", "🚨 Локдаун"),
     ("WELCOME_ENABLED", "Приветствие"),
     ("REPORT_ENABLED", "Жалобы /report"),
     ("NIGHT_MODE", "Ночной режим"),
@@ -2039,8 +2158,8 @@ PANEL_CATEGORIES = [
                              "BLOCK_FORWARDS", "BLOCK_CHANNEL_MESSAGES", "BLOCK_APK",
                              "BLOCK_PREMIUM_EMOJI", "GORE_ON", "ANTIFLOOD_ENABLED",
                              "ANTIREPEAT_ENABLED", "TRIGGERS_ENABLED"]),
-    ("entry", "🚪 Вход и капча", ["CHECK_JOIN_NAMES", "AUTO_ACCEPT", "WELCOME_ENABLED",
-                                  "ANTIRAID_ENABLED"]),
+    ("entry", "🚪 Вход и капча", ["CHECK_JOIN_NAMES", "AUTO_ACCEPT", "DC_CHECK_JOIN",
+                                  "LOCKDOWN", "WELCOME_ENABLED", "ANTIRAID_ENABLED"]),
     ("modes", "🌙 Режимы", ["NIGHT_MODE", "QUIET_MODE", "DELETE_SERVICE_MESSAGES",
                             "DELETE_ADMIN_COMMANDS"]),
     ("notify", "🔔 Уведомления", ["NOTIFY_JOINS", "NOTIFY_VIOLATIONS", "NOTIFY_REPORTS",
