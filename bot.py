@@ -1338,6 +1338,19 @@ async def cmd_reload(message: Message):
     await message.answer(f"🔄 База перезагружена: {len(ref_hashes)} картинок.")
 
 
+@dp.message(Command("reloadgore"))
+async def cmd_reloadgore(message: Message):
+    """Подгрузить гор-детектор на лету (после установки torch/transformers)."""
+    if not await _admin_only(message):
+        return
+    if gore.available():
+        await message.answer("Гор-детектор уже загружен ✅")
+        return
+    await message.answer("⏳ Загружаю гор-детектор (может качать модель ~600 МБ)…")
+    await asyncio.to_thread(gore.load, config.GORE_MODEL)
+    await message.answer(f"Результат: {esc(gore.status())}")
+
+
 @dp.message(Command("check", "checkgore"))
 async def cmd_check(message: Message):
     """Диагностика: ответом на картинку показать баллы хеша/NudeNet/гора."""
