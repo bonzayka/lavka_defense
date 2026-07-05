@@ -27,6 +27,7 @@ _DEFAULT = {
     "rules": "",              # текст правил группы
     "audit": [],              # журнал действий модерации (последние N)
     "triggers": {},           # ключевое_слово -> ответ (автоответы)
+    "mod_numbers": {},        # str(user_id) -> N (для анонимных «Модератор #N»)
 }
 
 AUDIT_LIMIT = 200
@@ -214,6 +215,16 @@ def del_trigger(key: str) -> bool:
         save()
         return True
     return False
+
+
+def mod_number(user_id: int) -> int:
+    """Стабильный номер админа для анонимного режима («Модератор #N»)."""
+    m = _data.setdefault("mod_numbers", {})
+    k = str(user_id)
+    if k not in m:
+        m[k] = (max(m.values()) + 1) if m else 1
+        save()
+    return m[k]
 
 
 # --- журнал действий (audit log) ---

@@ -88,6 +88,8 @@ flood: dict[tuple[int, int], deque] = {}           # тайминги сообщ
 repeat: dict[tuple[int, int], list] = {}           # [последний_текст, счётчик] (анти-повтор)
 trigger_cooldown: dict[int, datetime] = {}         # троттлинг автоответов по чату
 accept_burst: dict[int, deque] = {}                # тайминги принятых заявок (антирейд автоприёма)
+pending_requests: dict[int, set] = {}              # chat_id -> {user_id} висящих заявок (для /clearrequests)
+votes: dict[int, dict] = {}                        # msg_id -> состояние голосования /vb
 night_notice: dict[int, datetime] = {}             # троттлинг уведомления ночного режима
 newcomer: dict[tuple[int, int], datetime] = {}     # когда юзер вошёл (ограничение новичков)
 raid_joins: dict[int, deque] = {}                  # тайминги входов (антирейд)
@@ -139,6 +141,19 @@ def esc(text) -> str:
 def mention(user) -> str:
     name = (user.full_name or "пользователь").strip() or "пользователь"
     return f'<a href="tg://user?id={user.id}">{esc(name)}</a>'
+
+
+def mod_name(user) -> str:
+    """Имя админа для решений: 'Модератор #N' в анонимном режиме, иначе ник."""
+    if flag("ANON_ADMIN"):
+        return f"Модератор #{storage.mod_number(user.id)}"
+    uname = f" (@{user.username})" if getattr(user, "username", None) else ""
+    return f"{esc(user.full_name)}{uname}"
+
+
+def id_mention(uid: int, name: str = "пользователь") -> str:
+    """Упоминание по одному id (когда объекта user нет)."""
+    return f'<a href="tg://user?id={uid}">{esc(name)}</a>'
 
 
 _MD_LINK = re.compile(r"\[([^\]]+)\]\(([^)\s]+)\)")
@@ -539,6 +554,11 @@ async def janitor():
                 buf.popleft()
             if not buf:
                 accept_burst.pop(k, None)
+        for mid in [m for m, v in list(votes.items())
+                    if (n - v.get("ts", n)).total_seconds() > 3600]:
+            votes.pop(mid, None)
+        for k in [k for k, s in list(pending_requests.items()) if not s]:
+            pending_requests.pop(k, None)
         ncut = n - timedelta(hours=max(1, num("RESTRICT_NEWCOMERS_HOURS")))
         for k in [k for k, t in list(newcomer.items()) if t < ncut]:
             newcomer.pop(k, None)
@@ -1015,39 +1035,40 @@ async def on_join_request(req: ChatJoinRequest):
     """Авто-приём заявок на вступление (мат/стоп-слова в имени -> отклонить)."""
     chat_id, user = req.chat.id, req.from_user
     log.info("Заявка на вступление: %s (%s) в чат %s", user.id, user.full_name, chat_id)
+    pending_requests.setdefault(chat_id, set()).add(user.id)  # запомнили для /clearrequests
 
-    # Локдаун или DC-фильтр — отклоняем заявку сразу.
-    if flag("LOCKDOWN"):
+    async def _decline(reason_audit=None):
         try:
             await bot.decline_chat_join_request(chat_id, user.id)
         except TelegramBadRequest:
             pass
+        pending_requests.get(chat_id, set()).discard(user.id)
+        if reason_audit:
+            audit("DC-фильтр" if reason_audit.startswith("DC") else "заявки", reason_audit,
+                  user.id, user.full_name)
+
+    # Локдаун или DC-фильтр — отклоняем заявку сразу.
+    if flag("LOCKDOWN"):
+        await _decline()
         return
     if config.DC_BLOCK and flag("DC_CHECK_JOIN"):
         dc = await user_dc(user.id)
         if dc in config.DC_BLOCK:
-            try:
-                await bot.decline_chat_join_request(chat_id, user.id)
-            except TelegramBadRequest:
-                pass
-            audit("DC-фильтр", f"деклайн заявки DC{dc}", user.id, user.full_name)
+            await _decline(f"DC-деклайн заявки DC{dc}")
             return
 
     if not flag("AUTO_ACCEPT"):
-        return
+        return  # оставляем заявку в очереди (pending_requests) — очистить: /clearrequests
     if flag("CHECK_JOIN_NAMES"):
         bad = textguard.is_bad_name(
             f"{user.full_name or ''} {user.username or ''}", storage.stopwords())
         if bad:
-            try:
-                await bot.decline_chat_join_request(chat_id, user.id)
-            except TelegramBadRequest:
-                pass
-            audit("заявки", "отклонена", user.id, user.full_name, bad)
+            await _decline(f"отклонена по имени: {bad}")
             await report(chat_id, f"🚫 Заявка отклонена: {mention(user)} — {esc(bad)}.")
             return
     try:
         await bot.approve_chat_join_request(chat_id, user.id)
+        pending_requests.get(chat_id, set()).discard(user.id)
         audit("заявки", "принята", user.id, user.full_name)
     except TelegramBadRequest as e:
         log.warning("Не смог принять заявку %s: %s", user.id, e)
@@ -1064,9 +1085,12 @@ async def on_join_request(req: ChatJoinRequest):
         storage.set_flag("AUTO_ACCEPT", False)
         stats["raids"] += 1
         audit("антирейд", "автоприём авто-выключен (всплеск заявок)", 0)
+        kb = InlineKeyboardMarkup(inline_keyboard=[[
+            InlineKeyboardButton(text="🧹 Отклонить все заявки",
+                                 callback_data=f"clearreq:{chat_id}")]])
         await report(chat_id, "🚨 Всплеск заявок — <b>автоприём выключен автоматически</b>. "
                               "Новые заявки ждут ручного одобрения. Похоже на рейд — "
-                              "рекомендую /lockdown on.")
+                              "рекомендую /lockdown on.", kb)
         await notify_panel(f"🚨 В чате <code>{chat_id}</code> всплеск заявок "
                            f"(>{num('ACCEPT_BURST_LIMIT')} за {num('ACCEPT_BURST_WINDOW')}с). "
                            "Автоприём выключен.")
@@ -1252,36 +1276,40 @@ async def on_moderation(cb: CallbackQuery):
         await cb.answer("Решать может только админ.", show_alert=True)
         return
 
-    admin = esc(cb.from_user.full_name)
+    admin = mod_name(cb.from_user)
     actor = f"админ {cb.from_user.full_name}"
+    tgt = id_mention(uid)  # ник цели (чтобы было видно, КОГО наказали)
     if action == "ban":
         await ban_user(gid, uid)
         audit(actor, "ban", uid)
         await cb.answer("Забанен")
-        result = f"🔨 Забанен. Решение: {admin}."
+        result = f"🔨 {tgt} — бан. Решение: {admin}."
     elif action == "banwipe":
         await ban_user(gid, uid)
         n = await purge_recent(gid, uid)
         audit(actor, "ban+чистка", uid)
         await cb.answer("Бан + чистка")
-        result = f"🧹 Забанен, удалено сообщений: {n}. Решение: {admin}."
+        result = f"🧹 {tgt} — бан + удалено {n} сообщ. Решение: {admin}."
     elif action == "mute":
         await mute_user(gid, uid, secs)
         audit(actor, f"mute {human_duration(secs)}", uid)
         await cb.answer("Замучен")
-        result = f"🔇 Мут ({human_duration(secs)}). Решение: {admin}."
+        result = f"🔇 {tgt} — мут ({human_duration(secs)}). Решение: {admin}."
     elif action == "unmute":
         try:
             await bot.restrict_chat_member(gid, uid, permissions=FULL)
         except TelegramBadRequest as e:
             log.warning("Не смог размутить %s: %s", uid, e)
         await cb.answer("Размучен")
-        result = f"✅ Размучен. Решение: {admin}."
+        result = f"✅ {tgt} — размут. Решение: {admin}."
     else:
         await cb.answer()
         return
+    # Дописываем решение к исходной карточке (не затираем контекст с ником цели).
+    base = cb.message.html_text if cb.message.html_text else ""
+    text = f"{base}\n\n{result}" if base else result
     try:
-        await cb.message.edit_text(result)
+        await cb.message.edit_text(text[:4000])
     except TelegramBadRequest:
         pass
 
@@ -1291,6 +1319,161 @@ async def on_hide(cb: CallbackQuery):
     await cb.answer("Скрыто")
     try:
         await cb.message.delete()
+    except TelegramBadRequest:
+        pass
+
+
+async def clear_requests(chat_id: int, actor_id: int) -> int:
+    """Отклонить все заявки, которые бот видел (pending_requests)."""
+    reqs = list(pending_requests.get(chat_id, set()))
+    declined = 0
+    for uid in reqs:
+        try:
+            await bot.decline_chat_join_request(chat_id, uid)
+            declined += 1
+        except TelegramBadRequest:
+            pass
+        pending_requests.get(chat_id, set()).discard(uid)
+        await asyncio.sleep(0.2)  # троттлинг под лимиты
+    audit("заявки", f"очистка: отклонено {declined}", actor_id)
+    return declined
+
+
+@dp.callback_query(F.data.startswith("clearreq:"))
+async def on_clearreq(cb: CallbackQuery):
+    try:
+        gid = int(cb.data.split(":")[1])
+    except (ValueError, IndexError):
+        await cb.answer()
+        return
+    if not await is_admin(gid, cb.from_user.id):
+        await cb.answer("Только админ.", show_alert=True)
+        return
+    n = len(pending_requests.get(gid, set()))
+    await cb.answer(f"Отклоняю {n} заявок…")
+    declined = await clear_requests(gid, cb.from_user.id)
+    try:
+        await cb.message.edit_text(cb.message.html_text +
+                                   f"\n\n🧹 Отклонено заявок: {declined}. ({mod_name(cb.from_user)})")
+    except TelegramBadRequest:
+        pass
+
+
+@dp.message(Command("clearrequests", "clearreq"))
+async def cmd_clearrequests(message: Message):
+    if not await _admin_only(message):
+        return
+    chat_id = message.chat.id
+    n = len(pending_requests.get(chat_id, set()))
+    if not n:
+        await message.answer("Очередь заявок пуста (бот видит только пришедшие ему апдейтом). "
+                             "Для полной зачистки ВСЕХ висящих заявок — MTProto (purge_raid.py).")
+        return
+    await message.answer(f"⏳ Отклоняю {n} заявок… (медленно из-за лимитов)")
+    declined = await clear_requests(chat_id, message.from_user.id)
+    await message.answer(f"✅ Отклонено заявок: {declined}.")
+
+
+# ------------------------------------------------ голосование /vb
+
+def vote_kb(mid: int, yes_count: int) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(inline_keyboard=[[
+        InlineKeyboardButton(text=f"👍🏻 За ({yes_count})", callback_data=f"vote:yes:{mid}"),
+        InlineKeyboardButton(text="👎🏻 Против", callback_data=f"vote:no:{mid}"),
+    ]])
+
+
+def vote_render(v: dict) -> str:
+    lines = [
+        f"👮🏻‍♂️ {v['starter_name']} запустил голосование",
+        f"✂️👉🏻 Заглушение пользователя {id_mention(v['target'], v['tname'])}.",
+        "Вы поддерживаете это решение?",
+    ]
+    if v["yes"]:
+        lines.append("\nПроголосовали:")
+        for uid, name in v["yes"].items():
+            lines.append(f"👍🏻 {esc(name)} #{uid}")
+    return "\n".join(lines)
+
+
+@dp.message(Command("vb"))
+async def cmd_vb(message: Message):
+    """Запустить голосование за заглушение пользователя (ответом на него)."""
+    if not await _admin_only(message):
+        return
+    r = message.reply_to_message
+    if not r or not r.from_user:
+        await message.answer("Ответь /vb на сообщение пользователя — запущу голосование.")
+        return
+    target = r.from_user
+    starter = message.from_user
+    try:
+        await message.delete()
+    except TelegramBadRequest:
+        pass
+    v = {"chat": message.chat.id, "target": target.id, "tname": target.full_name,
+         "starter_name": mod_name(starter), "yes": {starter.id: starter.full_name},
+         "no": set(), "done": False, "ts": now()}
+    sent = await bot.send_message(message.chat.id, vote_render(v), disable_web_page_preview=True)
+    votes[sent.message_id] = v
+    try:
+        await bot.edit_message_reply_markup(
+            message.chat.id, sent.message_id, reply_markup=vote_kb(sent.message_id, len(v["yes"])))
+    except TelegramBadRequest:
+        pass
+
+
+@dp.callback_query(F.data.startswith("vote:"))
+async def on_vote(cb: CallbackQuery):
+    try:
+        _, choice, mid_s = cb.data.split(":")
+        mid = int(mid_s)
+    except ValueError:
+        await cb.answer()
+        return
+    v = votes.get(mid)
+    if not v or v["done"]:
+        await cb.answer("Голосование завершено.")
+        return
+    uid = cb.from_user.id
+
+    if choice == "no":
+        if await is_admin(v["chat"], uid):           # админский 👎 = вето, отмена
+            v["done"] = True
+            votes.pop(mid, None)
+            await cb.answer("Голосование отменено.")
+            try:
+                await cb.message.edit_text(f"❌ Голосование отменено админом {mod_name(cb.from_user)}.")
+            except TelegramBadRequest:
+                pass
+            return
+        v["no"].add(uid)
+        v["yes"].pop(uid, None)
+    else:                                             # 👍 (в т.ч. админский — обычный голос)
+        v["yes"][uid] = cb.from_user.full_name
+        v["no"].discard(uid)
+
+    if len(v["yes"]) >= config.VOTE_LIMIT and not v["done"]:
+        v["done"] = True
+        if config.VOTE_ACTION == "ban":
+            await ban_user(v["chat"], v["target"])
+            verb = "забанен"
+        else:
+            await mute_user(v["chat"], v["target"])
+            verb = "заглушён"
+        audit("голосование", f"{config.VOTE_ACTION} ({len(v['yes'])} за)", v["target"], v["tname"])
+        await cb.answer("Решение принято")
+        try:
+            await cb.message.edit_text(f"✅ По итогам голосования ({len(v['yes'])} 👍🏻) "
+                                       f"{id_mention(v['target'], v['tname'])} {verb}.")
+        except TelegramBadRequest:
+            pass
+        votes.pop(mid, None)
+        return
+
+    await cb.answer("Голос учтён")
+    try:
+        await cb.message.edit_text(vote_render(v), reply_markup=vote_kb(mid, len(v["yes"])))
     except TelegramBadRequest:
         pass
 
@@ -1879,6 +2062,7 @@ async def nl_command(message: Message):
     text = message.text.strip().lower()
     word = re.match(r"^\s*([а-яёa-z]+)", text).group(1)
     seconds = parse_duration(text)
+    by = f" Решение: {mod_name(message.from_user)}."
     audit(f"админ {message.from_user.full_name}", f"{word} {human_duration(seconds)}",
           uid, target.full_name)
     try:
@@ -1888,38 +2072,38 @@ async def nl_command(message: Message):
 
     if word in ("мут", "mute"):
         await mute_user(chat_id, uid, seconds)
-        await report(chat_id, f"🔇 {mention(target)} в муте ({human_duration(seconds)}).",
+        await report(chat_id, f"🔇 {mention(target)} в муте ({human_duration(seconds)}).{by}",
                      mod_keyboard(chat_id, uid))
     elif word in ("размут", "unmute"):
         try:
             await bot.restrict_chat_member(chat_id, uid, permissions=FULL)
         except TelegramBadRequest:
             pass
-        await report(chat_id, f"✅ {mention(target)} размучен.")
+        await report(chat_id, f"✅ {mention(target)} размучен.{by}")
     elif word in ("бан", "ban"):
         await ban_user(chat_id, uid, seconds)
-        await report(chat_id, f"🔨 {mention(target)} забанен ({human_duration(seconds)}).")
+        await report(chat_id, f"🔨 {mention(target)} забанен ({human_duration(seconds)}).{by}")
     elif word in ("разбан", "unban"):
         try:
             await bot.unban_chat_member(chat_id, uid, only_if_banned=True)
         except TelegramBadRequest:
             pass
-        await report(chat_id, f"✅ {mention(target)} разбанен.")
+        await report(chat_id, f"✅ {mention(target)} разбанен.{by}")
     elif word in ("варн", "warn"):
         n = storage.add_warn(chat_id, uid)
         if n >= num("WARN_LIMIT"):
             storage.reset_warns(chat_id, uid)
             await (ban_user if action_for("WARN_ACTION") == "ban" else mute_user)(chat_id, uid)
-            await report(chat_id, f"🔨 {mention(target)} — лимит предупреждений.")
+            await report(chat_id, f"🔨 {mention(target)} — лимит предупреждений.{by}")
         else:
-            await report(chat_id, f"⚠️ {mention(target)}: предупреждение {n}/{num('WARN_LIMIT')}.")
+            await report(chat_id, f"⚠️ {mention(target)}: предупреждение {n}/{num('WARN_LIMIT')}.{by}")
     elif word in ("кик", "kick"):
         await bot.ban_chat_member(chat_id, uid)
         try:
             await bot.unban_chat_member(chat_id, uid)
         except TelegramBadRequest:
             pass
-        await report(chat_id, f"👢 {mention(target)} кикнут.")
+        await report(chat_id, f"👢 {mention(target)} кикнут.{by}")
 
 
 def _parse_onoff(message: Message) -> bool | None:
@@ -2076,8 +2260,8 @@ async def cmd_help(message: Message):
         "Стоп-слова: /addword /delword /words | Правила: /rules /setrules\n"
         "Приветствие: /setwelcome | Автоответы: /addtrigger ключ | ответ, /deltrigger, /triggers\n"
         "Режимы: /night /quiet /antimat on|off\n"
-        "🚨 Рейд: /lockdown on|off (бан всех входящих) | /checkdc (DC юзера) | "
-        "/purgedc (вычистить DC5 из виденных)\n"
+        "🚨 Рейд: /lockdown on|off | /checkdc | /purgedc | /clearrequests (отклонить заявки)\n"
+        "Голосование: /vb (ответом — голосование за заглушение)\n"
         "Инфо: /info (досье) /log (журнал) /diag /check (ответом на фото) /settings /stats /ping\n"
         "Жалоба участника: /report (ответом)\n\n"
         "⚙️ Всё это удобнее в личке бота — команда /admin (пароль)."
@@ -2164,6 +2348,7 @@ PANEL_FLAGS = [
     ("QUIET_MODE", "Тихий режим"),
     ("DELETE_SERVICE_MESSAGES", "Чистка сервиса"),
     ("DELETE_ADMIN_COMMANDS", "Чистка команд"),
+    ("ANON_ADMIN", "Анонимная модерация"),
     ("NOTIFY_JOINS", "Увед. входы"),
     ("NOTIFY_VIOLATIONS", "Увед. нарушения"),
     ("NOTIFY_REPORTS", "Увед. жалобы"),
@@ -2203,7 +2388,7 @@ PANEL_CATEGORIES = [
     ("entry", "🚪 Вход и капча", ["CHECK_JOIN_NAMES", "AUTO_ACCEPT", "DC_CHECK_JOIN",
                                   "LOCKDOWN", "WELCOME_ENABLED", "ANTIRAID_ENABLED"]),
     ("modes", "🌙 Режимы", ["NIGHT_MODE", "QUIET_MODE", "DELETE_SERVICE_MESSAGES",
-                            "DELETE_ADMIN_COMMANDS"]),
+                            "DELETE_ADMIN_COMMANDS", "ANON_ADMIN"]),
     ("notify", "🔔 Уведомления", ["NOTIFY_JOINS", "NOTIFY_VIOLATIONS", "NOTIFY_REPORTS",
                                   "REPORT_ENABLED"]),
 ]

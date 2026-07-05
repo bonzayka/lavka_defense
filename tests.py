@@ -233,6 +233,60 @@ async def run_burst():
 asyncio.run(run_burst())
 
 
+# ---- /vb голосование + админ-вето, /clearrequests ----
+async def run_vote_clear():
+    muted = []
+
+    async def mute(c, u, s=None):
+        muted.append(u)
+
+    async def yes_admin(c, u):
+        return u == 999  # 999 = админ, остальные — нет
+    bot.mute_user = mute
+    bot.is_admin = yes_admin
+    bot.config.VOTE_LIMIT = 3
+    bot.config.VOTE_ACTION = "mute"
+
+    class Msg:
+        html_text = ""
+        async def edit_text(self, *a, **k):
+            pass
+
+    def mk_cb(data, uid):
+        return types.SimpleNamespace(data=data, from_user=types.SimpleNamespace(id=uid, full_name="V"),
+                                     message=Msg(), answer=lambda *a, **k: _noop())
+
+    async def _noop():
+        return None
+
+    # голосование за мут юзера 7, порог 3
+    bot.votes.clear()
+    bot.votes[500] = {"chat": -1, "target": 7, "tname": "T", "starter_name": "S",
+                      "yes": {}, "no": set(), "done": False, "ts": bot.now()}
+    for voter in (11, 12, 13):
+        await bot.on_vote(mk_cb("vote:yes:500", voter))
+    check("vote: порог 3 -> мут", muted.count(7) == 1)
+
+    # админ-вето (👎) отменяет
+    bot.votes[501] = {"chat": -1, "target": 8, "tname": "T", "starter_name": "S",
+                      "yes": {}, "no": set(), "done": False, "ts": bot.now()}
+    await bot.on_vote(mk_cb("vote:no:501", 999))  # админ жмёт против
+    check("vote: админский 👎 отменяет", 501 not in bot.votes)
+
+    # clear_requests отклоняет все виденные заявки
+    declined = []
+
+    async def decl(c, u):
+        declined.append(u)
+    bot.bot.decline_chat_join_request = decl
+    bot.pending_requests[-1] = {101, 102, 103}
+    n = await bot.clear_requests(-1, 999)
+    check("clearrequests: отклонил все", n == 3 and len(declined) == 3)
+
+
+asyncio.run(run_vote_clear())
+
+
 # ---- асинхронные: голосование по жалобам ----
 async def run_async():
     async def no_admin(c, u):
