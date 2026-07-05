@@ -1278,7 +1278,11 @@ async def on_moderation(cb: CallbackQuery):
 
     admin = mod_name(cb.from_user)
     actor = f"админ {cb.from_user.full_name}"
-    tgt = id_mention(uid)  # ник цели (чтобы было видно, КОГО наказали)
+    try:  # ник цели (чтобы было видно, КОГО наказали)
+        _m = await bot.get_chat_member(gid, uid)
+        tgt = id_mention(uid, _m.user.full_name)
+    except TelegramBadRequest:
+        tgt = id_mention(uid)
     if action == "ban":
         await ban_user(gid, uid)
         audit(actor, "ban", uid)
