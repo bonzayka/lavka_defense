@@ -287,6 +287,22 @@ async def run_vote_clear():
 asyncio.run(run_vote_clear())
 
 
+# ---- внутренние роли / права ----
+storage.set_role(555, "модератор")
+check("role: модератор -> mute есть", bot.has_perm(555, "mute"))
+check("role: модератор -> ban нет", not bot.has_perm(555, "ban"))
+storage.set_role(556, "старший")
+check("role: старший -> ban есть", bot.has_perm(556, "ban"))
+storage.set_role(555, None)
+check("role: снятие", not bot.has_perm(555, "mute"))
+
+# ---- причина/срок из хвоста команды ----
+for toks, exp in [(["3", "дня", "спам"], (259200, "спам")), (["флуд"], (None, "флуд")),
+                  (["3ч"], (10800, "")), (["3ч", "флуд"], (10800, "флуд")),
+                  (["спам", "тут"], (None, "спам тут")), ([], (None, ""))]:
+    check(f"dur+reason {toks}", bot._split_dur_reason(toks) == exp)
+
+
 # ---- асинхронные: голосование по жалобам ----
 async def run_async():
     async def no_admin(c, u):

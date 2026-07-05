@@ -28,6 +28,7 @@ _DEFAULT = {
     "audit": [],              # журнал действий модерации (последние N)
     "triggers": {},           # ключевое_слово -> ответ (автоответы)
     "mod_numbers": {},        # str(user_id) -> N (для анонимных «Модератор #N»)
+    "roles": {},              # str(user_id) -> имя роли (внутренние права)
 }
 
 AUDIT_LIMIT = 200
@@ -225,6 +226,25 @@ def mod_number(user_id: int) -> int:
         m[k] = (max(m.values()) + 1) if m else 1
         save()
     return m[k]
+
+
+# --- внутренние роли/права ---
+
+def get_role(user_id: int) -> str | None:
+    return _data.setdefault("roles", {}).get(str(user_id))
+
+
+def set_role(user_id: int, role: str | None) -> None:
+    r = _data.setdefault("roles", {})
+    if role is None:
+        r.pop(str(user_id), None)
+    else:
+        r[str(user_id)] = role
+    save()
+
+
+def roles_all() -> dict:
+    return _data.setdefault("roles", {})
 
 
 # --- журнал действий (audit log) ---

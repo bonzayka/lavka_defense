@@ -89,7 +89,8 @@ repeat: dict[tuple[int, int], list] = {}           # [последний_тек�
 trigger_cooldown: dict[int, datetime] = {}         # троттлинг автоответов по чату
 accept_burst: dict[int, deque] = {}                # тайминги принятых заявок (антирейд автоприёма)
 pending_requests: dict[int, set] = {}              # chat_id -> {user_id} висящих заявок (для /clearrequests)
-votes: dict[int, dict] = {}                        # msg_id -> состояние голосования /vb
+votes: dict[int, dict] = {}                        # vote_id -> состояние голосования /vb
+vote_seq = 0                                        # счётчик id голосований
 night_notice: dict[int, datetime] = {}             # троттлинг уведомления ночного режима
 newcomer: dict[tuple[int, int], datetime] = {}     # когда юзер вошёл (ограничение новичков)
 raid_joins: dict[int, deque] = {}                  # тайминги входов (антирейд)
@@ -320,6 +321,21 @@ async def get_admins(chat_id: int) -> set:
 
 async def is_admin(chat_id: int, user_id: int) -> bool:
     return user_id in await get_admins(chat_id)
+
+
+def has_perm(user_id: int, perm: str) -> bool:
+    """Есть ли у юзера внутреннее право (по назначенной роли)."""
+    role = storage.get_role(user_id)
+    return bool(role and perm in config.ROLES.get(role, set()))
+
+
+async def can(chat_id: int, user_id: int, perm: str) -> bool:
+    """Право = Telegram-админ (всё) ИЛИ внутренняя роль с этим разрешением."""
+    return await is_admin(chat_id, user_id) or has_perm(user_id, perm)
+
+
+async def _can(message, perm: str) -> bool:
+    return bool(message.from_user and await can(message.chat.id, message.from_user.id, perm))
 
 
 async def user_dc(user_id: int) -> int | None:
@@ -1365,7 +1381,7 @@ async def on_clearreq(cb: CallbackQuery):
 
 @dp.message(Command("clearrequests", "clearreq"))
 async def cmd_clearrequests(message: Message):
-    if not await _admin_only(message):
+    if not await _can(message, "requests"):
         return
     chat_id = message.chat.id
     n = len(pending_requests.get(chat_id, set()))
@@ -1403,7 +1419,8 @@ def vote_render(v: dict) -> str:
 @dp.message(Command("vb"))
 async def cmd_vb(message: Message):
     """Запустить голосование за заглушение пользователя (ответом на него)."""
-    if not await _admin_only(message):
+    global vote_seq
+    if not await _can(message, "mute"):
         return
     r = message.reply_to_message
     if not r or not r.from_user:
@@ -1415,16 +1432,16 @@ async def cmd_vb(message: Message):
         await message.delete()
     except TelegramBadRequest:
         pass
+    vote_seq += 1
+    vid = vote_seq
     v = {"chat": message.chat.id, "target": target.id, "tname": target.full_name,
          "starter_name": mod_name(starter), "yes": {starter.id: starter.full_name},
          "no": set(), "done": False, "ts": now()}
-    sent = await bot.send_message(message.chat.id, vote_render(v), disable_web_page_preview=True)
-    votes[sent.message_id] = v
-    try:
-        await bot.edit_message_reply_markup(
-            message.chat.id, sent.message_id, reply_markup=vote_kb(sent.message_id, len(v["yes"])))
-    except TelegramBadRequest:
-        pass
+    votes[vid] = v
+    # Отправляем СРАЗУ с клавиатурой (по vote_id) — кнопки не теряются.
+    await bot.send_message(message.chat.id, vote_render(v),
+                           reply_markup=vote_kb(vid, len(v["yes"])),
+                           disable_web_page_preview=True)
 
 
 @dp.callback_query(F.data.startswith("vote:"))
@@ -1507,6 +1524,42 @@ def _target_and_duration(message: Message):
     if len(parts) > 1 and parts[1].lstrip("-").isdigit():
         return int(parts[1]), parse_duration(" ".join(parts[2:]))
     return None, None
+
+
+_UNIT_WORDS = ("нед", "недел", "дн", "ден", "дня", "дне", "дней", "день",
+               "час", "часа", "часов", "мин", "минут", "сек")
+
+
+def _is_unit(w: str) -> bool:
+    w = w.lower()
+    return w in ("ч", "м", "с", "d", "h", "m", "w", "s") or any(w.startswith(p) for p in _UNIT_WORDS)
+
+
+def _split_dur_reason(tokens: list):
+    """Из хвоста команды -> (seconds|None, reason). Длительность только в начале."""
+    if not tokens:
+        return None, ""
+    m = re.match(r"^(\d+)([а-яёa-z]+)$", tokens[0], re.I)  # склеенное «3ч», «3дня»
+    if m and _is_unit(m.group(2)):
+        return parse_duration(tokens[0]), " ".join(tokens[1:]).strip()
+    if not tokens[0].lstrip("-").isdigit():
+        return None, " ".join(tokens).strip()          # нет числа -> всё причина
+    if len(tokens) >= 2 and _is_unit(tokens[1]):        # «3 дня причина»
+        return parse_duration(tokens[0] + " " + tokens[1]), " ".join(tokens[2:]).strip()
+    return parse_duration(tokens[0]), " ".join(tokens[1:]).strip()  # «3 причина» (число=часы)
+
+
+def _target_dur_reason(message: Message):
+    """(uid, seconds|None, reason) — для /ban /mute с причиной."""
+    r = message.reply_to_message
+    parts = (message.text or "").split()
+    if r and r.from_user:
+        secs, reason = _split_dur_reason(parts[1:])
+        return r.from_user.id, secs, reason
+    if len(parts) > 1 and parts[1].lstrip("-").isdigit():
+        secs, reason = _split_dur_reason(parts[2:])
+        return int(parts[1]), secs, reason
+    return None, None, ""
 
 
 @dp.message(Command("spam"))
@@ -1663,7 +1716,7 @@ async def cmd_diag(message: Message):
 @dp.message(Command("lockdown"))
 async def cmd_lockdown(message: Message):
     """Паника: банить ВСЕХ входящих без капчи. /lockdown on|off."""
-    if not await _admin_only(message):
+    if not await _can(message, "requests"):
         return
     v = _parse_onoff(message)
     if v is None:
@@ -1678,7 +1731,7 @@ async def cmd_lockdown(message: Message):
 @dp.message(Command("checkdc"))
 async def cmd_checkdc(message: Message):
     """Показать датацентр пользователя (ответом или по id)."""
-    if not await _admin_only(message):
+    if not await _can(message, "requests"):
         return
     uid = _target_id(message)
     if uid is None:
@@ -1695,7 +1748,7 @@ async def cmd_checkdc(message: Message):
 @dp.message(Command("purgedc"))
 async def cmd_purgedc(message: Message):
     """Вычистить из чата DC-блок среди тех, кого бот видел (новички/писавшие)."""
-    if not await _admin_only(message):
+    if not await _can(message, "requests"):
         return
     if not config.DC_BLOCK:
         await message.answer("DC_BLOCK пуст — нечего чистить.")
@@ -1731,19 +1784,22 @@ async def cmd_purgedc(message: Message):
 
 @dp.message(Command("ban"))
 async def cmd_ban(message: Message):
-    if not await _admin_only(message):
+    if not await _can(message, "ban"):
         return
-    uid, seconds = _target_and_duration(message)
+    uid, seconds, reason = _target_dur_reason(message)
     if uid is None:
-        await message.answer("Ответь командой на пользователя или укажи его id. Можно срок: /ban 3 дня.")
+        await message.answer("Ответь командой на пользователя или укажи id. "
+                             "Можно срок и причину: /ban 3 дня спам.")
         return
     await ban_user(message.chat.id, uid, seconds)
-    await message.answer(f"🔨 Забанен ({human_duration(seconds)}).")
+    rp = f" Причина: {esc(reason)}." if reason else ""
+    await message.answer(f"🔨 {id_mention(uid)} забанен ({human_duration(seconds)})."
+                         f"{rp} Решение: {mod_name(message.from_user)}.")
 
 
 @dp.message(Command("unban"))
 async def cmd_unban(message: Message):
-    if not await _admin_only(message):
+    if not await _can(message, "ban"):
         return
     uid = _target_id(message)
     if uid is None:
@@ -1758,20 +1814,23 @@ async def cmd_unban(message: Message):
 
 @dp.message(Command("mute"))
 async def cmd_mute(message: Message):
-    if not await _admin_only(message):
+    if not await _can(message, "mute"):
         return
-    uid, seconds = _target_and_duration(message)
+    uid, seconds, reason = _target_dur_reason(message)
     if uid is None:
-        await message.answer("Ответь командой на пользователя. Можно срок: /mute 3 часа.")
+        await message.answer("Ответь командой на пользователя. "
+                             "Можно срок и причину: /mute 3 часа флуд.")
         return
     await mute_user(message.chat.id, uid, seconds)
-    await message.answer(f"🔇 В муте ({human_duration(seconds)}).",
+    rp = f" Причина: {esc(reason)}." if reason else ""
+    await message.answer(f"🔇 {id_mention(uid)} в муте ({human_duration(seconds)})."
+                         f"{rp} Решение: {mod_name(message.from_user)}.",
                          reply_markup=mod_keyboard(message.chat.id, uid))
 
 
 @dp.message(Command("unmute"))
 async def cmd_unmute(message: Message):
-    if not await _admin_only(message):
+    if not await _can(message, "mute"):
         return
     uid = _target_id(message)
     if uid is None:
@@ -1786,7 +1845,7 @@ async def cmd_unmute(message: Message):
 
 @dp.message(Command("warn"))
 async def cmd_warn(message: Message):
-    if not await _admin_only(message):
+    if not await _can(message, "warn"):
         return
     r = message.reply_to_message
     if not r or not r.from_user:
@@ -1808,7 +1867,7 @@ async def cmd_warn(message: Message):
 
 @dp.message(Command("unwarn"))
 async def cmd_unwarn(message: Message):
-    if not await _admin_only(message):
+    if not await _can(message, "warn"):
         return
     uid = _target_id(message)
     if uid is None:
@@ -1884,6 +1943,59 @@ async def cmd_trust(message: Message):
         return
     added = storage.toggle_trusted(message.chat.id, uid)
     await message.answer("✅ Добавлен в доверенные." if added else "➖ Убран из доверенных.")
+
+
+@dp.message(Command("setrole"))
+async def cmd_setrole(message: Message):
+    """Выдать внутреннюю роль (модерация без прав админа группы)."""
+    if not await _can(message, "manage"):
+        return
+    parts = (message.text or "").split()
+    r = message.reply_to_message
+    if r and r.from_user:
+        uid, role = r.from_user.id, (parts[1].lower() if len(parts) > 1 else "")
+    elif len(parts) > 2 and parts[1].lstrip("-").isdigit():
+        uid, role = int(parts[1]), parts[2].lower()
+    else:
+        await message.answer("Использование: /setrole роль (ответом) или /setrole id роль.\n"
+                             f"Роли: {', '.join(config.ROLES)}")
+        return
+    if role not in config.ROLES:
+        await message.answer(f"Нет роли «{esc(role)}». Доступны: {', '.join(config.ROLES)}")
+        return
+    storage.set_role(uid, role)
+    await message.answer(f"✅ {id_mention(uid)} — роль <b>{esc(role)}</b> "
+                         f"({', '.join(sorted(config.ROLES[role]))}).")
+
+
+@dp.message(Command("delrole"))
+async def cmd_delrole(message: Message):
+    if not await _can(message, "manage"):
+        return
+    uid = _target_id(message)
+    if uid is None:
+        await message.answer("Ответь /delrole на пользователя или укажи id.")
+        return
+    storage.set_role(uid, None)
+    await message.answer("✅ Роль снята.")
+
+
+@dp.message(Command("roles"))
+async def cmd_roles(message: Message):
+    if not await _can(message, "manage"):
+        return
+    lines = ["🎖 <b>Роли</b> (Telegram-админы имеют все права по умолчанию)\n",
+             "Доступные:"]
+    for name, perms in config.ROLES.items():
+        lines.append(f"• <b>{esc(name)}</b>: {', '.join(sorted(perms))}")
+    rr = storage.roles_all()
+    if rr:
+        lines.append("\nНазначено:")
+        for u, role in rr.items():
+            lines.append(f"• <code>{u}</code> — {esc(role)}")
+    else:
+        lines.append("\nПока никому. Выдать: /setrole роль (ответом).")
+    await message.answer("\n".join(lines))
 
 
 @dp.message(Command("rules"))
@@ -2055,9 +2167,14 @@ NL_PATTERN = (r"(?i)^\s*(мут|размут|бан|разбан|варн|кик
               r"(?:\s+\d+\s*[а-яёa-z.]*)?\s*$")
 
 
+_WORD_PERM = {"мут": "mute", "mute": "mute", "размут": "mute", "unmute": "mute",
+              "бан": "ban", "ban": "ban", "разбан": "ban", "unban": "ban",
+              "варн": "warn", "warn": "warn", "кик": "kick", "kick": "kick"}
+
+
 @dp.message(F.reply_to_message, F.text.regexp(NL_PATTERN))
 async def nl_command(message: Message):
-    if not await _admin_only(message):
+    if not message.from_user:
         return
     target = message.reply_to_message.from_user
     if not target:
@@ -2065,6 +2182,8 @@ async def nl_command(message: Message):
     chat_id, uid = message.chat.id, target.id
     text = message.text.strip().lower()
     word = re.match(r"^\s*([а-яёa-z]+)", text).group(1)
+    if not await can(chat_id, message.from_user.id, _WORD_PERM.get(word, "ban")):
+        return
     seconds = parse_duration(text)
     by = f" Решение: {mod_name(message.from_user)}."
     audit(f"админ {message.from_user.full_name}", f"{word} {human_duration(seconds)}",
@@ -2256,10 +2375,11 @@ async def cmd_help(message: Message):
         return
     await message.answer(
         "🛡 <b>Команды админов</b>\n"
-        "Модерация: /ban /unban /mute /unmute (ответом; можно срок: /mute 3 дня)\n"
+        "Модерация: /ban /unban /mute /unmute (ответом; срок и причина: /mute 3 дня флуд)\n"
         "Текстом ответом: <code>мут 3 часа</code>, <code>бан 2 дня</code>, "
         "<code>размут</code>, <code>варн</code>, <code>кик</code>\n"
         "/warn /unwarn — предупреждения | /whitelist — ссылки | /trust — доверенный\n"
+        "Роли (модерация без прав админа): /setrole роль /delrole /roles\n"
         "База спама: /spam (ответом на картинку) /reload\n"
         "Стоп-слова: /addword /delword /words | Правила: /rules /setrules\n"
         "Приветствие: /setwelcome | Автоответы: /addtrigger ключ | ответ, /deltrigger, /triggers\n"
@@ -2412,9 +2532,23 @@ def panel_keyboard() -> InlineKeyboardMarkup:
                  InlineKeyboardButton(text="📒 Журнал", callback_data="panel:log")])
     rows.append([InlineKeyboardButton(text="💾 Бэкап", callback_data="panel:backup"),
                  InlineKeyboardButton(text="🔄 База картинок", callback_data="panel:reload")])
+    rows.append([InlineKeyboardButton(text="🧹 Сброс заявок", callback_data="panel:reqs")])
     if not IS_CHILD:
         rows.append([InlineKeyboardButton(text="🤖 Мои боты", callback_data="panel:bots")])
     rows.append([InlineKeyboardButton(text="❌ Закрыть", callback_data="panel:close")])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def reqs_keyboard() -> InlineKeyboardMarkup:
+    rows = []
+    for cid, s in pending_requests.items():
+        if s:
+            rows.append([InlineKeyboardButton(
+                text=f"Чат {cid}: {len(s)} заявок — отклонить",
+                callback_data=f"panel:reqclr:{cid}")])
+    if not rows:
+        rows.append([InlineKeyboardButton(text="Очередей нет", callback_data="panel:noop")])
+    rows.append([InlineKeyboardButton(text="⬅️ Назад", callback_data="panel:back")])
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
@@ -2717,6 +2851,27 @@ async def panel_cb(cb: CallbackQuery):
     elif action == "reload":
         load_reference_hashes()
         await cb.answer(f"База обновлена: {len(ref_hashes)} картинок.", show_alert=True)
+    elif action == "reqs":
+        await cb.answer()
+        total = sum(len(s) for s in pending_requests.values())
+        try:
+            await cb.message.edit_text(
+                f"🧹 <b>Сброс заявок</b>\nВ очереди всего: {total}. "
+                "Жми чат — отклоню все его заявки, что видел бот.\n"
+                "(Полная зачистка всех висящих — purge_raid.py.)",
+                reply_markup=reqs_keyboard())
+        except TelegramBadRequest:
+            pass
+    elif action == "reqclr":
+        gid = int(parts[2])
+        n = len(pending_requests.get(gid, set()))
+        await cb.answer(f"Отклоняю {n}…")
+        declined = await clear_requests(gid, uid)
+        try:
+            await cb.message.edit_text(f"✅ Чат {gid}: отклонено {declined} заявок.",
+                                       reply_markup=reqs_keyboard())
+        except TelegramBadRequest:
+            pass
     elif action == "nums":
         await cb.answer()
         try:
