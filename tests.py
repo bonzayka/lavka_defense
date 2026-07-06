@@ -420,6 +420,85 @@ _ok_cb = all(len((b.callback_data or "").encode()) <= 64
              for r in bot.role_perm_keyboard("модератор").inline_keyboard for b in r)
 check("панель: callback_data ролей <= 64 байт", _ok_cb)
 
+# ---- владельцы (owners) ----
+storage.add_owner(12345)
+check("owner: добавлен", storage.is_owner(12345))
+check("owner: в списке", 12345 in storage.owners_all())
+check("owner: повтор не дублирует", storage.add_owner(12345) is False)
+check("owner: снят", storage.remove_owner(12345) and not storage.is_owner(12345))
+bot.owners_keyboard()
+bot.asg_pick_keyboard()
+check("панель: клавиатуры владельцев/назначения строятся", True)
+
+
+# ---- /setrole: раздаёт роли ТОЛЬКО владелец (даже TG-админ не может) ----
+async def run_owner_gate():
+    async def yes_admin(c, u):
+        return True                       # даже если TG-админ — не-владельцу нельзя
+    bot.is_admin = yes_admin
+    storage.set_role(2001, None)
+    for o in list(storage.owners_all()):
+        storage.remove_owner(o)
+
+    async def answer(*a, **k):
+        return None
+
+    def msg(actor):
+        rep = types.SimpleNamespace(from_user=types.SimpleNamespace(id=2001, full_name="T"))
+        return types.SimpleNamespace(
+            from_user=types.SimpleNamespace(id=actor, full_name="A"),
+            chat=types.SimpleNamespace(id=-9),
+            text="/setrole модератор", reply_to_message=rep, answer=answer)
+
+    await bot.cmd_setrole(msg(3001))
+    check("owner-gate: не-владелец (даже админ) роль НЕ выдаёт", storage.get_role(2001) is None)
+    storage.add_owner(3001)
+    await bot.cmd_setrole(msg(3001))
+    check("owner-gate: владелец роль выдаёт", storage.get_role(2001) == "модератор")
+    storage.set_role(2001, None)
+    storage.remove_owner(3001)
+
+
+asyncio.run(run_owner_gate())
+
+
+# ---- фото-капча: кнопка «Заменить картинку» ----
+check("capnew: кнопка в клавиатуре",
+      any(b.callback_data == "capnew"
+          for r in bot.captcha_photo_kb().inline_keyboard for b in r))
+
+
+async def run_capnew():
+    chat, uid = -7, 4001
+    steps = [{"q": "Шаг1", "answer": "11111", "kind": "image"},
+             {"q": "Шаг2", "answer": "7", "wrongs": ["1", "2", "3"]}]
+    bot.pending[(chat, uid)] = {"steps": steps, "idx": 0, "msg_id": 321, "task": None}
+    edited = []
+
+    async def edit_media(media, reply_markup=None):
+        edited.append(media)
+
+    async def ans(*a, **k):
+        return None
+
+    cb = types.SimpleNamespace(
+        data="capnew",
+        from_user=types.SimpleNamespace(id=uid, full_name="N"),
+        message=types.SimpleNamespace(chat=types.SimpleNamespace(id=chat),
+                                      message_id=321, edit_media=edit_media),
+        answer=ans)
+    await bot.on_captcha_new(cb)
+    check("capnew: картинка заменена", len(edited) == 1)
+    check("capnew: код новый и валиден",
+          steps[0]["answer"].isdigit() and len(steps[0]["answer"]) == bot.num("CAPTCHA_DIGITS"))
+    t = bot.pending[(chat, uid)].get("task")
+    if t:
+        t.cancel()
+    bot.pending.pop((chat, uid), None)
+
+
+asyncio.run(run_capnew())
+
 
 print(f"\nИтог: {PASS} ок, {FAIL} провалов.")
 sys.exit(1 if FAIL else 0)

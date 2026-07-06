@@ -43,6 +43,7 @@ from aiogram.types import (
     ChatMemberUpdated,
     ChatPermissions,
     BufferedInputFile,
+    InputMediaPhoto,
     InlineKeyboardButton,
     InlineKeyboardMarkup,
 )
@@ -378,6 +379,9 @@ async def _deny_target(chat_id: int, actor_id: int, target_id: int) -> str | Non
         return "🤖 Это я — меня трогать нельзя."
     if await is_admin(chat_id, target_id):
         return "🛡 Нельзя наказать администратора чата."
+    if storage.is_owner(target_id) and not (
+            storage.is_owner(actor_id) or await is_admin(chat_id, actor_id)):
+        return "🛡 Владельца бота трогать нельзя."
     if storage.get_role(target_id) and not await is_admin(chat_id, actor_id):
         return "🛡 Наказывать персонал может только админ чата."
     return None
@@ -872,7 +876,8 @@ class ModerationMiddleware(BaseMiddleware):
         # Публичные команды (/rules /report /ping /vb /help) и команды персонала
         # (носителей ролей) пропускаем как обычно.
         cmd = _cmd_name(msg.text or "")
-        if cmd and cmd not in PUBLIC_CMDS and not storage.get_role(user.id):
+        if (cmd and cmd not in PUBLIC_CMDS
+                and not storage.get_role(user.id) and not storage.is_owner(user.id)):
             if flag("DELETE_USER_COMMANDS"):
                 try:
                     await msg.delete()
@@ -1043,6 +1048,18 @@ def captcha_markup(idx: int, options: list[str]) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=[row])
 
 
+def captcha_photo_kb() -> InlineKeyboardMarkup:
+    """Кнопка под фото-капчей: сменить картинку, если цифры неразборчивы."""
+    return InlineKeyboardMarkup(inline_keyboard=[[
+        InlineKeyboardButton(text="🔄 Заменить картинку", callback_data="capnew")]])
+
+
+def captcha_caption(user, question: str) -> str:
+    return (f"👋 {mention(user)}, добро пожаловать!\n"
+            f"Пройди проверку из <b>3 заданий</b> за <b>{num('CAPTCHA_TIMEOUT')} сек</b>. "
+            f"Ошибка или тишина — бан.\n\n{question}")
+
+
 async def cleanup(chat_id: int, user_id: int, *, delete_msg: bool = True):
     state = pending.pop((chat_id, user_id), None)
     if not state:
@@ -1162,17 +1179,13 @@ async def challenge(chat_id: int, user) -> None:
 
         steps = build_questions()
         first = steps[0]
-        intro = (
-            f"👋 {mention(user)}, добро пожаловать!\n"
-            f"Пройди проверку из <b>3 заданий</b> за "
-            f"<b>{num('CAPTCHA_TIMEOUT')} сек</b>. Ошибка или тишина — бан.\n\n"
-            f"{first['q']}"
-        )
+        intro = captcha_caption(user, first["q"])
         if first.get("kind") == "image":
             # Только текст (чтобы новичок ввёл код), медиа/ссылки запрещены.
             await bot.restrict_chat_member(chat_id, user.id, permissions=TEXT_ONLY)
             photo = BufferedInputFile(make_captcha_image(first["answer"]), "captcha.png")
-            sent = await bot.send_photo(chat_id, photo, caption=intro)
+            sent = await bot.send_photo(chat_id, photo, caption=intro,
+                                        reply_markup=captcha_photo_kb())
         else:
             await bot.restrict_chat_member(chat_id, user.id, permissions=MUTE)
             sent = await bot.send_message(chat_id, intro,
@@ -1380,6 +1393,34 @@ async def on_captcha_answer(cb: CallbackQuery):
     except TelegramBadRequest:
         pass
     await cb.answer("Верно ✅")
+
+
+@dp.callback_query(F.data == "capnew")
+async def on_captcha_new(cb: CallbackQuery):
+    """Заменить картинку фото-капчи (если цифры неразборчивы) — новый код + сброс таймера."""
+    chat_id = cb.message.chat.id
+    key = (chat_id, cb.from_user.id)
+    st = pending.get(key)
+    if not st or not st.get("steps"):
+        await cb.answer("Это не твоя капча 🙂")
+        return
+    step = st["steps"][st["idx"]]
+    if step.get("kind") != "image" or st.get("msg_id") != cb.message.message_id:
+        await cb.answer("Кнопка неактуальна.")
+        return
+    step["answer"] = "".join(random.choice("0123456789") for _ in range(num("CAPTCHA_DIGITS")))
+    photo = BufferedInputFile(make_captcha_image(step["answer"]), "captcha.png")
+    try:
+        await cb.message.edit_media(
+            InputMediaPhoto(media=photo, caption=captcha_caption(cb.from_user, step["q"])),
+            reply_markup=captcha_photo_kb())
+    except TelegramBadRequest:
+        pass
+    old = st.get("task")                       # перезапустить таймаут
+    if old and not old.done():
+        old.cancel()
+    st["task"] = asyncio.create_task(captcha_timeout(chat_id, cb.from_user.id))
+    await cb.answer("Новая картинка 🔄")
 
 
 # ---------------------------------------------------------- анализ картинок
@@ -2165,8 +2206,8 @@ async def cmd_trust(message: Message):
 
 @dp.message(Command("setrole"))
 async def cmd_setrole(message: Message):
-    """Выдать внутреннюю роль (модерация без прав админа группы)."""
-    if not await _can(message, "manage"):
+    """Выдать внутреннюю роль. Раздавать роли может ТОЛЬКО владелец (см. панель → 👑 Владельцы)."""
+    if not (message.from_user and storage.is_owner(message.from_user.id)):
         return
     parts = (message.text or "").split()
     r = message.reply_to_message
@@ -2183,12 +2224,12 @@ async def cmd_setrole(message: Message):
         return
     storage.set_role(uid, role)
     await message.answer(f"✅ {id_mention(uid)} — роль <b>{esc(role)}</b> "
-                         f"({', '.join(sorted(config.ROLES[role]))}).")
+                         f"({', '.join(sorted(role_perms(role)))}).")
 
 
 @dp.message(Command("delrole"))
 async def cmd_delrole(message: Message):
-    if not await _can(message, "manage"):
+    if not (message.from_user and storage.is_owner(message.from_user.id)):
         return
     uid = _target_id(message)
     if uid is None:
@@ -2200,7 +2241,7 @@ async def cmd_delrole(message: Message):
 
 @dp.message(Command("roles"))
 async def cmd_roles(message: Message):
-    if not await _can(message, "manage"):
+    if not (message.from_user and storage.is_owner(message.from_user.id)):
         return
     lines = ["🎖 <b>Роли</b> (Telegram-админы имеют все права по умолчанию)\n",
              "Доступные:"]
@@ -2785,6 +2826,7 @@ def panel_keyboard() -> InlineKeyboardMarkup:
                  InlineKeyboardButton(text="🔄 База картинок", callback_data="panel:reload")])
     rows.append([InlineKeyboardButton(text="🎖 Роли и права", callback_data="panel:roles"),
                  InlineKeyboardButton(text="🧹 Сброс заявок", callback_data="panel:reqs")])
+    rows.append([InlineKeyboardButton(text="👑 Владельцы", callback_data="panel:owners")])
     if not IS_CHILD:
         rows.append([InlineKeyboardButton(text="🤖 Мои боты", callback_data="panel:bots")])
     rows.append([InlineKeyboardButton(text="❌ Закрыть", callback_data="panel:close")])
@@ -2870,14 +2912,36 @@ def role_perm_keyboard(role: str) -> InlineKeyboardMarkup:
 
 
 def asg_keyboard() -> InlineKeyboardMarkup:
-    """Назначенные роли: тап по строке снимает роль с пользователя."""
+    """Назначенные роли: тап по строке снимает роль; «Выдать роль» — назначить по id."""
     rows = []
     for u, role in storage.roles_all().items():
         rows.append([InlineKeyboardButton(text=f"❌ {u} — {role}",
                                           callback_data=f"panel:unrole:{u}")])
     if not rows:
         rows.append([InlineKeyboardButton(text="Никому не назначено", callback_data="panel:noop")])
+    rows.append([InlineKeyboardButton(text="➕ Выдать роль", callback_data="panel:asgnew")])
     rows.append([InlineKeyboardButton(text="⬅️ К ролям", callback_data="panel:roles")])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def asg_pick_keyboard() -> InlineKeyboardMarkup:
+    """Выбор роли для назначения по id."""
+    rows = [[InlineKeyboardButton(text=f"🎖 {name}", callback_data=f"panel:asgrole:{name}")]
+            for name in config.ROLES]
+    rows.append([InlineKeyboardButton(text="⬅️ Назад", callback_data="panel:asg")])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def owners_keyboard() -> InlineKeyboardMarkup:
+    """Владельцы: снять (❌), сделать себя владельцем, добавить по id."""
+    rows = []
+    for u in storage.owners_all():
+        rows.append([InlineKeyboardButton(text=f"❌ {u}", callback_data=f"panel:ownrm:{u}")])
+    if not rows:
+        rows.append([InlineKeyboardButton(text="Владельцев пока нет", callback_data="panel:noop")])
+    rows.append([InlineKeyboardButton(text="👑 Сделать меня владельцем", callback_data="panel:ownme")])
+    rows.append([InlineKeyboardButton(text="➕ Добавить по id", callback_data="panel:ownadd")])
+    rows.append([InlineKeyboardButton(text="⬅️ Назад", callback_data="panel:back")])
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
@@ -2991,6 +3055,21 @@ async def panel_private(message: Message):
                 await message.answer(f"✅ {key} = {val}.")
             else:
                 await message.answer("Нужно число.")
+        elif st == "add_owner":
+            if val.lstrip("-").isdigit():
+                added = storage.add_owner(int(val))
+                await message.answer("✅ Владелец добавлен." if added else "Уже владелец.")
+            else:
+                await message.answer("Нужен числовой id.")
+        elif st.startswith("assign_uid:"):
+            role = st.split(":", 1)[1]
+            if not val.lstrip("-").isdigit():
+                await message.answer("Нужен числовой id.")
+            elif role not in config.ROLES:
+                await message.answer("Роль не найдена.")
+            else:
+                storage.set_role(int(val), role)
+                await message.answer(f"✅ <code>{esc(val)}</code> — роль «{esc(role)}».")
         await open_panel(message.chat.id)
         return
     await open_panel(message.chat.id)
@@ -3309,12 +3388,54 @@ async def panel_cb(cb: CallbackQuery):
             await cb.answer()
         n = len(storage.roles_all())
         txt = (f"👥 <b>Назначения ролей</b> ({n})\n"
-               "Тап по строке — снять роль с пользователя.\n"
-               "Выдать роль: в чате /setrole роль (ответом на пользователя).")
+               "Тап по строке — снять роль. «Выдать роль» — назначить по id.\n"
+               "В чате роли раздаёт только владелец (/setrole роль ответом).")
         try:
             await cb.message.edit_text(txt, reply_markup=asg_keyboard())
         except TelegramBadRequest:
             pass
+    elif action == "asgnew":
+        await cb.answer()
+        try:
+            await cb.message.edit_text("➕ <b>Выдать роль</b>\nВыбери роль, потом пришлёшь id:",
+                                       reply_markup=asg_pick_keyboard())
+        except TelegramBadRequest:
+            pass
+    elif action == "asgrole":
+        role = parts[2] if len(parts) > 2 else ""
+        if role not in config.ROLES:
+            await cb.answer("Нет такой роли.", show_alert=True)
+            return
+        panel_state[uid] = f"assign_uid:{role}"
+        await cb.answer()
+        await bot.send_message(cb.message.chat.id,
+                               f"✍️ Пришли <b>id пользователя</b>, кому выдать роль «{esc(role)}»:")
+    elif action == "owners":
+        await cb.answer()
+        txt = ("👑 <b>Владельцы</b>\n"
+               "Только владелец раздаёт роли/должности (в чате и здесь).\n"
+               "Тап по id — снять; можно сделать владельцем себя или добавить по id.")
+        try:
+            await cb.message.edit_text(txt, reply_markup=owners_keyboard())
+        except TelegramBadRequest:
+            pass
+    elif action in ("ownme", "ownrm"):
+        if action == "ownme":
+            storage.add_owner(uid)
+            await cb.answer("Ты теперь владелец")
+        elif len(parts) > 2 and parts[2].lstrip("-").isdigit():
+            storage.remove_owner(int(parts[2]))
+            await cb.answer("Снят")
+        else:
+            await cb.answer()
+        try:
+            await cb.message.edit_reply_markup(reply_markup=owners_keyboard())
+        except TelegramBadRequest:
+            pass
+    elif action == "ownadd":
+        panel_state[uid] = "add_owner"
+        await cb.answer()
+        await bot.send_message(cb.message.chat.id, "✍️ Пришли <b>id</b> нового владельца:")
     elif action == "noop":
         await cb.answer()
     elif action == "close":

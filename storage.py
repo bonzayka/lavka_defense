@@ -30,6 +30,7 @@ _DEFAULT = {
     "mod_numbers": {},        # str(user_id) -> N (для анонимных «Модератор #N»)
     "roles": {},              # str(user_id) -> имя роли (внутренние права)
     "role_perms": {},         # имя_роли -> [список прав]; оверрайд config.ROLES из панели
+    "owners": [],             # [user_id, ...] — владельцы: только они раздают роли/должности
 }
 
 AUDIT_LIMIT = 200
@@ -262,6 +263,36 @@ def set_role_perms(role: str, perms: list) -> None:
 
 def role_perms_all() -> dict:
     return _data.setdefault("role_perms", {})
+
+
+# --- владельцы (только они выдают роли/должности) ---
+
+def owners_all() -> list:
+    return _data.setdefault("owners", [])
+
+
+def is_owner(user_id: int) -> bool:
+    return int(user_id) in _data.setdefault("owners", [])
+
+
+def add_owner(user_id: int) -> bool:
+    """True — добавили, False — уже был владельцем."""
+    o = _data.setdefault("owners", [])
+    if int(user_id) in o:
+        return False
+    o.append(int(user_id))
+    save()
+    return True
+
+
+def remove_owner(user_id: int) -> bool:
+    """True — сняли, False — не был владельцем."""
+    o = _data.setdefault("owners", [])
+    if int(user_id) in o:
+        o.remove(int(user_id))
+        save()
+        return True
+    return False
 
 
 # --- журнал действий (audit log) ---
