@@ -105,6 +105,8 @@ panel_state: dict[int, str] = {}                   # ожидание ввода
 panel_newbot: dict[int, dict] = {}                 # черновик создаваемого бота (токен+юзернейм)
 msgcount: dict[tuple[int, int], int] = {}          # счётчик сообщений юзеров (с момента старта)
 nsfw_detector = None
+bot_self_id: int | None = None                     # id самого бота (для защиты цели), ставится в main()
+vb_cooldown: dict[tuple[int, int], datetime] = {}  # (chat, uid) -> когда не-персонал последний раз звал /vb
 stats = {"challenged": 0, "passed": 0, "failed": 0, "img_muted": 0,
          "banned": 0, "reports": 0, "raids": 0}
 
@@ -323,10 +325,25 @@ async def is_admin(chat_id: int, user_id: int) -> bool:
     return user_id in await get_admins(chat_id)
 
 
+def role_perms(role: str) -> set:
+    """Набор прав роли: оверрайд из панели (storage) или дефолт из config.ROLES."""
+    ov = storage.get_role_perms_override(role)
+    if ov is not None:
+        return set(ov)
+    return set(config.ROLES.get(role, set()))
+
+
+def set_role_perm(role: str, perm: str, on: bool) -> None:
+    """Включить/выключить право у роли (сохраняется в data.json)."""
+    cur = role_perms(role)
+    cur.add(perm) if on else cur.discard(perm)
+    storage.set_role_perms(role, sorted(cur))
+
+
 def has_perm(user_id: int, perm: str) -> bool:
     """Есть ли у юзера внутреннее право (по назначенной роли)."""
     role = storage.get_role(user_id)
-    return bool(role and perm in config.ROLES.get(role, set()))
+    return bool(role and perm in role_perms(role))
 
 
 async def can(chat_id: int, user_id: int, perm: str) -> bool:
@@ -336,6 +353,35 @@ async def can(chat_id: int, user_id: int, perm: str) -> bool:
 
 async def _can(message, perm: str) -> bool:
     return bool(message.from_user and await can(message.chat.id, message.from_user.id, perm))
+
+
+async def _deny_target(chat_id: int, actor_id: int, target_id: int) -> str | None:
+    """Причина, по которой actor НЕ вправе наказать target (иначе None).
+
+    Защищает от само-наказания и трогания администрации:
+      • себя — никому нельзя (тот самый «сам себя замутил»);
+      • самого бота — нельзя;
+      • TG-админа чата — нельзя вообще (Telegram и так не даст, но скажем прямо);
+      • носителя внутренней роли — можно только TG-админу, но не другому модератору.
+    """
+    if target_id == actor_id:
+        return "🙅 Нельзя применить это к самому себе."
+    if bot_self_id and target_id == bot_self_id:
+        return "🤖 Это я — меня трогать нельзя."
+    if await is_admin(chat_id, target_id):
+        return "🛡 Нельзя наказать администратора чата."
+    if storage.get_role(target_id) and not await is_admin(chat_id, actor_id):
+        return "🛡 Наказывать персонал может только админ чата."
+    return None
+
+
+async def _deny_and_reply(message, target_id: int) -> bool:
+    """Проверка цели для команд-ответов: при отказе отвечает и возвращает True."""
+    reason = await _deny_target(message.chat.id, message.from_user.id, target_id)
+    if reason:
+        await message.answer(reason)
+        return True
+    return False
 
 
 async def user_dc(user_id: int) -> int | None:
@@ -764,6 +810,16 @@ def antiflood_hit(chat_id: int, user_id: int) -> bool:
     return False
 
 
+# Команды, доступные ВСЕМ участникам (не считаются «чужой админ-командой»).
+PUBLIC_CMDS = {"rules", "report", "ping", "help", "vb", "start"}
+
+
+def _cmd_name(text: str) -> str | None:
+    """Имя команды из текста ('/Ban@bot x' -> 'ban'); None, если это не команда."""
+    m = re.match(r"^/([A-Za-z0-9_]+)", text or "")
+    return m.group(1).split("@")[0].lower() if m else None
+
+
 class ModerationMiddleware(BaseMiddleware):
     """Фильтрует сообщения не-админов; нарушение -> наказание, сообщение не идёт дальше."""
 
@@ -795,6 +851,18 @@ class ModerationMiddleware(BaseMiddleware):
         if (not user or user.is_bot or await is_admin(chat_id, user.id)
                 or storage.is_trusted(chat_id, user.id)):
             return False
+
+        # Админ-команда от обычного пользователя: удалить и не отвечать (тумблер).
+        # Публичные команды (/rules /report /ping /vb /help) и команды персонала
+        # (носителей ролей) пропускаем как обычно.
+        cmd = _cmd_name(msg.text or "")
+        if cmd and cmd not in PUBLIC_CMDS and not storage.get_role(user.id):
+            if flag("DELETE_USER_COMMANDS"):
+                try:
+                    await msg.delete()
+                except TelegramBadRequest:
+                    pass
+                return True  # съели — хендлер не запустится
 
         # Ночной режим.
         if is_night():
@@ -1292,6 +1360,12 @@ async def on_moderation(cb: CallbackQuery):
         await cb.answer("Решать может только админ.", show_alert=True)
         return
 
+    if action in ("ban", "mute", "banwipe"):
+        reason = await _deny_target(gid, cb.from_user.id, uid)
+        if reason:
+            await cb.answer(reason, show_alert=True)
+            return
+
     admin = mod_name(cb.from_user)
     actor = f"админ {cb.from_user.full_name}"
     try:  # ник цели (чтобы было видно, КОГО наказали)
@@ -1420,7 +1494,8 @@ def vote_render(v: dict) -> str:
 async def cmd_vb(message: Message):
     """Запустить голосование за заглушение пользователя (ответом на него)."""
     global vote_seq
-    if not await _can(message, "mute"):
+    is_staff = await _can(message, "mute")
+    if not (is_staff or flag("VOTE_ANYONE")):   # обычным юзерам — только если разрешено
         return
     r = message.reply_to_message
     if not r or not r.from_user:
@@ -1428,6 +1503,20 @@ async def cmd_vb(message: Message):
         return
     target = r.from_user
     starter = message.from_user
+    # Нельзя голосовать против себя, админов и персонала.
+    reason = await _deny_target(message.chat.id, starter.id, target.id)
+    if reason:
+        await message.answer(reason)
+        return
+    # Антиспам: обычному пользователю — пауза между голосованиями.
+    if not is_staff:
+        key = (message.chat.id, starter.id)
+        last = vb_cooldown.get(key)
+        if last and (now() - last).total_seconds() < config.VOTE_COOLDOWN:
+            left = int(config.VOTE_COOLDOWN - (now() - last).total_seconds()) + 1
+            await message.answer(f"⏳ Подожди {left}с перед новым голосованием.")
+            return
+        vb_cooldown[key] = now()
     try:
         await message.delete()
     except TelegramBadRequest:
@@ -1791,6 +1880,8 @@ async def cmd_ban(message: Message):
         await message.answer("Ответь командой на пользователя или укажи id. "
                              "Можно срок и причину: /ban 3 дня спам.")
         return
+    if await _deny_and_reply(message, uid):
+        return
     await ban_user(message.chat.id, uid, seconds)
     rp = f" Причина: {esc(reason)}." if reason else ""
     await message.answer(f"🔨 {id_mention(uid)} забанен ({human_duration(seconds)})."
@@ -1820,6 +1911,8 @@ async def cmd_mute(message: Message):
     if uid is None:
         await message.answer("Ответь командой на пользователя. "
                              "Можно срок и причину: /mute 3 часа флуд.")
+        return
+    if await _deny_and_reply(message, uid):
         return
     await mute_user(message.chat.id, uid, seconds)
     rp = f" Причина: {esc(reason)}." if reason else ""
@@ -1852,6 +1945,8 @@ async def cmd_warn(message: Message):
         await message.answer("Ответь командой на сообщение нарушителя.")
         return
     uid = r.from_user.id
+    if await _deny_and_reply(message, uid):
+        return
     n = storage.add_warn(message.chat.id, uid)
     if n >= config.WARN_LIMIT:
         storage.reset_warns(message.chat.id, uid)
@@ -2184,6 +2279,12 @@ async def nl_command(message: Message):
     word = re.match(r"^\s*([а-яёa-z]+)", text).group(1)
     if not await can(chat_id, message.from_user.id, _WORD_PERM.get(word, "ban")):
         return
+    # Само-защита/иерархия — только для карающих слов (размут/разбан пропускаем).
+    if word in ("мут", "mute", "бан", "ban", "варн", "warn", "кик", "kick"):
+        reason = await _deny_target(chat_id, message.from_user.id, uid)
+        if reason:
+            await message.answer(reason)
+            return
     seconds = parse_duration(text)
     by = f" Решение: {mod_name(message.from_user)}."
     audit(f"админ {message.from_user.full_name}", f"{word} {human_duration(seconds)}",
@@ -2371,7 +2472,17 @@ async def cmd_info(message: Message):
 
 @dp.message(Command("help"))
 async def cmd_help(message: Message):
-    if not await _admin_only(message):
+    u = message.from_user
+    is_staff = bool(u and (await is_admin(message.chat.id, u.id) or storage.get_role(u.id)))
+    if not is_staff:
+        # Обычным участникам — короткая справка по доступным им командам.
+        await message.answer(
+            "🤝 <b>Команды участника</b>\n"
+            "/rules — правила чата\n"
+            "/report (ответом на сообщение) — пожаловаться модераторам\n"
+            "/vb (ответом) — предложить голосование за заглушение\n"
+            "/ping — проверить, что бот жив"
+        )
         return
     await message.answer(
         "🛡 <b>Команды админов</b>\n"
@@ -2473,6 +2584,8 @@ PANEL_FLAGS = [
     ("DELETE_SERVICE_MESSAGES", "Чистка сервиса"),
     ("DELETE_ADMIN_COMMANDS", "Чистка команд"),
     ("ANON_ADMIN", "Анонимная модерация"),
+    ("DELETE_USER_COMMANDS", "Чистить чужие команды"),
+    ("VOTE_ANYONE", "/vb всем"),
     ("NOTIFY_JOINS", "Увед. входы"),
     ("NOTIFY_VIOLATIONS", "Увед. нарушения"),
     ("NOTIFY_REPORTS", "Увед. жалобы"),
@@ -2503,6 +2616,17 @@ ACT_CYCLE = ["delete", "warn", "mute", "ban"]
 
 FLAG_LABELS = dict(PANEL_FLAGS)
 
+# Внутренние права ролей (для редактора «Роли и права» в панели).
+PERM_LABELS = [
+    ("mute", "🔇 Мут"),
+    ("ban", "🔨 Бан"),
+    ("warn", "⚠️ Варн"),
+    ("kick", "👢 Кик"),
+    ("requests", "📥 Заявки/локдаун"),
+    ("words", "📋 Стоп-слова"),
+    ("manage", "⚙️ Роли/настройки"),
+]
+
 # Тумблеры, сгруппированные по разделам (чтобы не «всё в кучу»).
 PANEL_CATEGORIES = [
     ("spam", "🛡 Антиспам", ["ANTIMAT_ENABLED", "BLOCK_LINKS", "ALLOW_MENTIONS",
@@ -2512,7 +2636,8 @@ PANEL_CATEGORIES = [
     ("entry", "🚪 Вход и капча", ["CHECK_JOIN_NAMES", "AUTO_ACCEPT", "DC_CHECK_JOIN",
                                   "LOCKDOWN", "WELCOME_ENABLED", "ANTIRAID_ENABLED"]),
     ("modes", "🌙 Режимы", ["NIGHT_MODE", "QUIET_MODE", "DELETE_SERVICE_MESSAGES",
-                            "DELETE_ADMIN_COMMANDS", "ANON_ADMIN"]),
+                            "DELETE_ADMIN_COMMANDS", "DELETE_USER_COMMANDS",
+                            "VOTE_ANYONE", "ANON_ADMIN"]),
     ("notify", "🔔 Уведомления", ["NOTIFY_JOINS", "NOTIFY_VIOLATIONS", "NOTIFY_REPORTS",
                                   "REPORT_ENABLED"]),
 ]
@@ -2532,7 +2657,8 @@ def panel_keyboard() -> InlineKeyboardMarkup:
                  InlineKeyboardButton(text="📒 Журнал", callback_data="panel:log")])
     rows.append([InlineKeyboardButton(text="💾 Бэкап", callback_data="panel:backup"),
                  InlineKeyboardButton(text="🔄 База картинок", callback_data="panel:reload")])
-    rows.append([InlineKeyboardButton(text="🧹 Сброс заявок", callback_data="panel:reqs")])
+    rows.append([InlineKeyboardButton(text="🎖 Роли и права", callback_data="panel:roles"),
+                 InlineKeyboardButton(text="🧹 Сброс заявок", callback_data="panel:reqs")])
     if not IS_CHILD:
         rows.append([InlineKeyboardButton(text="🤖 Мои боты", callback_data="panel:bots")])
     rows.append([InlineKeyboardButton(text="❌ Закрыть", callback_data="panel:close")])
@@ -2586,6 +2712,46 @@ def bots_keyboard(owner: int) -> InlineKeyboardMarkup:
         ])
     rows.append([InlineKeyboardButton(text="➕ Добавить бота", callback_data="panel:addbot")])
     rows.append([InlineKeyboardButton(text="⬅️ Назад", callback_data="panel:back")])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def roles_keyboard() -> InlineKeyboardMarkup:
+    """Список ролей (правка их прав) + переход к назначениям."""
+    rows = []
+    for name in config.ROLES:
+        rows.append([InlineKeyboardButton(
+            text=f"🎖 {name} ({len(role_perms(name))})", callback_data=f"panel:role:{name}")])
+    rows.append([InlineKeyboardButton(text="👥 Назначения", callback_data="panel:asg")])
+    rows.append([InlineKeyboardButton(text="⬅️ Назад", callback_data="panel:back")])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def role_perm_keyboard(role: str) -> InlineKeyboardMarkup:
+    """Тумблеры отдельных прав конкретной роли."""
+    perms = role_perms(role)
+    rows, buf = [], []
+    for key, label in PERM_LABELS:
+        mark = "✅" if key in perms else "❌"
+        buf.append(InlineKeyboardButton(text=f"{mark} {label}",
+                                        callback_data=f"panel:rp:{role}:{key}"))
+        if len(buf) == 2:
+            rows.append(buf)
+            buf = []
+    if buf:
+        rows.append(buf)
+    rows.append([InlineKeyboardButton(text="⬅️ К ролям", callback_data="panel:roles")])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def asg_keyboard() -> InlineKeyboardMarkup:
+    """Назначенные роли: тап по строке снимает роль с пользователя."""
+    rows = []
+    for u, role in storage.roles_all().items():
+        rows.append([InlineKeyboardButton(text=f"❌ {u} — {role}",
+                                          callback_data=f"panel:unrole:{u}")])
+    if not rows:
+        rows.append([InlineKeyboardButton(text="Никому не назначено", callback_data="panel:noop")])
+    rows.append([InlineKeyboardButton(text="⬅️ К ролям", callback_data="panel:roles")])
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
@@ -2981,6 +3147,48 @@ async def panel_cb(cb: CallbackQuery):
             await cb.message.edit_text(txt, reply_markup=kb)
         except TelegramBadRequest:
             pass
+    elif action == "roles":
+        await cb.answer()
+        txt = ("🎖 <b>Роли и права</b>\n"
+               "TG-админы имеют все права по умолчанию. Здесь — наборы прав для "
+               "внутренних ролей (выдаются в чате командой /setrole роль).\n"
+               "Выбери роль, чтобы включить/выключить её права:")
+        try:
+            await cb.message.edit_text(txt, reply_markup=roles_keyboard())
+        except TelegramBadRequest:
+            pass
+    elif action in ("role", "rp"):
+        role = parts[2] if len(parts) > 2 else ""
+        if role not in config.ROLES:
+            await cb.answer("Нет такой роли.", show_alert=True)
+            return
+        if action == "rp" and len(parts) > 3 and parts[3] in dict(PERM_LABELS):
+            perm = parts[3]
+            set_role_perm(role, perm, perm not in role_perms(role))
+            await cb.answer("Переключено")
+        else:
+            await cb.answer()
+        perms = ", ".join(sorted(role_perms(role))) or "(нет прав)"
+        txt = (f"🎖 Роль <b>{esc(role)}</b>\nТекущие права: {esc(perms)}\n"
+               "Жми, чтобы переключить:")
+        try:
+            await cb.message.edit_text(txt, reply_markup=role_perm_keyboard(role))
+        except TelegramBadRequest:
+            pass
+    elif action in ("asg", "unrole"):
+        if action == "unrole" and len(parts) > 2 and parts[2].lstrip("-").isdigit():
+            storage.set_role(int(parts[2]), None)
+            await cb.answer("Роль снята")
+        else:
+            await cb.answer()
+        n = len(storage.roles_all())
+        txt = (f"👥 <b>Назначения ролей</b> ({n})\n"
+               "Тап по строке — снять роль с пользователя.\n"
+               "Выдать роль: в чате /setrole роль (ответом на пользователя).")
+        try:
+            await cb.message.edit_text(txt, reply_markup=asg_keyboard())
+        except TelegramBadRequest:
+            pass
     elif action == "noop":
         await cb.answer()
     elif action == "close":
@@ -3014,6 +3222,8 @@ async def main():
             log.info("Запущено дочерних ботов: %d", n)
         asyncio.create_task(watchdog())  # следить за дочерними
     me = await bot.get_me()
+    global bot_self_id
+    bot_self_id = me.id
     role = "дочерний" if IS_CHILD else "родительский"
     updates = list(dp.resolve_used_update_types())
     for u in ("chat_join_request", "chat_member"):  # подстраховка: точно подписаны

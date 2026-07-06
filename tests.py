@@ -349,5 +349,61 @@ async def run_async():
 
 asyncio.run(run_async())
 
+
+# ---- защита цели: само-мут и иерархия ----
+async def run_deny():
+    async def fake_admin(c, u):
+        return u == 900              # 900 = TG-админ; остальные — нет
+    bot.is_admin = fake_admin
+    bot.storage.set_role(901, "модератор")   # 901 = носитель внутренней роли
+    bot.bot_self_id = 999
+
+    check("deny: сам себя нельзя", await bot._deny_target(-1, 902, 902) is not None)
+    check("deny: самого бота нельзя", await bot._deny_target(-1, 902, 999) is not None)
+    check("deny: обычного обычному можно", await bot._deny_target(-1, 902, 903) is None)
+    check("deny: TG-админа не тронуть", await bot._deny_target(-1, 903, 900) is not None)
+    check("deny: персонал обычному нельзя", await bot._deny_target(-1, 903, 901) is not None)
+    check("deny: персонал TG-админу можно", await bot._deny_target(-1, 900, 901) is None)
+    bot.storage.set_role(901, None)
+
+
+asyncio.run(run_deny())
+
+
+# ---- редактирование прав ролей (оверрайд поверх config) ----
+storage.set_role_perms("модератор", ["mute", "warn"])
+check("roleperm: старт с mute", "mute" in bot.role_perms("модератор"))
+bot.set_role_perm("модератор", "ban", True)
+check("roleperm: добавили ban", "ban" in bot.role_perms("модератор"))
+storage.set_role(560, "модератор")
+check("roleperm: has_perm видит ban", bot.has_perm(560, "ban"))
+bot.set_role_perm("модератор", "mute", False)
+check("roleperm: убрали mute", not bot.has_perm(560, "mute"))
+storage.set_role(560, None)
+check("roleperm: фоллбэк на config без оверрайда",
+      bot.role_perms("старший") == set(bot.config.ROLES["старший"]))
+
+# ---- классификация команд (публичные vs админские) ----
+check("cmd: /ban@bot -> ban", bot._cmd_name("/ban@LavkaBot 3 дня") == "ban")
+check("cmd: регистр не важен", bot._cmd_name("/VB") == "vb")
+check("cmd: не команда -> None", bot._cmd_name("привет всем") is None)
+check("cmd: vb публичная", "vb" in bot.PUBLIC_CMDS)
+check("cmd: report публичная", "report" in bot.PUBLIC_CMDS)
+check("cmd: ban НЕ публичная", "ban" not in bot.PUBLIC_CMDS)
+
+# ---- панель: /vb-всем дефолт, клавиатуры ролей, новые флаги в разделах ----
+check("vote: VOTE_ANYONE дефолт вкл", bot.flag("VOTE_ANYONE") is True)
+bot.roles_keyboard()
+for _rn in bot.config.ROLES:
+    bot.role_perm_keyboard(_rn)
+bot.asg_keyboard()
+check("панель: клавиатуры ролей строятся", True)
+check("панель: новые тумблеры в разделах",
+      {"DELETE_USER_COMMANDS", "VOTE_ANYONE"} <= {k for ks in bot.CAT_FLAGS.values() for k in ks})
+_ok_cb = all(len((b.callback_data or "").encode()) <= 64
+             for r in bot.role_perm_keyboard("модератор").inline_keyboard for b in r)
+check("панель: callback_data ролей <= 64 байт", _ok_cb)
+
+
 print(f"\nИтог: {PASS} ок, {FAIL} провалов.")
 sys.exit(1 if FAIL else 0)

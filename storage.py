@@ -29,6 +29,7 @@ _DEFAULT = {
     "triggers": {},           # ключевое_слово -> ответ (автоответы)
     "mod_numbers": {},        # str(user_id) -> N (для анонимных «Модератор #N»)
     "roles": {},              # str(user_id) -> имя роли (внутренние права)
+    "role_perms": {},         # имя_роли -> [список прав]; оверрайд config.ROLES из панели
 }
 
 AUDIT_LIMIT = 200
@@ -245,6 +246,22 @@ def set_role(user_id: int, role: str | None) -> None:
 
 def roles_all() -> dict:
     return _data.setdefault("roles", {})
+
+
+# --- оверрайд набора прав по ролям (редактируется из панели) ---
+
+def get_role_perms_override(role: str) -> list | None:
+    """Список прав роли, если он переопределён из панели, иначе None (=дефолт config)."""
+    return _data.setdefault("role_perms", {}).get(role)
+
+
+def set_role_perms(role: str, perms: list) -> None:
+    _data.setdefault("role_perms", {})[role] = sorted(set(perms))
+    save()
+
+
+def role_perms_all() -> dict:
+    return _data.setdefault("role_perms", {})
 
 
 # --- журнал действий (audit log) ---
