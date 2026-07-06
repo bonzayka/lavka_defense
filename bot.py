@@ -106,6 +106,7 @@ panel_auth: set[int] = set()                       # кто прошёл пар�
 panel_state: dict[int, str] = {}                   # ожидание ввода в панели
 panel_newbot: dict[int, dict] = {}                 # черновик создаваемого бота (токен+юзернейм)
 msgcount: dict[tuple[int, int], int] = {}          # счётчик сообщений юзеров (с момента старта)
+uname_cache: dict[str, int] = {}                   # "@username" (lower, без @) -> user_id (для таргета по нику)
 nsfw_detector = None
 bot_self_id: int | None = None                     # id самого бота (для защиты цели), ставится в main()
 vb_cooldown: dict[tuple[int, int], datetime] = {}  # (chat, uid) -> когда не-персонал последний раз звал /vb
@@ -166,6 +167,32 @@ def mod_name(user) -> str:
 def id_mention(uid: int, name: str = "пользователь") -> str:
     """Упоминание по одному id (когда объекта user нет)."""
     return f'<a href="tg://user?id={uid}">{esc(name)}</a>'
+
+
+def cached_name(uid: int) -> str:
+    """Быстрое имя без запросов к API: @ник из кэша либо 'id<num>'. Для клавиатур."""
+    for uname, cached in uname_cache.items():
+        if cached == uid:
+            return f"@{uname}"
+    return f"id{uid}"
+
+
+async def display_name(chat_id: int, uid: int) -> str:
+    """Человекочитаемое имя юзера: полное имя/@ник, если удаётся получить, иначе id.
+
+    Сетевые/битые ответы не роняют команду — откатываемся к кэшу и id.
+    """
+    try:
+        m = await bot.get_chat_member(chat_id, uid)
+        u = m.user
+        uname_cache_add(u)
+        if u.full_name and u.full_name.strip():
+            return u.full_name.strip()
+        if u.username:
+            return f"@{u.username}"
+    except Exception:
+        pass
+    return cached_name(uid)
 
 
 _MD_LINK = re.compile(r"\[([^\]]+)\]\(([^)\s]+)\)")
@@ -355,6 +382,21 @@ def has_perm(user_id: int, perm: str) -> bool:
     return bool(role and perm in role_perms(role))
 
 
+def role_rank(role: str | None) -> int:
+    """Старшинство роли: чем больше — тем старше. Нет роли -> 0."""
+    return config.ROLE_RANK.get(role, 0) if role else 0
+
+
+def role_badge(role: str | None) -> str:
+    """Эмодзи-бейдж роли для показа в чате (пусто, если нет)."""
+    return config.ROLE_BADGE.get(role, "🎖") if role else ""
+
+
+def role_label(role: str | None) -> str:
+    """«👑 админ» — бейдж + имя роли, для сообщений. Пусто, если роли нет."""
+    return f"{role_badge(role)} {esc(role)}" if role else ""
+
+
 async def can(chat_id: int, user_id: int, perm: str) -> bool:
     """Право = Telegram-админ (всё) ИЛИ внутренняя роль с этим разрешением."""
     return await is_admin(chat_id, user_id) or has_perm(user_id, perm)
@@ -367,11 +409,14 @@ async def _can(message, perm: str) -> bool:
 async def _deny_target(chat_id: int, actor_id: int, target_id: int) -> str | None:
     """Причина, по которой actor НЕ вправе наказать target (иначе None).
 
-    Защищает от само-наказания и трогания администрации:
+    Защищает от само-наказания и трогания администрации с учётом ИЕРАРХИИ ролей:
       • себя — никому нельзя (тот самый «сам себя замутил»);
       • самого бота — нельзя;
       • TG-админа чата — нельзя вообще (Telegram и так не даст, но скажем прямо);
-      • носителя внутренней роли — можно только TG-админу, но не другому модератору.
+      • владельца бота — только другой владелец или TG-админ;
+      • носителя внутренней роли — TG-админ/владелец могут всегда; другой персонал —
+        только если он СТРОГО старше цели по рангу (старший > модератор и т.п.).
+        Равный равного и младший старшего тронуть не может.
     """
     if target_id == actor_id:
         return "🙅 Нельзя применить это к самому себе."
@@ -379,11 +424,19 @@ async def _deny_target(chat_id: int, actor_id: int, target_id: int) -> str | Non
         return "🤖 Это я — меня трогать нельзя."
     if await is_admin(chat_id, target_id):
         return "🛡 Нельзя наказать администратора чата."
-    if storage.is_owner(target_id) and not (
-            storage.is_owner(actor_id) or await is_admin(chat_id, actor_id)):
+
+    actor_admin = await is_admin(chat_id, actor_id)
+    actor_owner = storage.is_owner(actor_id)
+
+    if storage.is_owner(target_id) and not (actor_owner or actor_admin):
         return "🛡 Владельца бота трогать нельзя."
-    if storage.get_role(target_id) and not await is_admin(chat_id, actor_id):
-        return "🛡 Наказывать персонал может только админ чата."
+
+    target_role = storage.get_role(target_id)
+    if target_role and not (actor_admin or actor_owner):
+        # Наказать персонал может только строго старший по рангу носитель роли.
+        if role_rank(storage.get_role(actor_id)) <= role_rank(target_role):
+            return (f"🛡 {role_label(target_role)} тебе не по рангу — "
+                    "нужен старший по должности или админ чата.")
     return None
 
 
@@ -519,6 +572,8 @@ class TrackMiddleware(BaseMiddleware):
             buf = recent.setdefault(key, deque(maxlen=200))
             buf.append((msg.message_id, now()))
             msgcount[key] = msgcount.get(key, 0) + 1
+            if msg.from_user.username:                 # запоминаем @ник -> id для таргета по нику
+                uname_cache[msg.from_user.username.lower()] = msg.from_user.id
         return await handler(event, data)
 
 
@@ -1477,6 +1532,12 @@ async def on_media(message: Message):
             or storage.is_trusted(message.chat.id, message.from_user.id)):
         return
 
+    # Стикер из белого списка паков — доверенный, не гоняем через NSFW/гор
+    # (детектор часто ложно срабатывает на обычные стикеры). Добавить пак:
+    # ответить /allowpack на стикер (или /stickers в списке).
+    if message.sticker and storage.is_pack_allowed(message.sticker.set_name):
+        return
+
     file_obj = pick_image_file(message)
     if file_obj is None:
         return
@@ -1758,25 +1819,54 @@ async def _admin_only(message: Message) -> bool:
     return bool(message.from_user and await is_admin(message.chat.id, message.from_user.id))
 
 
-def _target_id(message: Message):
-    r = message.reply_to_message
-    if r and r.from_user:
-        return r.from_user.id
-    parts = (message.text or "").split()
-    if len(parts) > 1 and parts[1].lstrip("-").isdigit():
-        return int(parts[1])
+def _mention_uid(message: Message):
+    """id из entity text_mention (тап по юзеру без @ника) в тексте команды."""
+    for e in (getattr(message, "entities", None) or []):
+        if getattr(e, "type", None) == "text_mention" and getattr(e, "user", None):
+            uname_cache_add(e.user)
+            return e.user.id
     return None
 
 
-def _target_and_duration(message: Message):
-    """(uid, seconds|None) из reply+длительность или '<id> <длительность>'."""
+def uname_cache_add(user) -> None:
+    """Запомнить @ник -> id (для последующего таргета по нику)."""
+    if getattr(user, "username", None):
+        uname_cache[user.username.lower()] = user.id
+
+
+def _resolve_username(token: str):
+    """'@ник' или 'ник' -> user_id из кэша (кого бот уже видел), иначе None."""
+    name = token.lstrip("@").lower()
+    return uname_cache.get(name)
+
+
+def _is_target_token(token: str) -> bool:
+    """Похоже ли слово на указание цели: числовой id или @ник."""
+    return token.startswith("@") or token.lstrip("-").isdigit()
+
+
+def _resolve_target_token(token: str):
+    """'<id>' -> int, '@ник' -> uid из кэша, иначе None."""
+    if token.startswith("@"):
+        return _resolve_username(token)
+    if token.lstrip("-").isdigit():
+        return int(token)
+    return None
+
+
+def _target_id(message: Message):
     r = message.reply_to_message
-    parts = (message.text or "").split()
     if r and r.from_user:
-        return r.from_user.id, parse_duration(" ".join(parts[1:]))
-    if len(parts) > 1 and parts[1].lstrip("-").isdigit():
-        return int(parts[1]), parse_duration(" ".join(parts[2:]))
-    return None, None
+        uname_cache_add(r.from_user)
+        return r.from_user.id
+    mid = _mention_uid(message)
+    if mid is not None:
+        return mid
+    parts = (message.text or "").split()
+    if len(parts) > 1 and _is_target_token(parts[1]):
+        uid = _resolve_target_token(parts[1])
+        return 0 if uid is None else uid    # 0 = @ник, которого бот не видел
+    return None
 
 
 _UNIT_WORDS = ("нед", "недел", "дн", "ден", "дня", "дне", "дней", "день",
@@ -1803,16 +1893,50 @@ def _split_dur_reason(tokens: list):
 
 
 def _target_dur_reason(message: Message):
-    """(uid, seconds|None, reason) — для /ban /mute с причиной."""
+    """(uid, seconds|None, reason) — для /ban /mute.
+
+    Цель: ответ на сообщение, либо первым аргументом — числовой id / @ник /
+    text_mention. Дальше — необязательные срок и причина.
+    Вернёт uid=None если цель не распознана; uid=0 (спец-код) если @ник ещё
+    не встречался боту (чтобы отличить «не понял» от «не знаю такого ника»).
+    """
     r = message.reply_to_message
     parts = (message.text or "").split()
     if r and r.from_user:
+        uname_cache_add(r.from_user)
         secs, reason = _split_dur_reason(parts[1:])
         return r.from_user.id, secs, reason
-    if len(parts) > 1 and parts[1].lstrip("-").isdigit():
+    mid = _mention_uid(message)
+    if mid is not None:
+        secs, reason = _split_dur_reason(parts[1:])   # entity сам не даёт токена — весь хвост
+        return mid, secs, reason
+    if len(parts) > 1 and _is_target_token(parts[1]):
+        uid = _resolve_target_token(parts[1])
+        if uid is None:                               # @ник, которого бот не видел
+            return 0, None, ""
         secs, reason = _split_dur_reason(parts[2:])
-        return int(parts[1]), secs, reason
+        return uid, secs, reason
     return None, None, ""
+
+
+_UNKNOWN_UNAME = ("🤷 Не знаю такого @ника — бот его ещё не видел в этом чате. "
+                  "Ответь командой на его сообщение или укажи числовой id.")
+_NO_TARGET = ("Ответь командой на пользователя или укажи id/@ник "
+              "(бот должен был видеть его сообщения).")
+
+
+async def _need_target(message: Message, uid, hint: str = _NO_TARGET) -> bool:
+    """True — цель не годится (уже ответил пользователю), надо выйти из хэндлера.
+
+    uid: None — цель не распознана; 0 — @ник неизвестен боту; иначе валидный id.
+    """
+    if uid is None:
+        await message.answer(hint)
+        return True
+    if uid == 0:
+        await message.answer(_UNKNOWN_UNAME)
+        return True
+    return False
 
 
 @dp.message(Command("spam"))
@@ -1856,6 +1980,70 @@ async def cmd_reload(message: Message):
         return
     load_reference_hashes()
     await message.answer(f"🔄 База перезагружена: {len(ref_hashes)} картинок.")
+
+
+def _pack_from_message(message: Message):
+    """Имя стикерпака: из ответа на стикер, либо аргументом (имя пака/ссылка t.me/addstickers/…)."""
+    r = message.reply_to_message
+    if r and r.sticker and r.sticker.set_name:
+        return r.sticker.set_name
+    arg = (message.text or "").split(maxsplit=1)
+    if len(arg) > 1:
+        val = arg[1].strip()
+        # поддержим ссылку вида https://t.me/addstickers/PackName
+        m = re.search(r"addstickers/([A-Za-z0-9_]+)", val)
+        return m.group(1) if m else val.lstrip("@")
+    return None
+
+
+@dp.message(Command("allowpack"))
+async def cmd_allowpack(message: Message):
+    """Добавить стикерпак в белый список (его стикеры не проверяются на 18+)."""
+    if not await _admin_only(message):
+        return
+    pack = _pack_from_message(message)
+    if not pack:
+        await message.answer("Ответь /allowpack на стикер из нужного пака "
+                             "или укажи имя пака: /allowpack ИмяПака (или ссылку addstickers/…).")
+        return
+    if storage.allow_pack(pack):
+        await message.answer(f"✅ Пак <code>{esc(pack)}</code> в белом списке — "
+                             "его стикеры больше не триггерят 18+-детектор.")
+    else:
+        await message.answer(f"ℹ️ Пак <code>{esc(pack)}</code> уже в белом списке.")
+
+
+@dp.message(Command("denypack"))
+async def cmd_denypack(message: Message):
+    """Убрать стикерпак из белого списка (снова проверять на 18+)."""
+    if not await _admin_only(message):
+        return
+    pack = _pack_from_message(message)
+    if not pack:
+        await message.answer("Ответь /denypack на стикер или укажи имя пака: /denypack ИмяПака.")
+        return
+    if storage.disallow_pack(pack):
+        await message.answer(f"🚫 Пак <code>{esc(pack)}</code> убран из белого списка — "
+                             "снова проверяется на 18+.")
+    else:
+        await message.answer(f"ℹ️ Пака <code>{esc(pack)}</code> не было в белом списке.")
+
+
+@dp.message(Command("stickers", "packs"))
+async def cmd_stickers(message: Message):
+    """Показать белый список стикерпаков."""
+    if not await _admin_only(message):
+        return
+    packs = storage.sticker_packs()
+    if not packs:
+        await message.answer("Белый список стикерпаков пуст.\n"
+                             "Добавить: ответь /allowpack на стикер (или /allowpack ИмяПака).")
+        return
+    lines = ["🧷 <b>Белые стикерпаки</b> (не проверяются на 18+):"]
+    for p in packs:
+        lines.append(f"• <code>{esc(p)}</code>")
+    lines.append("\nУбрать: /denypack ИмяПака (или ответом на стикер).")
+    await message.answer("\n".join(lines))
 
 
 @dp.message(Command("reloadgore"))
@@ -1987,8 +2175,7 @@ async def cmd_checkdc(message: Message):
     if not await _can(message, "requests"):
         return
     uid = _target_id(message)
-    if uid is None:
-        await message.answer("Ответь /checkdc на пользователя или укажи id.")
+    if await _need_target(message, uid, "Ответь /checkdc на пользователя или укажи id/@ник."):
         return
     dc = await user_dc(uid)
     if dc is None:
@@ -2040,9 +2227,9 @@ async def cmd_ban(message: Message):
     if not await _can(message, "ban"):
         return
     uid, seconds, reason = _target_dur_reason(message)
-    if uid is None:
-        await message.answer("Ответь командой на пользователя или укажи id. "
-                             "Можно срок и причину: /ban 3 дня спам.")
+    if await _need_target(message, uid,
+                          "Ответь командой на пользователя или укажи id/@ник. "
+                          "Можно срок и причину: /ban 3 дня спам."):
         return
     if await _deny_and_reply(message, uid):
         return
@@ -2057,8 +2244,8 @@ async def cmd_unban(message: Message):
     if not await _can(message, "ban"):
         return
     uid = _target_id(message)
-    if uid is None:
-        await message.answer("Ответь командой на пользователя или укажи его id.")
+    if await _need_target(message, uid,
+                          "Ответь командой на пользователя или укажи его id/@ник."):
         return
     try:
         await bot.unban_chat_member(message.chat.id, uid, only_if_banned=True)
@@ -2072,9 +2259,9 @@ async def cmd_mute(message: Message):
     if not await _can(message, "mute"):
         return
     uid, seconds, reason = _target_dur_reason(message)
-    if uid is None:
-        await message.answer("Ответь командой на пользователя. "
-                             "Можно срок и причину: /mute 3 часа флуд.")
+    if await _need_target(message, uid,
+                          "Ответь командой на пользователя или укажи id/@ник. "
+                          "Можно срок и причину: /mute 3 часа флуд."):
         return
     if await _deny_and_reply(message, uid):
         return
@@ -2090,8 +2277,8 @@ async def cmd_unmute(message: Message):
     if not await _can(message, "mute"):
         return
     uid = _target_id(message)
-    if uid is None:
-        await message.answer("Ответь командой на пользователя.")
+    if await _need_target(message, uid,
+                          "Ответь командой на пользователя или укажи id/@ник."):
         return
     try:
         await bot.restrict_chat_member(message.chat.id, uid, permissions=FULL)
@@ -2104,24 +2291,26 @@ async def cmd_unmute(message: Message):
 async def cmd_warn(message: Message):
     if not await _can(message, "warn"):
         return
-    r = message.reply_to_message
-    if not r or not r.from_user:
-        await message.answer("Ответь командой на сообщение нарушителя.")
+    uid = _target_id(message)
+    if await _need_target(message, uid,
+                          "Ответь командой на сообщение нарушителя или укажи id/@ник."):
         return
-    uid = r.from_user.id
     if await _deny_and_reply(message, uid):
         return
+    # Имя для сообщения: из reply есть объект, иначе — ссылка по id.
+    r = message.reply_to_message
+    who = mention(r.from_user) if (r and r.from_user and r.from_user.id == uid) else id_mention(uid)
     n = storage.add_warn(message.chat.id, uid)
-    if n >= config.WARN_LIMIT:
+    if n >= num("WARN_LIMIT"):
         storage.reset_warns(message.chat.id, uid)
-        if config.WARN_ACTION == "ban":
+        if action_for("WARN_ACTION") == "ban":
             await ban_user(message.chat.id, uid)
-            await message.answer(f"🔨 {mention(r.from_user)} забанен (лимит предупреждений).")
+            await message.answer(f"🔨 {who} забанен (лимит предупреждений).")
         else:
             await mute_user(message.chat.id, uid)
-            await message.answer(f"🔇 {mention(r.from_user)} в муте (лимит предупреждений).")
+            await message.answer(f"🔇 {who} в муте (лимит предупреждений).")
     else:
-        await message.answer(f"⚠️ {mention(r.from_user)}: предупреждение {n}/{config.WARN_LIMIT}.")
+        await message.answer(f"⚠️ {who}: предупреждение {n}/{num('WARN_LIMIT')}.")
 
 
 @dp.message(Command("unwarn"))
@@ -2129,8 +2318,8 @@ async def cmd_unwarn(message: Message):
     if not await _can(message, "warn"):
         return
     uid = _target_id(message)
-    if uid is None:
-        await message.answer("Ответь командой на пользователя.")
+    if await _need_target(message, uid,
+                          "Ответь командой на пользователя или укажи id/@ник."):
         return
     storage.reset_warns(message.chat.id, uid)
     await message.answer("✅ Предупреждения сняты.")
@@ -2141,8 +2330,8 @@ async def cmd_whitelist(message: Message):
     if not await _admin_only(message):
         return
     uid = _target_id(message)
-    if uid is None:
-        await message.answer("Ответь командой на пользователя, чтобы разрешить ему ссылки.")
+    if await _need_target(message, uid,
+                          "Ответь командой на пользователя или укажи id/@ник, чтобы разрешить ему ссылки."):
         return
     if storage.allow_link(message.chat.id, uid):
         await message.answer("✅ Пользователю разрешены ссылки.")
@@ -2197,8 +2386,8 @@ async def cmd_trust(message: Message):
     if not await _admin_only(message):
         return
     uid = _target_id(message)
-    if uid is None:
-        await message.answer("Ответь /trust на пользователя (он будет мимо всех проверок).")
+    if await _need_target(message, uid,
+                          "Ответь /trust на пользователя или укажи id/@ник (он будет мимо всех проверок)."):
         return
     added = storage.toggle_trusted(message.chat.id, uid)
     await message.answer("✅ Добавлен в доверенные." if added else "➖ Убран из доверенных.")
@@ -2206,15 +2395,25 @@ async def cmd_trust(message: Message):
 
 @dp.message(Command("setrole"))
 async def cmd_setrole(message: Message):
-    """Выдать внутреннюю роль. Раздавать роли может ТОЛЬКО владелец (см. панель → 👑 Владельцы)."""
+    """Выдать внутреннюю роль. Раздавать роли может ТОЛЬКО владелец (см. панель → 👑 Владельцы).
+
+    Формы: ответом «/setrole роль», либо «/setrole <id|@ник> роль».
+    """
     if not (message.from_user and storage.is_owner(message.from_user.id)):
         return
     parts = (message.text or "").split()
     r = message.reply_to_message
-    if r and r.from_user:
+    mid = _mention_uid(message)
+    if r and r.from_user:                              # ответом: роль — первый аргумент
+        uname_cache_add(r.from_user)
         uid, role = r.from_user.id, (parts[1].lower() if len(parts) > 1 else "")
-    elif len(parts) > 2 and parts[1].lstrip("-").isdigit():
-        uid, role = int(parts[1]), parts[2].lower()
+    elif mid is not None:                              # tap-упоминание: роль — первый аргумент
+        uid, role = mid, (parts[1].lower() if len(parts) > 1 else "")
+    elif len(parts) > 2 and _is_target_token(parts[1]):  # «/setrole <id|@ник> роль»
+        uid, role = _resolve_target_token(parts[1]), parts[2].lower()
+        if uid is None:
+            await message.answer(_UNKNOWN_UNAME)
+            return
     else:
         await message.answer("Использование: /setrole роль (ответом) или /setrole id роль.\n"
                              f"Роли: {', '.join(config.ROLES)}")
@@ -2223,8 +2422,9 @@ async def cmd_setrole(message: Message):
         await message.answer(f"Нет роли «{esc(role)}». Доступны: {', '.join(config.ROLES)}")
         return
     storage.set_role(uid, role)
-    await message.answer(f"✅ {id_mention(uid)} — роль <b>{esc(role)}</b> "
-                         f"({', '.join(sorted(role_perms(role)))}).")
+    await message.answer(f"✅ {id_mention(uid, await display_name(message.chat.id, uid))} — "
+                         f"роль {role_label(role)} (ранг {role_rank(role)}, "
+                         f"права: {', '.join(sorted(role_perms(role))) or '—'}).")
 
 
 @dp.message(Command("delrole"))
@@ -2232,8 +2432,7 @@ async def cmd_delrole(message: Message):
     if not (message.from_user and storage.is_owner(message.from_user.id)):
         return
     uid = _target_id(message)
-    if uid is None:
-        await message.answer("Ответь /delrole на пользователя или укажи id.")
+    if await _need_target(message, uid, "Ответь /delrole на пользователя или укажи id/@ник."):
         return
     storage.set_role(uid, None)
     await message.answer("✅ Роль снята.")
@@ -2244,16 +2443,26 @@ async def cmd_roles(message: Message):
     if not (message.from_user and storage.is_owner(message.from_user.id)):
         return
     lines = ["🎖 <b>Роли</b> (Telegram-админы имеют все права по умолчанию)\n",
-             "Доступные:"]
-    for name, perms in config.ROLES.items():
-        lines.append(f"• <b>{esc(name)}</b>: {', '.join(sorted(perms))}")
+             "Иерархия (от старшей к младшей):"]
+    # Роли по убыванию ранга — наглядная иерархия.
+    for name in sorted(config.ROLES, key=lambda n: role_rank(n), reverse=True):
+        lines.append(f"• {role_label(name)} — ранг {role_rank(name)}: "
+                     f"{', '.join(sorted(role_perms(name)))}")
     rr = storage.roles_all()
     if rr:
         lines.append("\nНазначено:")
-        for u, role in rr.items():
-            lines.append(f"• <code>{u}</code> — {esc(role)}")
+        # Сначала старшие по должности.
+        ordered = sorted(rr.items(), key=lambda kv: role_rank(kv[1]), reverse=True)
+        for u, role in ordered:
+            try:
+                who = await display_name(message.chat.id, int(u))
+            except (ValueError, TypeError):
+                who = f"id{u}"
+            lines.append(f"• {role_label(role)} — {id_mention(int(u), who)} "
+                         f"(<code>{u}</code>)")
     else:
-        lines.append("\nПока никому. Выдать: /setrole роль (ответом).")
+        lines.append("\nПока никому. Выдать: /setrole роль (ответом) "
+                     "или /setrole @ник роль.")
     await message.answer("\n".join(lines))
 
 
@@ -2607,8 +2816,7 @@ async def cmd_info(message: Message):
     if not await _admin_only(message):
         return
     uid = _target_id(message)
-    if uid is None:
-        await message.answer("Ответь /info на пользователя или укажи id.")
+    if await _need_target(message, uid, "Ответь /info на пользователя или укажи id/@ник."):
         return
     chat_id = message.chat.id
     name, uname, status = str(uid), "—", "?"
@@ -2617,13 +2825,26 @@ async def cmd_info(message: Message):
         name = m.user.full_name
         uname = f"@{m.user.username}" if m.user.username else "—"
         status = str(m.status)
+        uname_cache_add(m.user)
     except TelegramBadRequest:
         pass
+    # Внутренняя роль/должность и её место в иерархии.
+    role = storage.get_role(uid)
+    if await is_admin(chat_id, uid):
+        role_line = "Роль: 🛡 TG-админ чата (все права)"
+    elif role:
+        role_line = (f"Роль: {role_label(role)} (ранг {role_rank(role)}, "
+                     f"права: {', '.join(sorted(role_perms(role))) or '—'})")
+    else:
+        role_line = "Роль: — (обычный участник)"
+    if storage.is_owner(uid):
+        role_line += " 👑 владелец бота"
     joined = newcomer.get((chat_id, uid))
     txt = (
         "👤 <b>Досье</b>\n"
         f"ID: <code>{uid}</code>\nИмя: {esc(name)}\nЮзер: {esc(uname)}\n"
         f"Статус в чате: {esc(status)}\n"
+        f"{role_line}\n"
         f"Предупреждений: {storage.get_warns(chat_id, uid)}/{num('WARN_LIMIT')}\n"
         f"Доверенный: {'да' if storage.is_trusted(chat_id, uid) else 'нет'} | "
         f"ссылки: {'разрешены' if storage.link_allowed(chat_id, uid) else 'нет'}\n"
@@ -2650,12 +2871,15 @@ async def cmd_help(message: Message):
         return
     await message.answer(
         "🛡 <b>Команды админов</b>\n"
-        "Модерация: /ban /unban /mute /unmute (ответом; срок и причина: /mute 3 дня флуд)\n"
+        "Модерация: /ban /unban /mute /unmute — ответом, по id или по @нику "
+        "(срок и причина: /mute @ivan 3 дня флуд)\n"
         "Текстом ответом: <code>мут 3 часа</code>, <code>бан 2 дня</code>, "
         "<code>размут</code>, <code>варн</code>, <code>кик</code>\n"
         "/warn /unwarn — предупреждения | /whitelist — ссылки | /trust — доверенный\n"
-        "Роли (модерация без прав админа): /setrole роль /delrole /roles\n"
+        "Роли (иерархия: 👑админ &gt; ⭐старший &gt; 🎖модератор): /setrole [@ник|id] роль "
+        "/delrole /roles\n"
         "База спама: /spam (ответом на картинку) /reload\n"
+        "Стикерпаки (не 18+): /allowpack (ответом на стикер) /denypack /stickers\n"
         "Стоп-слова: /addword /delword /words | Правила: /rules /setrules\n"
         "Приветствие: /setwelcome | Автоответы: /addtrigger ключ | ответ, /deltrigger, /triggers\n"
         "Режимы: /night /quiet /antimat on|off\n"
@@ -2886,9 +3110,10 @@ def bots_keyboard(owner: int) -> InlineKeyboardMarkup:
 def roles_keyboard() -> InlineKeyboardMarkup:
     """Список ролей (правка их прав) + переход к назначениям."""
     rows = []
-    for name in config.ROLES:
+    for name in sorted(config.ROLES, key=lambda n: role_rank(n), reverse=True):
         rows.append([InlineKeyboardButton(
-            text=f"🎖 {name} ({len(role_perms(name))})", callback_data=f"panel:role:{name}")])
+            text=f"{role_badge(name)} {name} · ранг {role_rank(name)} ({len(role_perms(name))})",
+            callback_data=f"panel:role:{name}")])
     rows.append([InlineKeyboardButton(text="👥 Назначения", callback_data="panel:asg")])
     rows.append([InlineKeyboardButton(text="⬅️ Назад", callback_data="panel:back")])
     return InlineKeyboardMarkup(inline_keyboard=rows)
@@ -2914,8 +3139,13 @@ def role_perm_keyboard(role: str) -> InlineKeyboardMarkup:
 def asg_keyboard() -> InlineKeyboardMarkup:
     """Назначенные роли: тап по строке снимает роль; «Выдать роль» — назначить по id."""
     rows = []
-    for u, role in storage.roles_all().items():
-        rows.append([InlineKeyboardButton(text=f"❌ {u} — {role}",
+    ordered = sorted(storage.roles_all().items(), key=lambda kv: role_rank(kv[1]), reverse=True)
+    for u, role in ordered:
+        try:
+            who = cached_name(int(u))
+        except (ValueError, TypeError):
+            who = str(u)
+        rows.append([InlineKeyboardButton(text=f"❌ {role_badge(role)} {role} — {who}",
                                           callback_data=f"panel:unrole:{u}")])
     if not rows:
         rows.append([InlineKeyboardButton(text="Никому не назначено", callback_data="panel:noop")])

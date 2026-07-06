@@ -380,7 +380,24 @@ async def run_deny():
     check("deny: TG-админа не тронуть", await bot._deny_target(-1, 903, 900) is not None)
     check("deny: персонал обычному нельзя", await bot._deny_target(-1, 903, 901) is not None)
     check("deny: персонал TG-админу можно", await bot._deny_target(-1, 900, 901) is None)
-    bot.storage.set_role(901, None)
+
+    # --- иерархия ролей: старший > модератор ---
+    bot.storage.set_role(910, "модератор")
+    bot.storage.set_role(911, "старший")
+    bot.storage.set_role(912, "админ")
+    # старший может наказать модератора, обратное — нельзя
+    check("hier: старший наказывает модератора", await bot._deny_target(-1, 911, 910) is None)
+    check("hier: модератор НЕ наказывает старшего", await bot._deny_target(-1, 910, 911) is not None)
+    # равный равного нельзя
+    bot.storage.set_role(913, "модератор")
+    check("hier: модератор НЕ наказывает модератора", await bot._deny_target(-1, 910, 913) is not None)
+    # админ (внутр.) наказывает старшего
+    check("hier: внутр-админ наказывает старшего", await bot._deny_target(-1, 912, 911) is None)
+    # ранги
+    check("hier: ранг старший > модератор", bot.role_rank("старший") > bot.role_rank("модератор"))
+    check("hier: ранг неизвестной роли = 0", bot.role_rank("нет-такой") == 0)
+    for u in (901, 910, 911, 912, 913):
+        bot.storage.set_role(u, None)
 
 
 asyncio.run(run_deny())
@@ -398,6 +415,49 @@ check("roleperm: убрали mute", not bot.has_perm(560, "mute"))
 storage.set_role(560, None)
 check("roleperm: фоллбэк на config без оверрайда",
       bot.role_perms("старший") == set(bot.config.ROLES["старший"]))
+
+# ---- таргет по @нику / id / text_mention ----
+async def run_target():
+    bot.uname_cache.clear()
+    bot.uname_cache["ivan"] = 7001            # бот «видел» @ivan
+    CH = types.SimpleNamespace(id=-77, type="supergroup", username="grp")
+
+    def m(text, entities=None, reply=None):
+        return types.SimpleNamespace(chat=CH, text=text, entities=entities,
+                                     reply_to_message=reply,
+                                     from_user=types.SimpleNamespace(id=1, full_name="A", username=None))
+
+    check("target: по числовому id", bot._target_id(m("/mute 12345")) == 12345)
+    check("target: по известному @нику", bot._target_id(m("/mute @ivan")) == 7001)
+    check("target: неизвестный @ник -> 0", bot._target_id(m("/mute @nobody")) == 0)
+    check("target: без цели -> None", bot._target_id(m("/mute")) is None)
+    # text_mention (тап по юзеру без ника)
+    ent = [types.SimpleNamespace(type="text_mention",
+                                 user=types.SimpleNamespace(id=8002, username="petya", full_name="P"))]
+    check("target: text_mention", bot._target_id(m("/mute Пётр", entities=ent)) == 8002)
+    check("target: text_mention кэширует ник", bot.uname_cache.get("petya") == 8002)
+    # с сроком и причиной
+    uid, secs, reason = bot._target_dur_reason(m("/ban @ivan 3 дня спам"))
+    check("target: @ник + срок + причина uid", uid == 7001)
+    check("target: @ник + срок + причина reason", reason == "спам")
+    uid2, _, _ = bot._target_dur_reason(m("/ban @nobody флуд"))
+    check("target: неизвестный @ник в dur_reason -> 0", uid2 == 0)
+
+
+asyncio.run(run_target())
+
+# ---- белый список стикерпаков ----
+for _p in list(bot.storage.sticker_packs()):
+    bot.storage.disallow_pack(_p)
+check("pack: изначально не в списке", not bot.storage.is_pack_allowed("MyPack"))
+check("pack: добавили", bot.storage.allow_pack("MyPack") is True)
+check("pack: повторно не добавить", bot.storage.allow_pack("mypack") is False)  # регистронезависимо
+check("pack: теперь в списке", bot.storage.is_pack_allowed("MyPack"))
+check("pack: регистр не важен при проверке", bot.storage.is_pack_allowed("MYPACK"))
+check("pack: пустое имя не whitelist", not bot.storage.is_pack_allowed(""))
+check("pack: пустое имя не добавить", bot.storage.allow_pack("") is False)
+check("pack: убрали", bot.storage.disallow_pack("MyPack") is True)
+check("pack: после удаления нет", not bot.storage.is_pack_allowed("MyPack"))
 
 # ---- классификация команд (публичные vs админские) ----
 check("cmd: /ban@bot -> ban", bot._cmd_name("/ban@LavkaBot 3 дня") == "ban")

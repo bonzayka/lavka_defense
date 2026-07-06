@@ -31,6 +31,7 @@ _DEFAULT = {
     "roles": {},              # str(user_id) -> имя роли (внутренние права)
     "role_perms": {},         # имя_роли -> [список прав]; оверрайд config.ROLES из панели
     "owners": [],             # [user_id, ...] — владельцы: только они раздают роли/должности
+    "sticker_packs": [],      # [set_name, ...] — стикерпаки, которые НЕ проверять на 18+
 }
 
 AUDIT_LIMIT = 200
@@ -290,6 +291,46 @@ def remove_owner(user_id: int) -> bool:
     o = _data.setdefault("owners", [])
     if int(user_id) in o:
         o.remove(int(user_id))
+        save()
+        return True
+    return False
+
+
+# --- белый список стикерпаков (не проверять на 18+) ---
+
+def _norm_pack(set_name: str) -> str:
+    return (set_name or "").strip().lower()
+
+
+def sticker_packs() -> list:
+    return _data.setdefault("sticker_packs", [])
+
+
+def is_pack_allowed(set_name: str) -> bool:
+    """True — стикерпак в белом списке (пропускать без NSFW-проверки)."""
+    name = _norm_pack(set_name)
+    return bool(name) and name in _data.setdefault("sticker_packs", [])
+
+
+def allow_pack(set_name: str) -> bool:
+    """True — добавили в белый список, False — уже был там (или пустое имя)."""
+    name = _norm_pack(set_name)
+    if not name:
+        return False
+    p = _data.setdefault("sticker_packs", [])
+    if name in p:
+        return False
+    p.append(name)
+    save()
+    return True
+
+
+def disallow_pack(set_name: str) -> bool:
+    """True — убрали из белого списка, False — его там не было."""
+    name = _norm_pack(set_name)
+    p = _data.setdefault("sticker_packs", [])
+    if name in p:
+        p.remove(name)
         save()
         return True
     return False
