@@ -71,10 +71,26 @@ check("link basic none", bot.message_link(C(username=None, id=-44), 7) is None)
 ok = True
 for _ in range(100):
     for st in bot.build_questions():
+        if st.get("kind") == "image":
+            continue  # фото-шаг отвечается вводом кода, а не кнопками
         o = bot.options_for(st)
         if st["answer"] not in o or len(o) != 4 or len(set(o)) != 4:
             ok = False
 check("captcha: ответ всегда среди 4 вариантов", ok)
+
+# ---- фото-капча ----
+png = bot.make_captcha_image("12345")
+check("photocaptcha: PNG сгенерирован", png[:4] == b"\x89PNG" and len(png) > 200)
+bot.storage.set_flag("CAPTCHA_IMAGE", True)
+bot.storage.set_num("CAPTCHA_DIGITS", 5)
+s0 = bot.build_questions()[0]
+check("photocaptcha: шаг 1 = image", s0.get("kind") == "image")
+check("photocaptcha: код из 5 цифр", s0["answer"].isdigit() and len(s0["answer"]) == 5)
+bot.storage.set_flag("CAPTCHA_IMAGE", False)
+check("photocaptcha: выкл -> пример a+b", bot.build_questions()[0].get("kind") == "num")
+check("photocaptcha: TEXT_ONLY только текст",
+      bot.TEXT_ONLY.can_send_messages is True and bot.TEXT_ONLY.can_send_photos is False)
+bot.storage.set_flag("CAPTCHA_IMAGE", True)  # вернуть дефолт для остальных проверок
 
 # ---- хранилище: round-trip ----
 storage.add_stopword("тест_слово")

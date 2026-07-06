@@ -29,7 +29,7 @@ import tempfile
 from collections import deque
 from datetime import datetime, timedelta, timezone
 
-from PIL import Image
+from PIL import Image, ImageDraw, ImageFont
 
 from aiogram import Bot, BaseMiddleware, Dispatcher, F
 from aiogram.client.default import DefaultBotProperties
@@ -42,6 +42,7 @@ from aiogram.types import (
     ChatJoinRequest,
     ChatMemberUpdated,
     ChatPermissions,
+    BufferedInputFile,
     InlineKeyboardButton,
     InlineKeyboardMarkup,
 )
@@ -111,6 +112,13 @@ stats = {"challenged": 0, "passed": 0, "failed": 0, "img_muted": 0,
          "banned": 0, "reports": 0, "raids": 0}
 
 MUTE = ChatPermissions(can_send_messages=False)
+# Режим фото-капчи: новичку можно ТОЛЬКО текст (ввести код), без медиа/ссылок.
+TEXT_ONLY = ChatPermissions(
+    can_send_messages=True, can_send_audios=False, can_send_documents=False,
+    can_send_photos=False, can_send_videos=False, can_send_video_notes=False,
+    can_send_voice_notes=False, can_send_polls=False, can_send_other_messages=False,
+    can_add_web_page_previews=False, can_invite_users=False,
+)
 FULL = ChatPermissions(
     can_send_messages=True, can_send_audios=True, can_send_documents=True,
     can_send_photos=True, can_send_videos=True, can_send_video_notes=True,
@@ -833,6 +841,14 @@ class ModerationMiddleware(BaseMiddleware):
     async def _moderate(self, msg: Message) -> bool:
         chat_id = msg.chat.id
 
+        # Идёт фото-капча с вводом кода: любое сообщение новичка перехватываем
+        # (удаляем; на фото-шаге сверяем код). Раньше всех прочих проверок.
+        if msg.from_user:
+            st = pending.get((chat_id, msg.from_user.id))
+            if st and st.get("steps"):
+                await handle_captcha_message(msg, st)
+                return True
+
         # Сообщения «от имени канала» — у них from_user может быть None.
         sc = msg.sender_chat
         if sc and flag("BLOCK_CHANNEL_MESSAGES") and sc.id != chat_id and not msg.is_automatic_forward:
@@ -941,12 +957,65 @@ class ModerationMiddleware(BaseMiddleware):
 
 # ---------------------------------------------------------------- капча
 
+_FONT_PATHS = [
+    "arial.ttf", "Arial.ttf",                                  # Windows (по имени)
+    "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",    # Debian/Ubuntu
+    "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+]
+
+
+def _captcha_font(size: int):
+    for p in _FONT_PATHS:
+        try:
+            return ImageFont.truetype(p, size)
+        except OSError:
+            continue
+    return ImageFont.load_default(size=size)   # Pillow >= 10: масштабируемый дефолт
+
+
+def make_captcha_image(code: str) -> bytes:
+    """Картинка с цифрами кода (со сдвигом/наклоном/шумом) — антибот-капча. PNG в память."""
+    pad, gap = 18, 40
+    W, H = pad * 2 + gap * len(code), 90
+    img = Image.new("RGB", (W, H), (238, 240, 245))
+    draw = ImageDraw.Draw(img)
+    # фоновый шум: линии и точки
+    for _ in range(6):
+        draw.line([(random.randint(0, W), random.randint(0, H)),
+                   (random.randint(0, W), random.randint(0, H))],
+                  fill=(random.randint(150, 205),) * 3, width=1)
+    for _ in range(220):
+        draw.point((random.randint(0, W), random.randint(0, H)),
+                   fill=(random.randint(150, 210),) * 3)
+    # цифры по одной, каждая — со своим наклоном/цветом/сдвигом
+    for i, ch in enumerate(code):
+        size = random.randint(40, 52)
+        glyph = Image.new("RGBA", (size + 14, size + 20), (0, 0, 0, 0))
+        gd = ImageDraw.Draw(glyph)
+        color = (random.randint(0, 90), random.randint(0, 90), random.randint(0, 110))
+        gd.text((6, 4), ch, font=_captcha_font(size), fill=color + (255,))
+        glyph = glyph.rotate(random.randint(-28, 28), expand=True, resample=Image.BICUBIC)
+        x = pad + i * gap - 8
+        y = (H - glyph.height) // 2 + random.randint(-6, 6)
+        img.paste(glyph, (x, y), glyph)
+    buf = io.BytesIO()
+    img.save(buf, format="PNG")
+    return buf.getvalue()
+
+
 def build_questions() -> list[dict]:
-    a, b = random.randint(2, 9), random.randint(2, 9)
     q, ans, wrongs = random.choice(COMMONSENSE)
     name, n = random.choice(list(SHAPES.items()))
+    if flag("CAPTCHA_IMAGE"):
+        code = "".join(random.choice("0123456789") for _ in range(num("CAPTCHA_DIGITS")))
+        step1 = {"q": "Шаг 1/3. Введите цифры с картинки одним сообщением:",
+                 "answer": code, "kind": "image"}
+    else:
+        a, b = random.randint(2, 9), random.randint(2, 9)
+        step1 = {"q": f"Шаг 1/3. Реши пример:\n<b>{a} + {b} = ?</b>",
+                 "answer": str(a + b), "kind": "num"}
     return [
-        {"q": f"Шаг 1/3. Реши пример:\n<b>{a} + {b} = ?</b>", "answer": str(a + b), "kind": "num"},
+        step1,
         {"q": f"Шаг 2/3. {esc(q)}", "answer": ans, "wrongs": wrongs},
         {"q": f"Шаг 3/3. Сколько углов у <b>{name}</b>? (ответ цифрой)", "answer": str(n), "kind": "num"},
     ]
@@ -1091,17 +1160,23 @@ async def challenge(chat_id: int, user) -> None:
                 await report(chat_id, f"🚫 {mention(user)} забанен на входе: {esc(bad)}.")
                 return
 
-        await bot.restrict_chat_member(chat_id, user.id, permissions=MUTE)
-
         steps = build_questions()
         first = steps[0]
-        text = (
+        intro = (
             f"👋 {mention(user)}, добро пожаловать!\n"
             f"Пройди проверку из <b>3 заданий</b> за "
             f"<b>{num('CAPTCHA_TIMEOUT')} сек</b>. Ошибка или тишина — бан.\n\n"
             f"{first['q']}"
         )
-        sent = await bot.send_message(chat_id, text, reply_markup=captcha_markup(0, options_for(first)))
+        if first.get("kind") == "image":
+            # Только текст (чтобы новичок ввёл код), медиа/ссылки запрещены.
+            await bot.restrict_chat_member(chat_id, user.id, permissions=TEXT_ONLY)
+            photo = BufferedInputFile(make_captcha_image(first["answer"]), "captcha.png")
+            sent = await bot.send_photo(chat_id, photo, caption=intro)
+        else:
+            await bot.restrict_chat_member(chat_id, user.id, permissions=MUTE)
+            sent = await bot.send_message(chat_id, intro,
+                                          reply_markup=captcha_markup(0, options_for(first)))
         task = asyncio.create_task(captcha_timeout(chat_id, user.id))
         pending[key] = {"steps": steps, "idx": 0, "msg_id": sent.message_id, "task": task}
         stats["challenged"] += 1
@@ -1203,6 +1278,54 @@ async def on_left_member(message: Message):
             await message.delete()
         except TelegramBadRequest:
             pass
+
+
+async def _advance_after_image(chat_id: int, user, st: dict) -> None:
+    """Верный код на фото-шаге -> следующий (кнопочный) шаг или завершение проверки."""
+    new_idx = st["idx"] + 1
+    if st.get("msg_id"):                      # убрать сообщение с картинкой
+        try:
+            await bot.delete_message(chat_id, st["msg_id"])
+        except TelegramBadRequest:
+            pass
+    if new_idx >= len(st["steps"]):           # картинка была единственным шагом
+        try:
+            await bot.restrict_chat_member(chat_id, user.id, permissions=FULL)
+        except TelegramBadRequest as e:
+            log.warning("Не смог снять ограничения с %s: %s", user.id, e)
+        await cleanup(chat_id, user.id, delete_msg=False)
+        stats["passed"] += 1
+        await send_welcome(chat_id, user)
+        log.info("Юзер %s прошёл фото-капчу.", user.id)
+        return
+    st["idx"] = new_idx
+    nstep = st["steps"][new_idx]
+    sent = await bot.send_message(
+        chat_id, f"✅ Верно!\n\n{mention(user)}, {nstep['q']}",
+        reply_markup=captcha_markup(new_idx, options_for(nstep)))
+    st["msg_id"] = sent.message_id
+
+
+async def handle_captcha_message(msg: Message, st: dict) -> None:
+    """Сообщение новичка во время капчи: чистим чат, на фото-шаге сверяем введённый код."""
+    chat_id, user = msg.chat.id, msg.from_user
+    try:
+        await msg.delete()
+    except TelegramBadRequest:
+        pass
+    step = st["steps"][st["idx"]]
+    if step.get("kind") != "image":
+        return                                # на кнопочных шагах любой текст просто удаляем
+    given = re.sub(r"\D", "", msg.text or "")
+    if not given:
+        return                                # не цифры — ждём код дальше
+    if given != step["answer"]:
+        stats["failed"] += 1
+        await ban_user(chat_id, user.id)
+        audit("капча", "ban (неверный код)", user.id, user.full_name)
+        await cleanup(chat_id, user.id)
+        return
+    await _advance_after_image(chat_id, user, st)
 
 
 @dp.callback_query(F.data.startswith("cap:"))
@@ -2574,6 +2697,7 @@ PANEL_FLAGS = [
     ("TRIGGERS_ENABLED", "Автоответы"),
     ("ANTIRAID_ENABLED", "Антирейд"),
     ("CHECK_JOIN_NAMES", "Имена"),
+    ("CAPTCHA_IMAGE", "Фото-капча (ввод кода)"),
     ("AUTO_ACCEPT", "Автоприём заявок"),
     ("DC_CHECK_JOIN", "DC-фильтр (DC5)"),
     ("LOCKDOWN", "🚨 Локдаун"),
@@ -2594,6 +2718,7 @@ PANEL_FLAGS = [
 # Числовые настройки, редактируемые из панели.
 PANEL_NUMS = [
     ("CAPTCHA_TIMEOUT", "Таймаут капчи (сек)"),
+    ("CAPTCHA_DIGITS", "Фото-капча: цифр"),
     ("ANTIFLOOD_COUNT", "Антифлуд: сообщений"),
     ("ANTIFLOOD_SECONDS", "Антифлуд: секунд"),
     ("WARN_LIMIT", "Лимит предупреждений"),
@@ -2633,8 +2758,9 @@ PANEL_CATEGORIES = [
                              "BLOCK_FORWARDS", "BLOCK_CHANNEL_MESSAGES", "BLOCK_APK",
                              "BLOCK_PREMIUM_EMOJI", "GORE_ON", "ANTIFLOOD_ENABLED",
                              "ANTIREPEAT_ENABLED", "TRIGGERS_ENABLED"]),
-    ("entry", "🚪 Вход и капча", ["CHECK_JOIN_NAMES", "AUTO_ACCEPT", "DC_CHECK_JOIN",
-                                  "LOCKDOWN", "WELCOME_ENABLED", "ANTIRAID_ENABLED"]),
+    ("entry", "🚪 Вход и капча", ["CHECK_JOIN_NAMES", "CAPTCHA_IMAGE", "AUTO_ACCEPT",
+                                  "DC_CHECK_JOIN", "LOCKDOWN", "WELCOME_ENABLED",
+                                  "ANTIRAID_ENABLED"]),
     ("modes", "🌙 Режимы", ["NIGHT_MODE", "QUIET_MODE", "DELETE_SERVICE_MESSAGES",
                             "DELETE_ADMIN_COMMANDS", "DELETE_USER_COMMANDS",
                             "VOTE_ANYONE", "ANON_ADMIN"]),
