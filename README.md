@@ -11,7 +11,7 @@
    (а также картинка-документ и статичный стикер) проверяется так:
    - **Слой 1 — хеш по базе `photo/`:** точный/пережатый повтор известной
      картинки (похоже **≥ 85%**).
-   - **Слой 2 — нейросеть NudeNet (18+):** распознаёт наготу/гениталии на
+   - **Слой 2 — нейросеть ifnude (18+):** распознаёт наготу/гениталии на
      **любой новой** картинке, даже которой нет в базе. **Кровь/расчленёнку
      (гор) НЕ распознаёт** — только наготу.
 
@@ -71,7 +71,7 @@ venv\Scripts\python.exe bot.py
    bash deploy_vps.sh
    ```
    Скрипт ставит системные либы (`libgl1`, `libglib2.0-0` для opencv), создаёт
-   `venv` и ставит зависимости (включая NudeNet).
+   `venv` и ставит зависимости (включая ifnude).
 3. Проверь `config.py`: токен; `PROXY` — если VPS **в РФ**, оставь SOCKS5;
    если **за границей**, поставь `PROXY = None` (Telegram доступен напрямую).
 4. Разовый запуск для проверки: `./venv/bin/python bot.py` (в чат `/ping`).
@@ -103,13 +103,15 @@ journalctl -u defense-bot -f           # живой лог
 | `NSFW_MIN_SCORE` | Порог уверенности модели 0..1 (по умолч. 0.5; меньше = строже) |
 | `NSFW_BAD_CLASSES` | Какие метки считать нарушением (см. ниже) |
 
-### Метки NudeNet (для `NSFW_BAD_CLASSES`)
-Полный список: `FEMALE_GENITALIA_EXPOSED`, `MALE_GENITALIA_EXPOSED`,
-`ANUS_EXPOSED`, `FEMALE_BREAST_EXPOSED`, `BUTTOCKS_EXPOSED`,
-`FEMALE_GENITALIA_COVERED`, `FEMALE_BREAST_COVERED`, `BELLY_EXPOSED`,
-`FEET_EXPOSED`, `ARMPITS_EXPOSED`, `FACE_*` и т.п. По умолчанию включены только
-явные (гениталии/анус/голая грудь). Хочешь жёстче — добавь `BUTTOCKS_EXPOSED`.
-Первый запуск инициализирует модель ~1–2 сек; инференс ~50–200 мс на картинку.
+### Метки ifnude (для `NSFW_BAD_CLASSES`)
+Полный список: `EXPOSED_GENITALIA_F`, `EXPOSED_GENITALIA_M`, `EXPOSED_ANUS`,
+`EXPOSED_BREAST_F`, `EXPOSED_BREAST_M`, `EXPOSED_BUTTOCKS`, `EXPOSED_BELLY`,
+`EXPOSED_FEET`, `EXPOSED_ARMPITS`, а также `COVERED_*` (прикрытые) и
+`FACE_F`/`FACE_M`. По умолчанию включены только явные (гениталии/анус); голая
+грудь `EXPOSED_BREAST_F` вынесена в комментарий, т.к. модель часто путает её с
+декольте/пляжем. Хочешь жёстче — добавь `EXPOSED_BREAST_F`, `EXPOSED_BUTTOCKS`.
+Первый запуск скачивает модель (~139 МБ, один раз в `~/.ifnude/`); инференс
+~100–300 мс на картинку.
 | `DELETE_CAPTCHA_MESSAGE` | Удалять сообщение капчи после ответа/бана |
 | `DELETE_JOIN_MESSAGE` | Удалять «X присоединился к группе» |
 | `PROXY` | Прокси, если Telegram заблокирован (см. ниже) |

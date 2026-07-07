@@ -5,7 +5,7 @@
 Кратко:
   • 3-факторная капча на входе (пример / вопрос / углы фигуры); админы пропускаются;
     имена вступающих проверяются на мат/стоп-слова.
-  • Картинки в 2 слоя: хеш по базе photo/ + нейросеть NudeNet (18+).
+  • Картинки в 2 слоя: хеш по базе photo/ + нейросеть ifnude (18+).
   • Модерация сообщений: ссылки, пересылки, посты «от имени канала», .apk,
     премиум-эмодзи, антифлуд, антимат и стоп-слова (с фильтром подмены символов).
   • Наказания: delete / warn (с лимитом) / mute / ban; ночной и тихий режимы;
@@ -525,12 +525,23 @@ def load_nsfw_detector() -> None:
     if not config.NSFW_ENABLED:
         return
     try:
-        from nudenet import NudeDetector
-        nsfw_detector = NudeDetector()
-        log.info("NSFW-детектор (NudeNet) загружен. Классы: %s",
-                 ", ".join(config.NSFW_BAD_CLASSES))
+        import ifnude
     except Exception as e:
         log.warning("NSFW-детектор не загрузился (нагота не проверяется): %s", e)
+        return
+    # Модуль ifnude сам играет роль «детектора»: nsfw_detector.detect(path)
+    # возвращает [{'box', 'score', 'label'}, ...] — совместимо с прежним вызовом.
+    nsfw_detector = ifnude
+    # Прогрев: первый detect тянет модель ~139 МБ в ~/.ifnude/ и грузит её в память.
+    # Делаем это на старте (как раньше NudeNet), иначе первая картинка в чате
+    # висела бы на скачивании. Best-effort: сбой прогрева не отключает детектор.
+    try:
+        from PIL import Image
+        ifnude.detect(Image.new("RGB", (64, 64)))
+    except Exception as e:
+        log.debug("Прогрев ifnude не удался (не критично): %s", e)
+    log.info("NSFW-детектор (ifnude) загружен. Классы: %s",
+             ", ".join(config.NSFW_BAD_CLASSES))
 
 
 def _nsfw_detect_sync(data: bytes, tmp_path: str):
@@ -547,8 +558,8 @@ def _nsfw_detect_sync(data: bytes, tmp_path: str):
         except OSError:
             pass
     bad = set(config.NSFW_BAD_CLASSES)
-    hits = [(x["class"], x["score"]) for x in dets
-            if x["class"] in bad and x["score"] >= config.NSFW_MIN_SCORE]
+    hits = [(x["label"], x["score"]) for x in dets
+            if x["label"] in bad and x["score"] >= config.NSFW_MIN_SCORE]
     return max(hits, key=lambda t: t[1]) if hits else None
 
 
@@ -2061,7 +2072,7 @@ async def cmd_reloadgore(message: Message):
 
 @dp.message(Command("check", "checkgore"))
 async def cmd_check(message: Message):
-    """Диагностика: ответом на картинку показать баллы хеша/NudeNet/гора."""
+    """Диагностика: ответом на картинку показать баллы хеша/ifnude/гора."""
     if not await _admin_only(message):
         return
     reply = message.reply_to_message
@@ -2092,7 +2103,7 @@ async def cmd_check(message: Message):
     await message.answer(
         "🔎 <b>Проверка картинки</b>\n"
         f"Хеш-база: {hashline} (порог {config.IMAGE_MATCH_PERCENT}%)\n"
-        f"NudeNet 18+: {nsfwline}\n"
+        f"ifnude 18+: {nsfwline}\n"
         f"Гор-детектор: {esc(gore.status())} | проверка: {'вкл' if flag('GORE_ON') else 'выкл'}\n"
         f"Гор: {goreline} (порог {num('GORE_THRESHOLD_PCT')}%)\n\n"
         "Если детектор не загружен или что-то не так — команда /diag."
@@ -2140,7 +2151,7 @@ async def cmd_diag(message: Message):
         f"<b>Картинки/ИИ:</b>\n"
         f"• {torch_line}\n• {tr_line}\n"
         f"• Гор (CLIP): {esc(gore.status())} | GORE_ENABLED={config.GORE_ENABLED}\n"
-        f"• NudeNet: {'✅' if nsfw_detector else '❌'} | NSFW_ENABLED={config.NSFW_ENABLED}\n"
+        f"• ifnude: {'✅' if nsfw_detector else '❌'} | NSFW_ENABLED={config.NSFW_ENABLED}\n"
         f"• Эталонов в базе: {len(ref_hashes)}\n\n"
         f"<b>Заявки/апдейты:</b>\n"
         f"• Автоприём (AUTO_ACCEPT): {'вкл' if flag('AUTO_ACCEPT') else 'выкл'}\n"
@@ -2767,7 +2778,7 @@ async def cmd_settings(message: Message):
         f"Тихий: {s('QUIET_MODE')}\n"
         f"Проверка имён: {s('CHECK_JOIN_NAMES')} | Приветствие: {s('WELCOME_ENABLED')}\n"
         f"Стоп-слов: {len(storage.stopwords())} | Эталонов: {len(ref_hashes)} | "
-        f"NudeNet: {'вкл' if nsfw_detector else 'выкл'}"
+        f"ifnude: {'вкл' if nsfw_detector else 'выкл'}"
     )
 
 

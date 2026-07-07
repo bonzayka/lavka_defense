@@ -32,4 +32,4 @@ echo "    • в чате команда:  /reloadgore   (без перезап�
 echo "    • sudo systemctl restart defense-bot"
 echo "    Проверка:  /diag  ->  должно быть 'Гор (CLIP): загружен'"
 echo ""
-echo ">>> Проверь ОЗУ:  free -h   (torch+CLIP ~1 ГБ поверх NudeNet ~400 МБ)"
+echo ">>> Проверь ОЗУ:  free -h   (torch+CLIP ~1 ГБ поверх ifnude ~400 МБ)"
