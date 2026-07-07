@@ -1,6 +1,6 @@
-# NSFW-каскад: NudeNet v3 (быстрый) + ifnude (добор) — onnxruntime, opencv-python-headless, scikit-image, scipy, numpy
+# Детектор 18+ — ViT-классификатор на onnxruntime (torch/transformers НЕ нужны)
 aiogram>=3.15
 aiohttp_socks>=0.9
 Pillow>=11
-nudenet>=3.4
-ifnude
+numpy>=2
+onnxruntime>=1.20
