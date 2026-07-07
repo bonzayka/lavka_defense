@@ -13,6 +13,17 @@ WORKDIR /app
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
+# Гор-детектор (CLIP): CPU-torch + transformers. Тяжёлый слой (~1 ГБ образа),
+# ставится ДО копирования кода, чтобы кешировался и не пересобирался при правках.
+# CPU-индекс ОБЯЗАТЕЛЕН — иначе pip потянет огромный CUDA-torch (~2.5 ГБ).
+# Не нужен гор? Закомментируй эти два RUN (бот тихо работает без гор-слоя).
+RUN pip install --no-cache-dir torch --index-url https://download.pytorch.org/whl/cpu \
+    && pip install --no-cache-dir "transformers>=4.40"
+# Прогрев: качаем CLIP в образ, чтобы старт контейнера не висел на ~600 МБ.
+RUN python -c "from transformers import CLIPModel, CLIPProcessor; \
+    CLIPModel.from_pretrained('openai/clip-vit-base-patch32'); \
+    CLIPProcessor.from_pretrained('openai/clip-vit-base-patch32')"
+
 # Затем код и эталоны.
 COPY . .
 
