@@ -392,9 +392,38 @@ def role_badge(role: str | None) -> str:
     return config.ROLE_BADGE.get(role, "🎖") if role else ""
 
 
+def role_title(role: str | None) -> str:
+    """Отображаемое имя ранга: кастомное из storage или сам ключ роли."""
+    if not role:
+        return ""
+    return storage.get_role_title(role) or role
+
+
+def resolve_role(text: str) -> str | None:
+    """Ввод (ключ роли ИЛИ кастомное имя, регистронезависимо) -> ключ config.ROLES."""
+    t = (text or "").strip().lower()
+    if not t:
+        return None
+    if t in config.ROLES:
+        return t
+    for key in config.ROLES:
+        if (storage.get_role_title(key) or "").strip().lower() == t:
+            return key
+    return None
+
+
+def _roles_hint() -> str:
+    """Список ролей для подсказок: «ключ (кастомное имя)», от старшей к младшей."""
+    out = []
+    for key in sorted(config.ROLES, key=lambda n: role_rank(n), reverse=True):
+        t = storage.get_role_title(key)
+        out.append(f"{key} ({t})" if t else key)
+    return ", ".join(out)
+
+
 def role_label(role: str | None) -> str:
-    """«👑 админ» — бейдж + имя роли, для сообщений. Пусто, если роли нет."""
-    return f"{role_badge(role)} {esc(role)}" if role else ""
+    """«👑 Админ» — бейдж + (кастомное) имя ранга. Пусто, если роли нет."""
+    return f"{role_badge(role)} {esc(role_title(role))}" if role else ""
 
 
 async def can(chat_id: int, user_id: int, perm: str) -> bool:
@@ -1509,7 +1538,8 @@ async def handle_violation(message: Message, reason: str) -> None:
     log.info("МУТ %s — %s, удалено %d сообщ.", user_id, reason, deleted)
 
 
-@dp.message(F.photo | F.sticker | F.document)
+@dp.message((F.photo | F.sticker | F.document)
+            & F.chat.type.in_({"group", "supergroup"}))
 async def on_media(message: Message):
     if not message.from_user:
         return
@@ -2395,20 +2425,21 @@ async def cmd_setrole(message: Message):
     mid = _mention_uid(message)
     if r and r.from_user:                              # ответом: роль — первый аргумент
         uname_cache_add(r.from_user)
-        uid, role = r.from_user.id, (parts[1].lower() if len(parts) > 1 else "")
+        uid, raw = r.from_user.id, (parts[1] if len(parts) > 1 else "")
     elif mid is not None:                              # tap-упоминание: роль — первый аргумент
-        uid, role = mid, (parts[1].lower() if len(parts) > 1 else "")
+        uid, raw = mid, (parts[1] if len(parts) > 1 else "")
     elif len(parts) > 2 and _is_target_token(parts[1]):  # «/setrole <id|@ник> роль»
-        uid, role = _resolve_target_token(parts[1]), parts[2].lower()
+        uid, raw = _resolve_target_token(parts[1]), parts[2]
         if uid is None:
             await message.answer(_UNKNOWN_UNAME)
             return
     else:
         await message.answer("Использование: /setrole роль (ответом) или /setrole id роль.\n"
-                             f"Роли: {', '.join(config.ROLES)}")
+                             f"Роли: {_roles_hint()}")
         return
-    if role not in config.ROLES:
-        await message.answer(f"Нет роли «{esc(role)}». Доступны: {', '.join(config.ROLES)}")
+    role = resolve_role(raw)
+    if role is None:
+        await message.answer(f"Нет роли «{esc(raw)}». Доступны: {_roles_hint()}")
         return
     storage.set_role(uid, role)
     await message.answer(f"✅ {id_mention(uid, await display_name(message.chat.id, uid))} — "
@@ -2453,6 +2484,34 @@ async def cmd_roles(message: Message):
         lines.append("\nПока никому. Выдать: /setrole роль (ответом) "
                      "или /setrole @ник роль.")
     await message.answer("\n".join(lines))
+
+
+@dp.message(Command("renamerole"))
+async def cmd_renamerole(message: Message):
+    """Переименовать ранг (только владелец). /renamerole <роль> <новое имя>; «-» — сброс.
+
+    Меняется только ОТОБРАЖАЕМОЕ имя; ключ роли и её права/ранг остаются прежними,
+    так что /setrole понимает и старый ключ, и новое название.
+    """
+    if not (message.from_user and storage.is_owner(message.from_user.id)):
+        return
+    parts = (message.text or "").split(maxsplit=2)
+    if len(parts) < 3:
+        await message.answer("Использование: /renamerole <роль> <новое название>\n"
+                             f"Роли: {_roles_hint()}\n"
+                             "Сброс к исходному: /renamerole <роль> -")
+        return
+    role = resolve_role(parts[1])
+    if role is None:
+        await message.answer(f"Нет роли «{esc(parts[1])}». Доступны: {_roles_hint()}")
+        return
+    new = parts[2].strip()
+    if new == "-":
+        storage.set_role_title(role, None)
+        await message.answer(f"✅ Название ранга сброшено: {role_label(role)}")
+    else:
+        storage.set_role_title(role, new)
+        await message.answer(f"✅ Ранг «{esc(role)}» теперь отображается как {role_label(role)}")
 
 
 @dp.message(Command("rules"))
@@ -2866,7 +2925,7 @@ async def cmd_help(message: Message):
         "<code>размут</code>, <code>варн</code>, <code>кик</code>\n"
         "/warn /unwarn — предупреждения | /whitelist — ссылки | /trust — доверенный\n"
         "Роли (иерархия: 👑админ &gt; ⭐старший &gt; 🎖модератор): /setrole [@ник|id] роль "
-        "/delrole /roles\n"
+        "/delrole /roles /renamerole &lt;роль&gt; &lt;новое имя&gt;\n"
         "База спама: /spam (ответом на картинку) /reload\n"
         "Стикерпаки (не 18+): /allowpack (ответом на стикер) /denypack /stickers\n"
         "Стоп-слова: /addword /delword /words | Правила: /rules /setrules\n"
@@ -3101,7 +3160,7 @@ def roles_keyboard() -> InlineKeyboardMarkup:
     rows = []
     for name in sorted(config.ROLES, key=lambda n: role_rank(n), reverse=True):
         rows.append([InlineKeyboardButton(
-            text=f"{role_badge(name)} {name} · ранг {role_rank(name)} ({len(role_perms(name))})",
+            text=f"{role_badge(name)} {role_title(name)} · ранг {role_rank(name)} ({len(role_perms(name))})",
             callback_data=f"panel:role:{name}")])
     rows.append([InlineKeyboardButton(text="👥 Назначения", callback_data="panel:asg")])
     rows.append([InlineKeyboardButton(text="⬅️ Назад", callback_data="panel:back")])
@@ -3121,6 +3180,8 @@ def role_perm_keyboard(role: str) -> InlineKeyboardMarkup:
             buf = []
     if buf:
         rows.append(buf)
+    rows.append([InlineKeyboardButton(text="✏️ Переименовать ранг",
+                                      callback_data=f"panel:rrn:{role}")])
     rows.append([InlineKeyboardButton(text="⬅️ К ролям", callback_data="panel:roles")])
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
@@ -3134,7 +3195,7 @@ def asg_keyboard() -> InlineKeyboardMarkup:
             who = cached_name(int(u))
         except (ValueError, TypeError):
             who = str(u)
-        rows.append([InlineKeyboardButton(text=f"❌ {role_badge(role)} {role} — {who}",
+        rows.append([InlineKeyboardButton(text=f"❌ {role_badge(role)} {role_title(role)} — {who}",
                                           callback_data=f"panel:unrole:{u}")])
     if not rows:
         rows.append([InlineKeyboardButton(text="Никому не назначено", callback_data="panel:noop")])
@@ -3145,7 +3206,8 @@ def asg_keyboard() -> InlineKeyboardMarkup:
 
 def asg_pick_keyboard() -> InlineKeyboardMarkup:
     """Выбор роли для назначения по id."""
-    rows = [[InlineKeyboardButton(text=f"🎖 {name}", callback_data=f"panel:asgrole:{name}")]
+    rows = [[InlineKeyboardButton(text=f"{role_badge(name)} {role_title(name)}",
+                                  callback_data=f"panel:asgrole:{name}")]
             for name in config.ROLES]
     rows.append([InlineKeyboardButton(text="⬅️ Назад", callback_data="panel:asg")])
     return InlineKeyboardMarkup(inline_keyboard=rows)
@@ -3267,6 +3329,16 @@ async def panel_private(message: Message):
         elif st == "set_rules":
             storage.set_rules(val)
             await message.answer("✅ Правила сохранены.")
+        elif st.startswith("rename_role:"):
+            role = st.split(":", 1)[1]
+            if role not in config.ROLES:
+                await message.answer("Роль не найдена.")
+            elif val == "-":
+                storage.set_role_title(role, None)
+                await message.answer(f"✅ Название сброшено: {role_label(role)}")
+            else:
+                storage.set_role_title(role, val)
+                await message.answer(f"✅ Ранг теперь отображается как {role_label(role)}")
         elif st.startswith("setnum:"):
             key = st.split(":", 1)[1]
             if val.lstrip("-").isdigit():
@@ -3593,12 +3665,24 @@ async def panel_cb(cb: CallbackQuery):
         else:
             await cb.answer()
         perms = ", ".join(sorted(role_perms(role))) or "(нет прав)"
-        txt = (f"🎖 Роль <b>{esc(role)}</b>\nТекущие права: {esc(perms)}\n"
+        keyhint = f" (ключ <code>{esc(role)}</code>)" if role_title(role) != role else ""
+        txt = (f"🎖 Роль <b>{esc(role_title(role))}</b>{keyhint}\nТекущие права: {esc(perms)}\n"
                "Жми, чтобы переключить:")
         try:
             await cb.message.edit_text(txt, reply_markup=role_perm_keyboard(role))
         except TelegramBadRequest:
             pass
+    elif action == "rrn":
+        role = parts[2] if len(parts) > 2 else ""
+        if role not in config.ROLES:
+            await cb.answer("Нет такой роли.", show_alert=True)
+            return
+        panel_state[uid] = f"rename_role:{role}"
+        await cb.answer()
+        await bot.send_message(
+            cb.message.chat.id,
+            f"✏️ Пришли новое название для ранга {role_label(role)} "
+            f"(ключ <code>{esc(role)}</code>).\nСброс к исходному — пришли <code>-</code>.")
     elif action in ("asg", "unrole"):
         if action == "unrole" and len(parts) > 2 and parts[2].lstrip("-").isdigit():
             storage.set_role(int(parts[2]), None)

@@ -30,6 +30,7 @@ _DEFAULT = {
     "mod_numbers": {},        # str(user_id) -> N (для анонимных «Модератор #N»)
     "roles": {},              # str(user_id) -> имя роли (внутренние права)
     "role_perms": {},         # имя_роли -> [список прав]; оверрайд config.ROLES из панели
+    "role_titles": {},        # ключ_роли -> кастомное отображаемое имя ранга (переименование)
     "owners": [],             # [user_id, ...] — владельцы: только они раздают роли/должности
     "sticker_packs": [],      # [set_name, ...] — стикерпаки, которые НЕ проверять на 18+
 }
@@ -264,6 +265,25 @@ def set_role_perms(role: str, perms: list) -> None:
 
 def role_perms_all() -> dict:
     return _data.setdefault("role_perms", {})
+
+
+# --- кастомные названия рангов (только отображаемое имя; ключ роли не меняется) ---
+
+def get_role_title(role: str) -> str | None:
+    return _data.setdefault("role_titles", {}).get(role)
+
+
+def set_role_title(role: str, title: str | None) -> None:
+    t = _data.setdefault("role_titles", {})
+    if title:
+        t[role] = title
+    else:
+        t.pop(role, None)
+    save()
+
+
+def role_titles_all() -> dict:
+    return _data.setdefault("role_titles", {})
 
 
 # --- владельцы (только они выдают роли/должности) ---
