@@ -20,7 +20,7 @@ CHILDREN_DIR = os.path.join(BASE, "children")
 BOT_SCRIPT = os.path.join(BASE, "bot.py")
 
 # По умолчанию у дочерних ботов тяжёлые ИИ-модели выключены (экономия ОЗУ):
-# ifnude (~200 МБ + модель 139 МБ) и CLIP-гор (~1 ГБ). Включи, если памяти хватает.
+# NudeNet v3 + ifnude (~200 МБ + модель 139 МБ) и CLIP-гор (~1 ГБ). Включи, если памяти хватает.
 CHILD_NSFW = False
 CHILD_GORE = False
 

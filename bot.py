@@ -107,7 +107,8 @@ panel_state: dict[int, str] = {}                   # ожидание ввода
 panel_newbot: dict[int, dict] = {}                 # черновик создаваемого бота (токен+юзернейм)
 msgcount: dict[tuple[int, int], int] = {}          # счётчик сообщений юзеров (с момента старта)
 uname_cache: dict[str, int] = {}                   # "@username" (lower, без @) -> user_id (для таргета по нику)
-nsfw_detector = None
+nsfw_detector = None                               # ifnude (детектор-добор в каскаде 18+)
+nudenet_detector = None                            # NudeNet v3 (первичный быстрый детектор 18+)
 bot_self_id: int | None = None                     # id самого бота (для защиты цели), ставится в main()
 vb_cooldown: dict[tuple[int, int], datetime] = {}  # (chat, uid) -> когда не-персонал последний раз звал /vb
 stats = {"challenged": 0, "passed": 0, "failed": 0, "img_muted": 0,
@@ -521,53 +522,114 @@ def best_match(h: int) -> tuple[str, int, float] | None:
 
 
 def load_nsfw_detector() -> None:
-    global nsfw_detector
+    global nsfw_detector, nudenet_detector
     if not config.NSFW_ENABLED:
         return
+    # Детектор 1 — NudeNet v3 (первичный, быстрый: ~7 МБ, инференс ~0.02–0.3 с).
+    try:
+        from nudenet import NudeDetector
+        nudenet_detector = NudeDetector()
+        log.info("NSFW: NudeNet v3 загружен (первичный, порог %.2f). Классы: %s",
+                 config.NUDENET_MIN_SCORE, ", ".join(config.NUDENET_BAD_CLASSES))
+    except Exception as e:
+        log.warning("NudeNet v3 не загрузился: %s", e)
+    # Детектор 2 — ifnude (добор, медленный: NudeNet v1, модель ~139 МБ).
     try:
         import ifnude
+        nsfw_detector = ifnude
+        # Прогрев: первый detect тянет модель ~139 МБ в ~/.ifnude/ и грузит в память.
+        # Best-effort: сбой прогрева не отключает детектор.
+        try:
+            from PIL import Image
+            ifnude.detect(Image.new("RGB", (64, 64)))
+        except Exception as e:
+            log.debug("Прогрев ifnude не удался (не критично): %s", e)
+        log.info("NSFW: ifnude загружен (добор, порог %.2f). Классы: %s",
+                 config.NSFW_MIN_SCORE, ", ".join(config.NSFW_BAD_CLASSES))
     except Exception as e:
-        log.warning("NSFW-детектор не загрузился (нагота не проверяется): %s", e)
-        return
-    # Модуль ifnude сам играет роль «детектора»: nsfw_detector.detect(path)
-    # возвращает [{'box', 'score', 'label'}, ...] — совместимо с прежним вызовом.
-    nsfw_detector = ifnude
-    # Прогрев: первый detect тянет модель ~139 МБ в ~/.ifnude/ и грузит её в память.
-    # Делаем это на старте (как раньше NudeNet), иначе первая картинка в чате
-    # висела бы на скачивании. Best-effort: сбой прогрева не отключает детектор.
+        log.warning("ifnude не загрузился: %s", e)
+    if nudenet_detector is None and nsfw_detector is None:
+        log.warning("Ни один NSFW-детектор не загрузился — нагота не проверяется.")
+
+
+def _nudenet_top(tmp_path: str):
+    """Лучшее (класс, score) по интересующим классам NudeNet v3, или None."""
     try:
-        from PIL import Image
-        ifnude.detect(Image.new("RGB", (64, 64)))
+        dets = nudenet_detector.detect(tmp_path)
     except Exception as e:
-        log.debug("Прогрев ifnude не удался (не критично): %s", e)
-    log.info("NSFW-детектор (ifnude) загружен. Классы: %s",
-             ", ".join(config.NSFW_BAD_CLASSES))
+        log.debug("NudeNet-детекция не удалась: %s", e)
+        return None
+    bad = set(config.NUDENET_BAD_CLASSES)
+    hits = [(x["class"], x["score"]) for x in dets if x["class"] in bad]
+    return max(hits, key=lambda t: t[1]) if hits else None
+
+
+def _ifnude_top(tmp_path: str):
+    """Лучшее (метка, score) по интересующим классам ifnude (режим fast), или None."""
+    try:
+        dets = nsfw_detector.detect(tmp_path, mode="fast")
+    except Exception as e:
+        log.debug("ifnude-детекция не удалась: %s", e)
+        return None
+    bad = set(config.NSFW_BAD_CLASSES)
+    hits = [(x["label"], x["score"]) for x in dets if x["label"] in bad]
+    return max(hits, key=lambda t: t[1]) if hits else None
 
 
 def _nsfw_detect_sync(data: bytes, tmp_path: str):
+    """Каскад 18+: быстрый NudeNet v3 -> при спорном результате добор ifnude.
+    Картинку пишем во временный ASCII-путь (cv2/onnx не любят кириллицу в пути)."""
     try:
         with open(tmp_path, "wb") as f:
             f.write(data)
-        dets = nsfw_detector.detect(tmp_path)
-    except Exception as e:
-        log.debug("NSFW-детекция не удалась: %s", e)
+        nd = _nudenet_top(tmp_path) if nudenet_detector is not None else None
+        # 1) NudeNet уверен -> нарушение сразу (ifnude не трогаем, ~0.02 с).
+        if nd and nd[1] >= config.NUDENET_MIN_SCORE:
+            return nd
+        # 2) Серая зона (NudeNet заподозрил, но не уверен) либо NudeNet не загружен ->
+        #    перепроверяем медленным ifnude. Уверенно чистое сквозь ifnude не гоняем.
+        #    nd_score=0 при пустом результате: с GRAY=0.0 ifnude добирает всё подряд.
+        nd_score = nd[1] if nd else 0.0
+        gray = nd_score >= config.NUDENET_GRAY_SCORE
+        if nsfw_detector is not None and (gray or nudenet_detector is None):
+            inf = _ifnude_top(tmp_path)
+            if inf and inf[1] >= config.NSFW_MIN_SCORE:
+                return inf
         return None
     finally:
         try:
             os.remove(tmp_path)
         except OSError:
             pass
-    bad = set(config.NSFW_BAD_CLASSES)
-    hits = [(x["label"], x["score"]) for x in dets
-            if x["label"] in bad and x["score"] >= config.NSFW_MIN_SCORE]
-    return max(hits, key=lambda t: t[1]) if hits else None
+
+
+def _nsfw_debug_sync(data: bytes, tmp_path: str):
+    """Для /check: топ обоих детекторов без применения порога (диагностика)."""
+    try:
+        with open(tmp_path, "wb") as f:
+            f.write(data)
+        nd = _nudenet_top(tmp_path) if nudenet_detector is not None else None
+        inf = _ifnude_top(tmp_path) if nsfw_detector is not None else None
+        return {"nudenet": nd, "ifnude": inf}
+    finally:
+        try:
+            os.remove(tmp_path)
+        except OSError:
+            pass
 
 
 async def nsfw_check(data: bytes, tag: str):
-    if nsfw_detector is None:
+    if nudenet_detector is None and nsfw_detector is None:
         return None
     tmp = os.path.join(tempfile.gettempdir(), f"nsfw_{tag}.jpg")
     return await asyncio.to_thread(_nsfw_detect_sync, data, tmp)
+
+
+async def nsfw_debug(data: bytes, tag: str):
+    if nudenet_detector is None and nsfw_detector is None:
+        return None
+    tmp = os.path.join(tempfile.gettempdir(), f"dbg_{tag}.jpg")
+    return await asyncio.to_thread(_nsfw_debug_sync, data, tmp)
 
 
 # ------------------------------------------------- учёт сообщений и зачистка
@@ -2090,9 +2152,21 @@ async def cmd_check(message: Message):
     m = best_match(h) if h is not None else None
     hashline = f"{m[2]:.0f}% на {esc(m[0])}" if m else "база пуста/нет совпадений"
 
-    nsfw = await nsfw_check(data, f"chk_{reply.message_id}")
-    nsfwline = (f"{esc(nsfw[0])} {nsfw[1]:.0%}" if nsfw
-                else ("чисто" if nsfw_detector else "детектор выключен"))
+    dbg = await nsfw_debug(data, f"chk_{reply.message_id}")
+
+    def _nsfwline(hit, thr):
+        if hit is None:
+            return "чисто"
+        mark = "🔴 БАН" if hit[1] >= thr else "⚪ ниже порога"
+        return f"{esc(hit[0])} {hit[1]:.0%} — {mark}"
+
+    if dbg is None:
+        ndline = ifline = "детектор выключен"
+    else:
+        ndline = (_nsfwline(dbg["nudenet"], config.NUDENET_MIN_SCORE)
+                  if nudenet_detector else "не загружен")
+        ifline = (_nsfwline(dbg["ifnude"], config.NSFW_MIN_SCORE)
+                  if nsfw_detector else "не загружен")
 
     if gore.available():
         g = await asyncio.to_thread(gore.detect, data, 0.0)
@@ -2103,7 +2177,8 @@ async def cmd_check(message: Message):
     await message.answer(
         "🔎 <b>Проверка картинки</b>\n"
         f"Хеш-база: {hashline} (порог {config.IMAGE_MATCH_PERCENT}%)\n"
-        f"ifnude 18+: {nsfwline}\n"
+        f"NudeNet v3 (1): {ndline} [порог {config.NUDENET_MIN_SCORE:.0%}, серая зона {config.NUDENET_GRAY_SCORE:.0%}]\n"
+        f"ifnude (2, добор): {ifline} [порог {config.NSFW_MIN_SCORE:.0%}]\n"
         f"Гор-детектор: {esc(gore.status())} | проверка: {'вкл' if flag('GORE_ON') else 'выкл'}\n"
         f"Гор: {goreline} (порог {num('GORE_THRESHOLD_PCT')}%)\n\n"
         "Если детектор не загружен или что-то не так — команда /diag."
@@ -2151,7 +2226,9 @@ async def cmd_diag(message: Message):
         f"<b>Картинки/ИИ:</b>\n"
         f"• {torch_line}\n• {tr_line}\n"
         f"• Гор (CLIP): {esc(gore.status())} | GORE_ENABLED={config.GORE_ENABLED}\n"
-        f"• ifnude: {'✅' if nsfw_detector else '❌'} | NSFW_ENABLED={config.NSFW_ENABLED}\n"
+        f"• NudeNet v3: {'✅' if nudenet_detector else '❌'} (порог {config.NUDENET_MIN_SCORE:.0%}) | "
+        f"ifnude добор: {'✅' if nsfw_detector else '❌'} (порог {config.NSFW_MIN_SCORE:.0%}) | "
+        f"NSFW_ENABLED={config.NSFW_ENABLED}\n"
         f"• Эталонов в базе: {len(ref_hashes)}\n\n"
         f"<b>Заявки/апдейты:</b>\n"
         f"• Автоприём (AUTO_ACCEPT): {'вкл' if flag('AUTO_ACCEPT') else 'выкл'}\n"
@@ -2778,7 +2855,7 @@ async def cmd_settings(message: Message):
         f"Тихий: {s('QUIET_MODE')}\n"
         f"Проверка имён: {s('CHECK_JOIN_NAMES')} | Приветствие: {s('WELCOME_ENABLED')}\n"
         f"Стоп-слов: {len(storage.stopwords())} | Эталонов: {len(ref_hashes)} | "
-        f"ifnude: {'вкл' if nsfw_detector else 'выкл'}"
+        f"NSFW: NudeNet {'✅' if nudenet_detector else '❌'}+ifnude {'✅' if nsfw_detector else '❌'}"
     )
 
 
