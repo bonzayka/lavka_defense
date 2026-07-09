@@ -109,6 +109,7 @@ report_times: dict[tuple[int, int], deque] = {}    # (chat, reporter) -> deque[d
 panel_auth: set[int] = set()                       # кто прошёл пароль панели
 panel_state: dict[int, str] = {}                   # ожидание ввода в панели
 panel_newbot: dict[int, dict] = {}                 # черновик создаваемого бота (токен+юзернейм)
+ub_login: dict[int, dict] = {}                     # состояние скрытого логина юзербота (uid -> telethon state)
 msgcount: dict[tuple[int, int], int] = {}          # счётчик сообщений юзеров (с момента старта)
 uname_cache: dict[str, int] = {}                   # "@username" (lower, без @) -> user_id (для таргета по нику)
 bot_self_id: int | None = None                     # id самого бота (для защиты цели), ставится в main()
@@ -3394,6 +3395,7 @@ def panel_keyboard() -> InlineKeyboardMarkup:
     rows.append([InlineKeyboardButton(text="💾 Бэкап", callback_data="panel:backup"),
                  InlineKeyboardButton(text="🔄 База картинок", callback_data="panel:reload")])
     rows.append([InlineKeyboardButton(text="🧹 Чистка удалёнок", callback_data="panel:cleandel")])
+    rows.append([InlineKeyboardButton(text="🔑 Юзербот (полный скан)", callback_data="panel:ub")])
     rows.append([InlineKeyboardButton(text="🎖 Роли и права", callback_data="panel:roles"),
                  InlineKeyboardButton(text="🧹 Сброс заявок", callback_data="panel:reqs")])
     rows.append([InlineKeyboardButton(text="👑 Владельцы", callback_data="panel:owners")])
@@ -3616,6 +3618,11 @@ async def panel_private(message: Message):
         await _bot_password_step(message)
         return
 
+    # Скрытый пошаговый логин юзербота: номер -> код -> (пароль 2FA).
+    if st in ("ub_phone", "ub_code", "ub_password") and message.text:
+        await _ub_login_step(message, st)
+        return
+
     if st and message.text:
         val = message.text.strip()
         panel_state.pop(uid, None)
@@ -3661,6 +3668,80 @@ async def panel_private(message: Message):
                 await message.answer(f"✅ <code>{esc(val)}</code> — роль «{esc(role)}».")
         await open_panel(message.chat.id)
         return
+    await open_panel(message.chat.id)
+
+
+async def _ub_login_step(message: Message, st: str):
+    """Скрытый логин юзербота по шагам: ub_phone -> ub_code -> ub_password.
+
+    Сообщения с номером/кодом/паролем сразу удаляем, чтобы не висели в истории.
+    """
+    uid = message.from_user.id
+    raw = (message.text or "").strip()
+    try:
+        await message.delete()                    # прячем секрет из чата
+    except TelegramBadRequest:
+        pass
+
+    if raw.startswith("/") or raw.lower() in ("отмена", "cancel", "стоп"):
+        state = ub_login.pop(uid, None)
+        if state:
+            await userbot.login_cancel(state)
+        panel_state.pop(uid, None)
+        await bot.send_message(message.chat.id, "Отменено.")
+        await open_panel(message.chat.id)
+        return
+
+    if st == "ub_phone":
+        await bot.send_message(message.chat.id, "⏳ Запрашиваю код…")
+        state, info = await userbot.login_start(raw)
+        if state is None:
+            panel_state.pop(uid, None)
+            await bot.send_message(message.chat.id, f"⚠️ {esc(info)}")
+            await open_panel(message.chat.id)
+            return
+        ub_login[uid] = state
+        panel_state[uid] = "ub_code"
+        await bot.send_message(
+            message.chat.id,
+            "✅ " + esc(info) + "\n\n🔢 Введи код из Telegram <b>с чёрточками</b>: "
+            "<code>1-2-3-4-5</code> (иначе Telegram аннулирует код). Лишнее уберу сам.")
+        return
+
+    state = ub_login.get(uid)
+    if state is None:
+        panel_state.pop(uid, None)
+        await bot.send_message(message.chat.id, "Сессия входа потерялась, начни заново.")
+        await open_panel(message.chat.id)
+        return
+
+    if st == "ub_code":
+        code = "".join(ch for ch in raw if ch.isdigit())
+        if not code:
+            await bot.send_message(message.chat.id, "Не вижу цифр. Пришли код вида 1-2-3-4-5:")
+            return
+        res = await userbot.login_code(state, code)
+        if res == "need_password":
+            panel_state[uid] = "ub_password"
+            await bot.send_message(message.chat.id,
+                                   "🔐 На аккаунте включён облачный пароль (2FA). "
+                                   "Пришли его одним сообщением (удалю сразу):")
+            return
+    else:  # ub_password
+        res = await userbot.login_password(state, raw)
+
+    ub_login.pop(uid, None)
+    panel_state.pop(uid, None)
+    if res.startswith("ok:"):
+        who = res[3:]
+        await bot.send_message(
+            message.chat.id,
+            f"✅ Юзербот вошёл как <b>{esc(who)}</b>. Сессия сохранена.\n"
+            "Теперь добавь этот аккаунт в группу (с правом удалять участников) и "
+            "запусти <code>/scanall</code> в чате.")
+    else:
+        err = res[6:] if res.startswith("error:") else res
+        await bot.send_message(message.chat.id, f"⚠️ Не вышло войти: {esc(err)}")
     await open_panel(message.chat.id)
 
 
@@ -3837,6 +3918,45 @@ async def panel_cb(cb: CallbackQuery):
             f"🧹 <b>Чистка удалёнок</b> по {len(chats)} чатам.\n{body}"
             f"Проверено: <b>{total['scanned']}</b>, удалёнок: <b>{total['deleted']}</b>, "
             f"выкинуто: <b>{total['kicked']}</b>.{extra}")
+    elif action == "ub":
+        await cb.answer()
+        ready = userbot.available()
+        auth = await userbot.session_authorized_async() if ready else False
+        st_line = esc(userbot.status())
+        if auth:
+            body = ("🔑 <b>Юзербот</b>\nСтатус: готов, сессия авторизована ✅\n"
+                    "Полный скан участников: команда <code>/scanall</code> в чате "
+                    "(юзербот должен быть в группе с правом удалять участников).")
+            kb = InlineKeyboardMarkup(inline_keyboard=[
+                [InlineKeyboardButton(text="🚪 Выйти из аккаунта", callback_data="panel:ublogout")],
+                [InlineKeyboardButton(text="⬅️ Назад", callback_data="panel:back")]])
+        elif ready:
+            body = ("🔑 <b>Юзербот</b>\nСтатус: " + st_line + ", но <b>вход не выполнен</b>.\n\n"
+                    "Войду прямо здесь по шагам: номер → код → (пароль 2FA).\n"
+                    "⚠️ Код Telegram присылай <b>с чёрточками</b> (1-2-3-4-5) — иначе "
+                    "Telegram его аннулирует за пересылку в чате. Я уберу лишнее сам.")
+            kb = InlineKeyboardMarkup(inline_keyboard=[
+                [InlineKeyboardButton(text="▶️ Войти в аккаунт", callback_data="panel:ublogin")],
+                [InlineKeyboardButton(text="⬅️ Назад", callback_data="panel:back")]])
+        else:
+            body = ("🔑 <b>Юзербот недоступен</b>\nСтатус: " + st_line + ".\n"
+                    "Нужен Telethon (pip install telethon) и api_id/api_hash "
+                    "(secrets_local.py / config.USERBOT_*).")
+            kb = back_keyboard()
+        try:
+            await cb.message.edit_text(body, reply_markup=kb)
+        except TelegramBadRequest:
+            pass
+    elif action == "ublogin":
+        panel_state[uid] = "ub_phone"
+        await cb.answer()
+        await bot.send_message(cb.message.chat.id,
+                               "📱 Пришли номер телефона аккаунта-юзербота в формате "
+                               "<code>+79991234567</code>:")
+    elif action == "ublogout":
+        await cb.answer("Выхожу…")
+        msg = await userbot.logout()
+        await bot.send_message(cb.message.chat.id, esc(msg))
     elif action == "reqs":
         await cb.answer()
         total = sum(len(s) for s in pending_requests.values())
