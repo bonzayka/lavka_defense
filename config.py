@@ -211,3 +211,63 @@ DELETE_SERVICE_MESSAGES = True  # удалять «вошёл/вышел из г
 WELCOME_ENABLED = False       # приветствие после прохождения капчи
 WELCOME_TEXT = "Добро пожаловать! Ознакомься с правилами и будь вежлив 🙂"
 WELCOME_BUTTONS = []          # [["Текст кнопки", "https://ссылка"], ...]
+
+# ============ H. Риск-фильтр профилей и поведение новичков =================
+# Движок скоринга (riskscore.py) оценивает профиль входящего: иностранное имя,
+# случайный @username, нет аватара, свежая регистрация, датацентр и т.п.
+# По сумме сигналов — риск-скор. Реакция зависит от порогов ниже.
+RISK_ENABLED = True
+
+# Порог «под наблюдением» (probation): скор >= -> новичок берётся на карандаш.
+# Если такой в первые PROBATION_MINUTES минут шлёт фото/медиа/ссылку — мут.
+# Это ровно кейс «иностранный акк спустя пару минут кидает фотки».
+RISK_WATCH_THRESHOLD = 45
+
+# Порог жёсткого действия ПРЯМО НА ВХОДЕ (профиль явно бот/реклама).
+# Скор >= -> сразу RISK_ACTION, даже без капчи. Держи высоким (меньше ложных).
+RISK_BAN_THRESHOLD = 85
+RISK_ACTION = "mute"          # что делать при жёстком пороге: mute | ban | captcha
+
+# Наблюдение за новичками.
+PROBATION_ENABLED = True
+PROBATION_MINUTES = 10        # сколько минут держать подозрительного «под наблюдением»
+PROBATION_ON_MEDIA = True     # медиа/фото от наблюдаемого в окне -> мут
+PROBATION_ON_LINK = True      # ссылка от наблюдаемого в окне -> мут
+PROBATION_ACTION = "mute"     # реакция наблюдения: mute | ban | delete
+
+# Эвристика «свежести» аккаунта по величине user_id (id растёт со временем).
+# id выше порога = молодой аккаунт (+вес new_account). 0 = не учитывать.
+# Ориентир: ~7.5 млрд соответствует концу 2024-го; правь под своё время.
+NEW_ACCOUNT_ID_MIN = 7_500_000_000
+
+# Переопределение весов сигналов (мерджится поверх riskscore.DEFAULT_WEIGHTS).
+# Пусто = дефолтные веса. Пример: {"script_latin": 10, "no_photo": 20}.
+RISK_WEIGHTS: dict = {}
+
+# ==================== I. Чистка удалённых аккаунтов ========================
+# Кикать «Deleted Account» из чата. По Bot API бот видит только тех, кого
+# встречал (кто писал/вступал). Полный проход по всем участникам — userbot.py.
+AUTO_CLEAN_DELETED = False        # периодически подчищать виденных удалённых
+CLEAN_DELETED_EVERY_HOURS = 12    # как часто крутить автосвип (часы)
+
+# --- Юзербот (Telethon) для ПОЛНОГО скана всех участников (опционально) ---
+# Требует твою user-сессию. Выключено по умолчанию — бот работает и без него.
+# СЕКРЕТЫ (api_id/api_hash) НЕ храним здесь — config.py в публичном гите!
+# Они берутся из secrets_local.py (в .gitignore) либо из env TG_API_ID/TG_API_HASH.
+try:
+    import secrets_local as _sl  # локальный, НЕ в гите
+except Exception:
+    _sl = None
+
+
+def _secret(name: str, default=""):
+    if _sl is not None and getattr(_sl, name, None):
+        return getattr(_sl, name)
+    return os.environ.get(name) or default
+
+
+USERBOT_API_ID = int(_secret("TG_API_ID", "0") or 0)
+USERBOT_API_HASH = _secret("TG_API_HASH", "")
+USERBOT_SESSION = _secret("TG_SESSION", "") or "userbot.session"
+# Юзербот включается автоматически, если есть api_id/hash (иначе смысла нет).
+USERBOT_ENABLED = bool(USERBOT_API_ID and USERBOT_API_HASH)

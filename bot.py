@@ -51,11 +51,14 @@ from aiogram.exceptions import TelegramBadRequest, TelegramRetryAfter, TelegramF
 
 import config
 import dcguard
+import deleted
 import gore
 import manager
 import nsfwvit
+import riskscore
 import storage
 import textguard
+import userbot
 
 IS_CHILD = manager.is_child()  # дочерний бот не поднимает свой менеджер
 
@@ -110,8 +113,11 @@ msgcount: dict[tuple[int, int], int] = {}          # счётчик сообще
 uname_cache: dict[str, int] = {}                   # "@username" (lower, без @) -> user_id (для таргета по нику)
 bot_self_id: int | None = None                     # id самого бота (для защиты цели), ставится в main()
 vb_cooldown: dict[tuple[int, int], datetime] = {}  # (chat, uid) -> когда не-персонал последний раз звал /vb
+probation: dict[tuple[int, int], dict] = {}        # (chat, uid) -> {until, score, reasons} — новичок «под наблюдением»
+known_chats: set[int] = set()                      # чаты, где бот видел активность (для свипа удалёнок)
+last_deleted_sweep: datetime | None = None         # когда крутили автосвип удалёнок
 stats = {"challenged": 0, "passed": 0, "failed": 0, "img_muted": 0,
-         "banned": 0, "reports": 0, "raids": 0}
+         "banned": 0, "reports": 0, "raids": 0, "risk_muted": 0, "deleted_kicked": 0}
 
 MUTE = ChatPermissions(can_send_messages=False)
 # Режим фото-капчи: новичку можно ТОЛЬКО текст (ввести код), без медиа/ссылок.
@@ -489,6 +495,115 @@ async def user_dc(user_id: int) -> int | None:
     return dcguard.dc_from_file_id(photos.photos[0][-1].file_id)
 
 
+async def profile_probe(user_id: int) -> tuple[bool | None, int | None]:
+    """Одним запросом достать (есть_ли_аватар, датацентр).
+
+    (None, None) — не смогли узнать (приватность/ошибка). has_photo=False —
+    аватара точно нет; dc определяется из file_id аватара, если он есть.
+    """
+    try:
+        photos = await bot.get_user_profile_photos(user_id, limit=1)
+    except TelegramBadRequest:
+        return None, None
+    if not photos.total_count or not photos.photos or not photos.photos[0]:
+        return False, None
+    return True, dcguard.dc_from_file_id(photos.photos[0][-1].file_id)
+
+
+async def risk_evaluate(user) -> tuple[int, list[str], int | None]:
+    """Оценить профиль входящего. Возвращает (скор, причины, dc).
+
+    Сигналы (аватар/DC) тянутся из Bot API; чистый скоринг — в riskscore.py.
+    """
+    has_photo, dc = await profile_probe(user.id)
+    dc_flagged = bool(dc is not None and config.DC_BLOCK and dc in config.DC_BLOCK)
+    score, reasons = riskscore.score_profile(
+        first_name=user.first_name or "",
+        last_name=getattr(user, "last_name", "") or "",
+        username=user.username,
+        user_id=user.id,
+        is_premium=bool(getattr(user, "is_premium", False)),
+        has_photo=has_photo,
+        dc=dc,
+        dc_flagged=dc_flagged,
+        fresh_id_threshold=num("NEW_ACCOUNT_ID_MIN"),
+        weights=getattr(config, "RISK_WEIGHTS", None),
+    )
+    return score, reasons, dc
+
+
+def start_probation(chat_id: int, user, score: int, reasons: list[str]) -> None:
+    """Взять новичка «под наблюдение» на PROBATION_MINUTES минут."""
+    if not flag("PROBATION_ENABLED"):
+        return
+    mins = max(1, num("PROBATION_MINUTES"))
+    probation[(chat_id, user.id)] = {
+        "until": now() + timedelta(minutes=mins),
+        "score": score,
+        "reasons": reasons,
+    }
+
+
+def probation_active(chat_id: int, user_id: int) -> dict | None:
+    """Вернуть карточку наблюдения, если оно ещё активно, иначе None (и снять)."""
+    st = probation.get((chat_id, user_id))
+    if not st:
+        return None
+    if st["until"] < now():
+        probation.pop((chat_id, user_id), None)
+        return None
+    return st
+
+
+# ---------------------------------------------------- чистка удалённых аккаунтов
+
+async def kick_deleted(chat_id: int, user_id: int) -> bool:
+    """Кикнуть удалёнку (бан + разбан = выкинуть, не блокируя перезаход живого)."""
+    try:
+        await bot.ban_chat_member(chat_id, user_id)
+        await bot.unban_chat_member(chat_id, user_id)
+        return True
+    except TelegramBadRequest as e:
+        log.warning("Не смог кикнуть удалёнку %s: %s", user_id, e)
+        await _maybe_rights_alert(chat_id, e)
+        return False
+
+
+def known_members(chat_id: int) -> set[int]:
+    """Id пользователей, которых бот видел в этом чате (трекинг/капча/новички)."""
+    ids: set[int] = set()
+    for store in (recent, msgcount, newcomer):
+        for (cid, uid) in list(store.keys()):
+            if cid == chat_id:
+                ids.add(uid)
+    return ids
+
+
+async def sweep_deleted(chat_id: int, *, do_kick: bool = True) -> dict:
+    """Bot-API-скан: пройтись по ВИДЕННЫМ участникам чата и кикнуть удалёнок.
+
+    Ограничение: видит лишь тех, кого бот встречал. Полный проход — userbot.py.
+    """
+    res = {"scanned": 0, "deleted": 0, "kicked": 0}
+    for uid in known_members(chat_id):
+        try:
+            member = await bot.get_chat_member(chat_id, uid)
+        except TelegramBadRequest:
+            continue
+        except TelegramRetryAfter as e:
+            await asyncio.sleep(e.retry_after + 1)
+            continue
+        res["scanned"] += 1
+        if deleted.should_kick_member(member):
+            res["deleted"] += 1
+            if do_kick and await kick_deleted(chat_id, uid):
+                res["kicked"] += 1
+                stats["deleted_kicked"] += 1
+                recent.pop((chat_id, uid), None)
+                msgcount.pop((chat_id, uid), None)
+    return res
+
+
 # ---------------------------------------------------------------- картинки
 
 def photo_dir() -> str:
@@ -583,6 +698,7 @@ class TrackMiddleware(BaseMiddleware):
         if (msg.from_user and not msg.from_user.is_bot
                 and msg.chat.type in ("group", "supergroup")):
             key = (msg.chat.id, msg.from_user.id)
+            known_chats.add(msg.chat.id)
             buf = recent.setdefault(key, deque(maxlen=200))
             buf.append((msg.message_id, now()))
             msgcount[key] = msgcount.get(key, 0) + 1
@@ -714,7 +830,34 @@ async def janitor():
                 buf.popleft()
             if not buf:
                 report_times.pop(k, None)
+        for k in [k for k, v in list(probation.items()) if v["until"] < n]:
+            probation.pop(k, None)
+        await maybe_autosweep_deleted()
         storage.save_stats(stats)
+
+
+async def maybe_autosweep_deleted():
+    """Периодический автосвип удалёнок по всем виденным чатам (если включён)."""
+    global last_deleted_sweep
+    if not flag("AUTO_CLEAN_DELETED"):
+        return
+    every = max(1, num("CLEAN_DELETED_EVERY_HOURS")) * 3600
+    if last_deleted_sweep and (now() - last_deleted_sweep).total_seconds() < every:
+        return
+    last_deleted_sweep = now()
+    total = 0
+    for chat_id in list(known_chats):
+        try:
+            res = await sweep_deleted(chat_id, do_kick=True)
+        except Exception as e:                    # noqa: BLE001
+            log.warning("Автосвип удалёнок в %s упал: %s", chat_id, e)
+            continue
+        if res["kicked"]:
+            total += res["kicked"]
+            audit("чистка", f"автосвип: кикнуто удалёнок {res['kicked']}", 0)
+    if total:
+        await notify_panel(f"🧹 Автосвип: выкинуто удалённых аккаунтов — <b>{total}</b>.")
+        log.info("Автосвип удалёнок: кикнуто %d", total)
 
 
 # ----------------------------------------------------------- наказания
@@ -941,7 +1084,27 @@ class ModerationMiddleware(BaseMiddleware):
                 or storage.is_trusted(chat_id, user.id)):
             return False
 
-        # Админ-команда от обычного пользователя: удалить и не отвечать (тумблер).
+        # Наблюдение (probation): подозрительный новичок в первые минуты.
+        # Классический кейс — «иностранный акк спустя пару минут кидает фотки/ссылку».
+        if flag("PROBATION_ENABLED"):
+            watch = probation_active(chat_id, user.id)
+            if watch:
+                bad = None
+                if flag("PROBATION_ON_MEDIA") and has_media(msg):
+                    bad = "медиа от наблюдаемого новичка"
+                elif flag("PROBATION_ON_LINK") and has_link(msg):
+                    bad = "ссылка от наблюдаемого новичка"
+                if bad:
+                    probation.pop((chat_id, user.id), None)
+                    reason = f"{bad} (риск {watch['score']})"
+                    await apply_punishment(msg, reason, action_for("PROBATION_ACTION"))
+                    stats["risk_muted"] += 1
+                    if flag("NOTIFY_VIOLATIONS"):
+                        await notify_panel(event_card("🚨 Сработало наблюдение", user,
+                                                      reason=reason))
+                    return True
+
+
         # Публичные команды (/rules /report /ping /vb /help) и команды персонала
         # (носителей ролей) пропускаем как обычно.
         cmd = _cmd_name(msg.text or "")
@@ -1245,6 +1408,43 @@ async def challenge(chat_id: int, user) -> None:
                 await ban_user(chat_id, user.id)
                 await report(chat_id, f"🚫 {mention(user)} забанен на входе: {esc(bad)}.")
                 return
+
+        # Риск-скоринг профиля: иностранное имя, случайный ник, нет фото,
+        # свежий аккаунт и т.п. Высокий скор -> жёсткое действие сразу;
+        # средний -> берём «под наблюдение» (probation) на первые минуты.
+        if flag("RISK_ENABLED"):
+            score, reasons, _dc = await risk_evaluate(user)
+            v = riskscore.verdict(score, num("RISK_WATCH_THRESHOLD"),
+                                  num("RISK_BAN_THRESHOLD"))
+            if v == "hard":
+                act = action_for("RISK_ACTION")
+                why = "; ".join(reasons[:4])
+                if act == "ban":
+                    pending.pop(key, None)
+                    await ban_user(chat_id, user.id)
+                    stats["risk_muted"] += 1
+                    audit("риск-фильтр", f"бан входа (скор {score})", user.id, user.full_name)
+                    await report(chat_id, f"🚫 {mention(user)} забанен на входе — "
+                                          f"риск {score}: {esc(why)}.")
+                    return
+                if act == "mute":
+                    pending.pop(key, None)
+                    await mute_user(chat_id, user.id)
+                    stats["risk_muted"] += 1
+                    audit("риск-фильтр", f"мут входа (скор {score})", user.id, user.full_name)
+                    await report(chat_id, f"🔇 {mention(user)} в муте на входе — "
+                                          f"риск {score}: {esc(why)}.", mod_keyboard(chat_id, user.id))
+                    if flag("NOTIFY_VIOLATIONS"):
+                        await notify_panel(event_card("🚨 Риск-профиль (мут на входе)",
+                                                      user, reason=f"скор {score}: {why}"))
+                    return
+                # act == "captcha" — на капчу, но с наблюдением.
+                start_probation(chat_id, user, score, reasons)
+            elif v == "watch":
+                start_probation(chat_id, user, score, reasons)
+                if flag("NOTIFY_JOINS"):
+                    await notify_panel(event_card("👀 Под наблюдением", user,
+                                                  reason=f"скор {score}: {'; '.join(reasons[:4])}"))
 
         steps = build_questions()
         first = steps[0]
@@ -2241,6 +2441,86 @@ async def cmd_purgedc(message: Message):
     await message.answer(f"✅ Забанено по DC: <b>{banned}</b> из {len(cands)} проверенных.")
 
 
+@dp.message(Command("cleandeleted", "cleandel"))
+async def cmd_cleandeleted(message: Message):
+    """Выкинуть из чата удалённые аккаунты (Deleted Account) среди виденных ботом."""
+    if not await _can(message, "ban"):
+        return
+    chat_id = message.chat.id
+    cands = known_members(chat_id) - await get_admins(chat_id)
+    arg = (message.text or "").split()
+    confirm = len(arg) > 1 and arg[1].lower() in ("confirm", "go", "да")
+
+    if not confirm:
+        extra = ""
+        if userbot.available():
+            extra = ("\n\n💡 Доступен юзербот — <code>/scanall</code> пройдёт по "
+                     "ВСЕМ участникам, а не только виденным.")
+        await message.answer(
+            f"🔎 Кандидатов к проверке (видел бот): <b>{len(cands)}</b>.\n"
+            "Bot API видит только тех, кто писал/вступал — НЕ весь список группы.\n"
+            "Запустить чистку: <code>/cleandeleted confirm</code>" + extra)
+        return
+
+    await message.answer(f"⏳ Проверяю {len(cands)} аккаунтов на удалёнку… "
+                         "(медленно из-за лимитов Telegram)")
+    res = await sweep_deleted(chat_id, do_kick=True)
+    audit("чистка", f"кикнуто удалёнок {res['kicked']}", message.from_user.id)
+    await message.answer(
+        f"✅ Готово. Проверено: <b>{res['scanned']}</b>, "
+        f"удалёнок: <b>{res['deleted']}</b>, выкинуто: <b>{res['kicked']}</b>.")
+
+
+@dp.message(Command("scanall"))
+async def cmd_scanall(message: Message):
+    """Полный скан ВСЕХ участников через юзербот (Telethon) и кик удалёнок."""
+    if not await _can(message, "ban"):
+        return
+    if not userbot.available():
+        await message.answer(
+            "🚫 Юзербот не настроен.\n"
+            f"Статус: {esc(userbot.status())}.\n"
+            "Нужны Telethon + user-сессия (см. userbot.py и config.USERBOT_*). "
+            "Пока доступна чистка виденных: /cleandeleted.")
+        return
+    await message.answer("⏳ Полный скан участников через юзербот… это может занять время.")
+    try:
+        res = await userbot.scan_deleted(message.chat.id, kick=True)
+    except Exception as e:                        # noqa: BLE001
+        await message.answer(f"Юзербот упал: {esc(str(e))}")
+        return
+    if res.get("error"):
+        await message.answer(f"⚠️ {esc(res['error'])}")
+        return
+    stats["deleted_kicked"] += res["kicked"]
+    audit("чистка", f"юзербот: кикнуто {res['kicked']}", message.from_user.id)
+    await message.answer(
+        f"✅ Юзербот прошёл всех.\nУчастников: <b>{res['scanned']}</b>, "
+        f"удалёнок: <b>{res['deleted']}</b>, выкинуто: <b>{res['kicked']}</b>.")
+
+
+@dp.message(Command("risk"))
+async def cmd_risk(message: Message):
+    """Диагностика риск-скора: ответом на сообщение показать оценку профиля."""
+    if not await _admin_only(message):
+        return
+    target = message.reply_to_message.from_user if message.reply_to_message else None
+    if target is None or target.is_bot:
+        await message.answer("Ответь /risk на сообщение пользователя.")
+        return
+    score, reasons, dc = await risk_evaluate(target)
+    v = riskscore.verdict(score, num("RISK_WATCH_THRESHOLD"), num("RISK_BAN_THRESHOLD"))
+    label = {"hard": "🔴 жёсткое действие", "watch": "🟡 под наблюдение",
+             "clear": "🟢 чисто"}[v]
+    body = "\n".join(f"• {esc(r)}" for r in reasons) or "• сигналов нет"
+    await message.answer(
+        f"🎯 <b>Риск-профиль</b> {mention(target)}\n"
+        f"Скор: <b>{score}</b> — {label}\n"
+        f"Пороги: наблюдение {num('RISK_WATCH_THRESHOLD')}, "
+        f"жёстко {num('RISK_BAN_THRESHOLD')} · DC{dc if dc else '—'}\n\n"
+        f"Сигналы:\n{body}")
+
+
 @dp.message(Command("ban"))
 async def cmd_ban(message: Message):
     if not await _can(message, "ban"):
@@ -2826,6 +3106,8 @@ def stats_text() -> str:
         f"завалили: {stats['failed']}\n"
         f"Мутов за картинки: {stats['img_muted']} | банов всего: {stats['banned']}\n"
         f"Жалоб: {stats.get('reports', 0)} | рейдов: {stats.get('raids', 0)}\n"
+        f"Риск-мутов: {stats.get('risk_muted', 0)} | кикнуто удалёнок: {stats.get('deleted_kicked', 0)}\n"
+        f"Под наблюдением: {sum(1 for v in probation.values() if v['until'] >= now())}\n"
         f"Эталонов: {len(ref_hashes)} | стоп-слов: {len(storage.stopwords())}\n"
         f"Сейчас на капче: {sum(1 for v in pending.values() if v.get('steps'))}"
     )
@@ -2932,6 +3214,7 @@ async def cmd_help(message: Message):
         "Приветствие: /setwelcome | Автоответы: /addtrigger ключ | ответ, /deltrigger, /triggers\n"
         "Режимы: /night /quiet /antimat on|off\n"
         "🚨 Рейд: /lockdown on|off | /checkdc | /purgedc | /clearrequests (отклонить заявки)\n"
+        "🎯 Профили: /risk (ответом — оценка) | 🧹 Удалёнки: /cleandeleted | /scanall (юзербот)\n"
         "Голосование: /vb (ответом — голосование за заглушение)\n"
         "Инфо: /info (досье) /log (журнал) /diag /check (ответом на фото) /settings /stats /ping\n"
         "Жалоба участника: /report (ответом)\n\n"
@@ -3026,6 +3309,11 @@ PANEL_FLAGS = [
     ("NOTIFY_JOINS", "Увед. входы"),
     ("NOTIFY_VIOLATIONS", "Увед. нарушения"),
     ("NOTIFY_REPORTS", "Увед. жалобы"),
+    ("RISK_ENABLED", "Риск-фильтр профилей"),
+    ("PROBATION_ENABLED", "Наблюдение новичков"),
+    ("PROBATION_ON_MEDIA", "Набл.: медиа → мут"),
+    ("PROBATION_ON_LINK", "Набл.: ссылка → мут"),
+    ("AUTO_CLEAN_DELETED", "Автосвип удалёнок"),
 ]
 
 # Числовые настройки, редактируемые из панели.
@@ -3040,6 +3328,10 @@ PANEL_NUMS = [
     ("ANTIREPEAT_COUNT", "Анти-повтор: одинаковых"),
     ("ACCEPT_BURST_LIMIT", "Заявок до стопа автоприёма"),
     ("ACCEPT_BURST_WINDOW", "Окно всплеска заявок (с)"),
+    ("RISK_WATCH_THRESHOLD", "Риск: порог наблюдения"),
+    ("RISK_BAN_THRESHOLD", "Риск: порог жёсткий"),
+    ("PROBATION_MINUTES", "Наблюдение: минут"),
+    ("CLEAN_DELETED_EVERY_HOURS", "Автосвип удалёнок (ч)"),
 ]
 
 # Действия за фильтры (циклически delete -> warn -> mute -> ban).
@@ -3049,6 +3341,8 @@ PANEL_ACTS = [
     ("TEXT_ACTION", "Мат/стоп-слова"),
     ("ANTIFLOOD_ACTION", "Флуд"),
     ("WARN_ACTION", "Лимит варнов →"),
+    ("RISK_ACTION", "Риск на входе"),
+    ("PROBATION_ACTION", "Наблюдение"),
 ]
 ACT_CYCLE = ["delete", "warn", "mute", "ban"]
 
@@ -3079,6 +3373,9 @@ PANEL_CATEGORIES = [
                             "VOTE_ANYONE", "ANON_ADMIN"]),
     ("notify", "🔔 Уведомления", ["NOTIFY_JOINS", "NOTIFY_VIOLATIONS", "NOTIFY_REPORTS",
                                   "REPORT_ENABLED"]),
+    ("profile", "🎯 Профиль-фильтр", ["RISK_ENABLED", "PROBATION_ENABLED",
+                                      "PROBATION_ON_MEDIA", "PROBATION_ON_LINK",
+                                      "AUTO_CLEAN_DELETED"]),
 ]
 CAT_FLAGS = {c: keys for c, _, keys in PANEL_CATEGORIES}
 CAT_TITLES = {c: title for c, title, _ in PANEL_CATEGORIES}
@@ -3096,6 +3393,7 @@ def panel_keyboard() -> InlineKeyboardMarkup:
                  InlineKeyboardButton(text="📒 Журнал", callback_data="panel:log")])
     rows.append([InlineKeyboardButton(text="💾 Бэкап", callback_data="panel:backup"),
                  InlineKeyboardButton(text="🔄 База картинок", callback_data="panel:reload")])
+    rows.append([InlineKeyboardButton(text="🧹 Чистка удалёнок", callback_data="panel:cleandel")])
     rows.append([InlineKeyboardButton(text="🎖 Роли и права", callback_data="panel:roles"),
                  InlineKeyboardButton(text="🧹 Сброс заявок", callback_data="panel:reqs")])
     rows.append([InlineKeyboardButton(text="👑 Владельцы", callback_data="panel:owners")])
@@ -3513,6 +3811,32 @@ async def panel_cb(cb: CallbackQuery):
     elif action == "reload":
         load_reference_hashes()
         await cb.answer(f"База обновлена: {len(ref_hashes)} картинок.", show_alert=True)
+    elif action == "cleandel":
+        await cb.answer("Сканирую удалёнок…")
+        chats = list(known_chats)
+        if not chats:
+            await bot.send_message(cb.message.chat.id,
+                                   "Пока не видел ни одного чата с активностью — нечего чистить.")
+            return
+        total = {"scanned": 0, "deleted": 0, "kicked": 0}
+        lines = []
+        for chat_id in chats:
+            res = await sweep_deleted(chat_id, do_kick=True)
+            for k in total:
+                total[k] += res[k]
+            if res["kicked"]:
+                lines.append(f"• <code>{chat_id}</code>: выкинуто {res['kicked']}")
+        if total["kicked"]:
+            audit("чистка", f"из панели: кикнуто удалёнок {total['kicked']}", uid)
+        body = ("\n".join(lines) + "\n\n") if lines else ""
+        extra = ("\n💡 Для полного скана всех участников — /scanall в чате (нужен юзербот)."
+                 if userbot.available() else
+                 "\nBot API видит только виденных — полный скан требует юзербота (userbot.py).")
+        await bot.send_message(
+            cb.message.chat.id,
+            f"🧹 <b>Чистка удалёнок</b> по {len(chats)} чатам.\n{body}"
+            f"Проверено: <b>{total['scanned']}</b>, удалёнок: <b>{total['deleted']}</b>, "
+            f"выкинуто: <b>{total['kicked']}</b>.{extra}")
     elif action == "reqs":
         await cb.answer()
         total = sum(len(s) for s in pending_requests.values())
@@ -3556,7 +3880,14 @@ async def panel_cb(cb: CallbackQuery):
     elif action == "ac":
         key = parts[2]
         cur = action_for(key)
-        cycle = ["mute", "ban"] if key == "WARN_ACTION" else ACT_CYCLE
+        if key == "WARN_ACTION":
+            cycle = ["mute", "ban"]
+        elif key == "RISK_ACTION":
+            cycle = ["mute", "ban", "captcha"]
+        elif key == "PROBATION_ACTION":
+            cycle = ["mute", "ban"]
+        else:
+            cycle = ACT_CYCLE
         nxt = cycle[(cycle.index(cur) + 1) % len(cycle)] if cur in cycle else cycle[0]
         storage.set_str(key, nxt)
         await cb.answer(f"{key}: {nxt}")

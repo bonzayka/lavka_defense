@@ -560,5 +560,89 @@ async def run_capnew():
 asyncio.run(run_capnew())
 
 
+# ---- детекция удалённых аккаунтов ----
+check("deleted: пустой профиль = удалёнка",
+      bot.deleted.is_deleted_account(C(first_name="", last_name=None, username=None)))
+check("deleted: обычный юзер не удалёнка",
+      not bot.deleted.is_deleted_account(C(first_name="Иван", last_name="", username=None)))
+check("deleted: только @ник — не удалёнка",
+      not bot.deleted.is_deleted_account(C(first_name="", last_name=None, username="ivan")))
+check("deleted: только фамилия — не удалёнка",
+      not bot.deleted.is_deleted_account(C(first_name="", last_name="Петров", username=None)))
+_del_user = C(first_name="", last_name=None, username=None)
+check("deleted: кикать member-удалёнку",
+      bot.deleted.should_kick_member(C(status="member", user=_del_user)))
+check("deleted: НЕ кикать админа-удалёнку",
+      not bot.deleted.should_kick_member(C(status="administrator", user=_del_user)))
+check("deleted: НЕ кикать живого member",
+      not bot.deleted.should_kick_member(
+          C(status="member", user=C(first_name="Аня", last_name=None, username=None))))
+
+# ---- риск-движок: письменность имени ----
+rs = bot.riskscore
+check("script: кириллица", rs.dominant_script("Иван Петров") == "cyrillic")
+check("script: латиница", rs.dominant_script("John Smith") == "latin")
+check("script: арабица", rs.dominant_script("محمد") == "arabic")
+check("script: cjk", rs.dominant_script("田中太郎") == "cjk")
+check("script: индик/тай", rs.dominant_script("สมชาย") == "indic")
+check("script: значки/эмодзи", rs.dominant_script("🔥💰🎰") == "symbols")
+
+# ---- риск-движок: случайный юзернейм ----
+check("uname: цифровой хвост", rs.is_random_username("Marina480213"))
+check("uname: набор согласных", rs.is_random_username("kldfjghqwx"))
+check("uname: нормальный ник", not rs.is_random_username("alexander"))
+check("uname: короткий", not rs.is_random_username("kot"))
+check("uname: пусто", not rs.is_random_username(None))
+
+# ---- риск-движок: свежесть аккаунта ----
+check("fresh: id выше порога", rs.is_fresh_account(8_000_000_000, 7_500_000_000))
+check("fresh: id ниже порога", not rs.is_fresh_account(100_000, 7_500_000_000))
+check("fresh: порог 0 = выкл", not rs.is_fresh_account(9_000_000_000, 0))
+
+# ---- риск-движок: скоринг профиля ----
+s_clean, _ = rs.score_profile(first_name="Мария", last_name="Иванова", username="mariva",
+                              user_id=100_000, is_premium=False, has_photo=True,
+                              dc=2, dc_flagged=False, fresh_id_threshold=7_500_000_000)
+check("score: чистый русский профиль ~0", s_clean == 0)
+
+s_watch, _ = rs.score_profile(first_name="John", last_name="", username="John77812",
+                              user_id=8_000_000_000, is_premium=False, has_photo=False,
+                              dc=None, dc_flagged=False, fresh_id_threshold=7_500_000_000)
+check("score: подозрительный -> наблюдение", s_watch >= bot.config.RISK_WATCH_THRESHOLD)
+
+s_hard, _ = rs.score_profile(first_name="محمد", last_name="", username="xxx88213promo",
+                             user_id=8_000_000_000, is_premium=False, has_photo=False,
+                             dc=5, dc_flagged=True, fresh_id_threshold=7_500_000_000)
+check("score: явный спам-профиль -> жёстко", s_hard >= bot.config.RISK_BAN_THRESHOLD)
+
+check("verdict: clear", rs.verdict(10, 45, 85) == "clear")
+check("verdict: watch", rs.verdict(50, 45, 85) == "watch")
+check("verdict: hard", rs.verdict(90, 45, 85) == "hard")
+
+# ---- probation: наблюдение живёт и истекает ----
+bot.probation.clear()
+_pu = C(id=555001)
+bot.start_probation(-100, _pu, 60, ["тест"])
+check("probation: активно после старта", bot.probation_active(-100, 555001) is not None)
+bot.probation[(-100, 555001)]["until"] = bot.now() - bot.timedelta(seconds=1)
+check("probation: истекло -> None", bot.probation_active(-100, 555001) is None)
+check("probation: истёкшее снято", (-100, 555001) not in bot.probation)
+
+# ---- known_members: собирает виденных по чату ----
+bot.recent[(-200, 42)] = bot.deque()
+bot.msgcount[(-200, 43)] = 1
+bot.newcomer[(-200, 44)] = bot.now()
+km = bot.known_members(-200)
+check("known_members: собрал всех виденных", {42, 43, 44} <= km)
+check("known_members: чужой чат не попал", 42 not in bot.known_members(-999))
+bot.recent.pop((-200, 42), None)
+bot.msgcount.pop((-200, 43), None)
+bot.newcomer.pop((-200, 44), None)
+
+# ---- userbot: опционален, не падает независимо от наличия ключей/Telethon ----
+check("userbot: available булев", isinstance(bot.userbot.available(), bool))
+check("userbot: status строка", isinstance(bot.userbot.status(), str))
+
+
 print(f"\nИтог: {PASS} ок, {FAIL} провалов.")
 sys.exit(1 if FAIL else 0)
