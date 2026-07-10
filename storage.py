@@ -33,6 +33,8 @@ _DEFAULT = {
     "role_titles": {},        # ключ_роли -> кастомное отображаемое имя ранга (переименование)
     "owners": [],             # [user_id, ...] — владельцы: только они раздают роли/должности
     "sticker_packs": [],      # [set_name, ...] — стикерпаки, которые НЕ проверять на 18+
+    "verified_phones": {},    # str(user_id) -> {"prefix","tail","ts"} — прошли верификацию по номеру (глобально)
+    "pending_verify": {},     # str(user_id) -> {"chat","notice","ts"} — ждут подтверждения номера в ЛС
 }
 
 AUDIT_LIMIT = 200
@@ -356,8 +358,55 @@ def disallow_pack(set_name: str) -> bool:
     return False
 
 
-# --- журнал действий (audit log) ---
+# --- верификация по номеру телефона (глобально, по user_id) ---
 
+def is_phone_verified(user_id: int) -> bool:
+    return str(user_id) in _data.setdefault("verified_phones", {})
+
+
+def set_phone_verified(user_id: int, prefix: str, tail: str, ts: str = "") -> None:
+    """Пометить юзера прошедшим верификацию. Полный номер НЕ храним —
+    только код страны (prefix) и 2 последние цифры (tail) для справки админу."""
+    _data.setdefault("verified_phones", {})[str(user_id)] = {
+        "prefix": prefix, "tail": tail, "ts": ts,
+    }
+    _data.setdefault("pending_verify", {}).pop(str(user_id), None)
+    save()
+
+
+def unverify_phone(user_id: int) -> bool:
+    """Снять верификацию (напр. если админ хочет заставить перепройти)."""
+    if str(user_id) in _data.setdefault("verified_phones", {}):
+        del _data["verified_phones"][str(user_id)]
+        save()
+        return True
+    return False
+
+
+def verified_count() -> int:
+    return len(_data.setdefault("verified_phones", {}))
+
+
+# --- ожидающие подтверждения номера (переживает перезапуск) ---
+
+def set_pending_verify(user_id: int, chat_id: int, notice_id=None, ts: str = "") -> None:
+    _data.setdefault("pending_verify", {})[str(user_id)] = {
+        "chat": chat_id, "notice": notice_id, "ts": ts,
+    }
+    save()
+
+
+def get_pending_verify(user_id: int) -> dict | None:
+    return _data.setdefault("pending_verify", {}).get(str(user_id))
+
+
+def clear_pending_verify(user_id: int) -> None:
+    if str(user_id) in _data.setdefault("pending_verify", {}):
+        del _data["pending_verify"][str(user_id)]
+        save()
+
+
+# --- журнал действий (audit log) ---
 def add_audit(entry: dict) -> None:
     log = _data.setdefault("audit", [])
     log.append(entry)

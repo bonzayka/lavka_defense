@@ -46,6 +46,9 @@ from aiogram.types import (
     InputMediaPhoto,
     InlineKeyboardButton,
     InlineKeyboardMarkup,
+    KeyboardButton,
+    ReplyKeyboardMarkup,
+    ReplyKeyboardRemove,
 )
 from aiogram.exceptions import TelegramBadRequest, TelegramRetryAfter, TelegramForbiddenError
 
@@ -113,6 +116,8 @@ ub_login: dict[int, dict] = {}                     # состояние скры
 msgcount: dict[tuple[int, int], int] = {}          # счётчик сообщений юзеров (с момента старта)
 uname_cache: dict[str, int] = {}                   # "@username" (lower, без @) -> user_id (для таргета по нику)
 bot_self_id: int | None = None                     # id самого бота (для защиты цели), ставится в main()
+bot_username: str | None = None                    # @username бота (для deep-link верификации), ставится в main()
+verify_wait: dict[int, dict] = {}                  # user_id -> {chat_id, notice_id, joined, name, task} — ждут номер в ЛС
 vb_cooldown: dict[tuple[int, int], datetime] = {}  # (chat, uid) -> когда не-персонал последний раз звал /vb
 probation: dict[tuple[int, int], dict] = {}        # (chat, uid) -> {until, score, reasons} — новичок «под наблюдением»
 known_chats: set[int] = set()                      # чаты, где бот видел активность (для свипа удалёнок)
@@ -133,6 +138,14 @@ FULL = ChatPermissions(
     can_send_photos=True, can_send_videos=True, can_send_video_notes=True,
     can_send_voice_notes=True, can_send_polls=True, can_send_other_messages=True,
     can_add_web_page_previews=True, can_invite_users=True,
+)
+# Медиа-карантин новичка: можно ТОЛЬКО текст (никаких гиф/стикеров/фото/видео/
+# аудио/голосовых/кружков/файлов/опросов). Ставится с until_date на NEWCOMER_MEDIA_HOURS.
+NEWCOMER_QUARANTINE = ChatPermissions(
+    can_send_messages=True, can_send_audios=False, can_send_documents=False,
+    can_send_photos=False, can_send_videos=False, can_send_video_notes=False,
+    can_send_voice_notes=False, can_send_polls=False, can_send_other_messages=False,
+    can_add_web_page_previews=True, can_invite_users=False,
 )
 
 SHAPES = {"треугольника": 3, "квадрата": 4, "пятиугольника": 5, "шестиугольника": 6}
@@ -833,6 +846,15 @@ async def janitor():
                 report_times.pop(k, None)
         for k in [k for k, v in list(probation.items()) if v["until"] < n]:
             probation.pop(k, None)
+        # Верификация: истёкшие ожидания (юзер так и не подтвердил номер) —
+        # чистим in-memory подсказку; запись в storage.pending_verify оставляем,
+        # чтобы юзер мог подтвердить позже (мут снимется только после номера).
+        vmins = num("PHONE_VERIFY_MINUTES")
+        if vmins > 0:
+            vcut2 = n - timedelta(minutes=vmins * 3)  # держим ещё втрое дольше как «хвост»
+            for uid in [u for u, st in list(verify_wait.items())
+                        if st.get("joined") and st["joined"] < vcut2]:
+                verify_wait.pop(uid, None)
         await maybe_autosweep_deleted()
         storage.save_stats(stats)
 
@@ -1335,6 +1357,98 @@ async def send_welcome(chat_id: int, user):
         pass
 
 
+# ------------------------- выдача доступа после капчи -------------------------
+
+async def grant_full_or_quarantine(chat_id: int, user_id: int) -> None:
+    """Снять капча-ограничения: либо медиа-карантин новичка на сутки
+    (только текст, media запрещены — нативно, until_date), либо полный доступ."""
+    hrs = num("NEWCOMER_MEDIA_HOURS")
+    if hrs > 0:
+        until = now() + timedelta(hours=hrs)
+        try:
+            await bot.restrict_chat_member(chat_id, user_id,
+                                           permissions=NEWCOMER_QUARANTINE, until_date=until)
+            return
+        except TelegramBadRequest as e:
+            log.warning("Не смог включить медиа-карантин %s: %s", user_id, e)
+    try:
+        await bot.restrict_chat_member(chat_id, user_id, permissions=FULL)
+    except TelegramBadRequest as e:
+        log.warning("Не смог снять ограничения с %s: %s", user_id, e)
+
+
+async def grant_member_access(chat_id: int, user) -> None:
+    """Финально впустить участника (капча + верификация пройдены)."""
+    await grant_full_or_quarantine(chat_id, user.id)
+    await send_welcome(chat_id, user)
+
+
+async def verify_timeout(user_id: int):
+    """Таймер ожидания номера: подсказку в группе убираем, юзер остаётся в муте."""
+    mins = num("PHONE_VERIFY_MINUTES")
+    if mins <= 0:
+        return
+    try:
+        await asyncio.sleep(mins * 60)
+    except asyncio.CancelledError:
+        return
+    st = verify_wait.get(user_id)
+    if not st or storage.is_phone_verified(user_id):
+        return
+    notice = st.get("notice_id")
+    if notice:
+        try:
+            await bot.delete_message(st["chat_id"], notice)
+        except TelegramBadRequest:
+            pass
+    # оставляем запись в storage.pending_verify — юзер ещё сможет подтвердить позже
+
+
+async def send_phone_prompt(chat_id: int, user) -> None:
+    """В группе: остался шаг — верификация по номеру в ЛС бота (кнопка-ссылка)."""
+    notice_id = None
+    kb = None
+    if bot_username:
+        url = f"https://t.me/{bot_username}?start=verify_{chat_id}"
+        kb = InlineKeyboardMarkup(inline_keyboard=[[
+            InlineKeyboardButton(text="✅ Подтвердить, что я человек", url=url)]])
+    try:
+        sent = await bot.send_message(
+            chat_id,
+            f"{mention(user)}, остался последний шаг ✅\n"
+            "Нажми кнопку ниже и <b>поделись своим номером</b> в личке бота — "
+            "так мы убеждаемся, что ты живой человек, а не бот. "
+            "До подтверждения писать в чат нельзя.",
+            reply_markup=kb, disable_web_page_preview=True)
+        notice_id = sent.message_id
+    except TelegramBadRequest:
+        pass
+    st = verify_wait.get(user.id) or {}
+    old = st.get("task")
+    if old and not old.done():
+        old.cancel()
+    task = asyncio.create_task(verify_timeout(user.id))
+    verify_wait[user.id] = {"chat_id": chat_id, "notice_id": notice_id,
+                            "name": user.full_name or "", "joined": now(), "task": task}
+    storage.set_pending_verify(user.id, chat_id, notice_id, fmt_when())
+
+
+async def finish_captcha(chat_id: int, user) -> None:
+    """Капча пройдена. Дальше — верификация по номеру (если включена и ещё не
+    пройдена глобально), иначе сразу выдаём доступ (с медиа-карантином)."""
+    stats["passed"] += 1
+    if flag("PHONE_VERIFY_ENABLED") and not storage.is_phone_verified(user.id):
+        try:                                   # держим в муте до подтверждения номера
+            await bot.restrict_chat_member(chat_id, user.id, permissions=MUTE)
+        except TelegramBadRequest:
+            pass
+        await send_phone_prompt(chat_id, user)
+        log.info("Юзер %s прошёл капчу — ждём верификацию по номеру.", user.id)
+        return
+    await grant_member_access(chat_id, user)
+    log.info("Юзер %s прошёл капчу — доступ выдан.", user.id)
+
+
 async def check_raid(chat_id: int) -> bool:
     """Зарегистрировать вход и вернуть True, если идёт рейд/локдаун."""
     active = raid_until.get(chat_id)
@@ -1572,14 +1686,8 @@ async def _advance_after_image(chat_id: int, user, st: dict) -> None:
         except TelegramBadRequest:
             pass
     if new_idx >= len(st["steps"]):           # картинка была единственным шагом
-        try:
-            await bot.restrict_chat_member(chat_id, user.id, permissions=FULL)
-        except TelegramBadRequest as e:
-            log.warning("Не смог снять ограничения с %s: %s", user.id, e)
         await cleanup(chat_id, user.id, delete_msg=False)
-        stats["passed"] += 1
-        await send_welcome(chat_id, user)
-        log.info("Юзер %s прошёл фото-капчу.", user.id)
+        await finish_captcha(chat_id, user)
         return
     st["idx"] = new_idx
     nstep = st["steps"][new_idx]
@@ -1645,14 +1753,8 @@ async def on_captcha_answer(cb: CallbackQuery):
     new_idx = idx + 1
     if new_idx >= len(state["steps"]):
         await cb.answer("Проверка пройдена ✅")
-        try:
-            await bot.restrict_chat_member(chat_id, user_id, permissions=FULL)
-        except TelegramBadRequest as e:
-            log.warning("Не смог снять мут с %s: %s", user_id, e)
         await cleanup(chat_id, user_id)
-        stats["passed"] += 1
-        await send_welcome(chat_id, cb.from_user)
-        log.info("Юзер %s прошёл капчу — размучен.", user_id)
+        await finish_captcha(chat_id, cb.from_user)
         return
 
     state["idx"] = new_idx
@@ -3296,6 +3398,7 @@ PANEL_FLAGS = [
     ("CHECK_JOIN_NAMES", "Имена"),
     ("CAPTCHA_IMAGE", "Фото-капча (ввод кода)"),
     ("AUTO_ACCEPT", "Автоприём заявок"),
+    ("PHONE_VERIFY_ENABLED", "Верификация по номеру"),
     ("DC_CHECK_JOIN", "DC-фильтр (DC5)"),
     ("LOCKDOWN", "🚨 Локдаун"),
     ("WELCOME_ENABLED", "Приветствие"),
@@ -3325,6 +3428,8 @@ PANEL_NUMS = [
     ("ANTIFLOOD_SECONDS", "Антифлуд: секунд"),
     ("WARN_LIMIT", "Лимит предупреждений"),
     ("RESTRICT_NEWCOMERS_HOURS", "Новичкам без ссылок (ч)"),
+    ("NEWCOMER_MEDIA_HOURS", "Новичкам без медиа (ч)"),
+    ("PHONE_VERIFY_MINUTES", "Верификация: лимит (мин)"),
     ("GORE_THRESHOLD_PCT", "Порог гора (%)"),
     ("ANTIREPEAT_COUNT", "Анти-повтор: одинаковых"),
     ("ACCEPT_BURST_LIMIT", "Заявок до стопа автоприёма"),
@@ -3368,7 +3473,7 @@ PANEL_CATEGORIES = [
                              "ANTIREPEAT_ENABLED", "TRIGGERS_ENABLED"]),
     ("entry", "🚪 Вход и капча", ["CHECK_JOIN_NAMES", "CAPTCHA_IMAGE", "AUTO_ACCEPT",
                                   "DC_CHECK_JOIN", "LOCKDOWN", "WELCOME_ENABLED",
-                                  "ANTIRAID_ENABLED"]),
+                                  "ANTIRAID_ENABLED", "PHONE_VERIFY_ENABLED"]),
     ("modes", "🌙 Режимы", ["NIGHT_MODE", "QUIET_MODE", "DELETE_SERVICE_MESSAGES",
                             "DELETE_ADMIN_COMMANDS", "DELETE_USER_COMMANDS",
                             "VOTE_ANYONE", "ANON_ADMIN"]),
@@ -3568,9 +3673,149 @@ async def open_panel(chat_id: int):
     await bot.send_message(chat_id, PANEL_TEXT, reply_markup=panel_keyboard())
 
 
+# --------------------- верификация по номеру телефона в ЛС ---------------------
+
+def phone_kb() -> ReplyKeyboardMarkup:
+    """Клавиатура с одной кнопкой «Поделиться номером» (request_contact)."""
+    return ReplyKeyboardMarkup(
+        keyboard=[[KeyboardButton(text="📱 Поделиться моим номером", request_contact=True)]],
+        resize_keyboard=True, one_time_keyboard=True,
+        input_field_placeholder="Нажми кнопку ниже 👇")
+
+
+async def begin_phone_verify(message: Message) -> None:
+    """Юзер открыл бота по deep-link из группы — просим поделиться номером."""
+    uid = message.from_user.id
+    if storage.is_phone_verified(uid):
+        # Уже верифицирован глобально — сразу впустим там, где ждёт (если ждёт).
+        await message.answer("✅ Ты уже подтверждён. Спасибо!",
+                             reply_markup=ReplyKeyboardRemove())
+        await _release_after_verify(uid, message.from_user)
+        return
+    await message.answer(
+        "👋 Привет! Чтобы получить доступ к чату, подтверди, что ты живой человек.\n\n"
+        "Нажми кнопку <b>«Поделиться моим номером»</b> ниже. "
+        "Бот проверит номер автоматически — он <b>никому не показывается</b> и "
+        "нигде не публикуется.",
+        reply_markup=phone_kb())
+
+
+def _normalize_phone(raw: str) -> str:
+    """'79991234567' / '+7 999 ...' -> '+79991234567' (только + и цифры)."""
+    digits = re.sub(r"\D", "", raw or "")
+    return "+" + digits if digits else ""
+
+
+async def _release_after_verify(uid: int, user) -> None:
+    """Впустить юзера в группу, где он ждал верификацию (если такая есть)."""
+    st = verify_wait.get(uid)
+    pend = storage.get_pending_verify(uid)
+    chat_id = (st or {}).get("chat_id") or (pend or {}).get("chat")
+    task = (st or {}).get("task")
+    if task and not task.done():
+        task.cancel()
+    notice_id = (st or {}).get("notice_id") or (pend or {}).get("notice")
+    verify_wait.pop(uid, None)
+    storage.clear_pending_verify(uid)
+    if not chat_id:
+        return
+    if notice_id:
+        try:
+            await bot.delete_message(chat_id, notice_id)
+        except TelegramBadRequest:
+            pass
+    await grant_member_access(chat_id, user)
+    log.info("Юзер %s верифицирован по номеру — доступ в чат %s выдан.", uid, chat_id)
+
+
+@dp.message(F.contact, F.chat.type == "private")
+async def on_contact(message: Message) -> None:
+    """Юзер прислал контакт в ЛС — проверяем номер (свой ли + разрешённый ли код)."""
+    if not flag("PHONE_VERIFY_ENABLED"):
+        return
+    uid = message.from_user.id
+    contact = message.contact
+    # Контакт должен быть СВОИМ (нельзя переслать чужую «правильную» визитку).
+    if config.PHONE_REQUIRE_OWN_CONTACT and contact.user_id != uid:
+        await message.answer(
+            "❗️ Это не твой номер. Пожалуйста, нажми кнопку "
+            "<b>«Поделиться моим номером»</b> — так отправится именно твой контакт.",
+            reply_markup=phone_kb())
+        return
+
+    phone = _normalize_phone(contact.phone_number)
+    prefixes = tuple(storage.get_str("PHONE_ALLOWED_PREFIXES",
+                                     ",".join(config.PHONE_ALLOWED_PREFIXES)).split(","))
+    prefixes = tuple(p.strip() for p in prefixes if p.strip())
+    ok = any(phone.startswith(p) for p in prefixes)
+
+    if ok:
+        matched = next(p for p in prefixes if phone.startswith(p))
+        storage.set_phone_verified(uid, matched, phone[-2:], fmt_when())
+        await message.answer(
+            "✅ Готово! Ты подтверждён. Добро пожаловать 🙂",
+            reply_markup=ReplyKeyboardRemove())
+        await _release_after_verify(uid, message.from_user)
+        audit("верификация", "номер подтверждён", uid, message.from_user.full_name)
+    else:
+        # Нейтральный отказ — НЕ раскрываем, какие коды принимаются.
+        await message.answer(
+            "🚫 Не удалось подтвердить номер. Доступ к чату не выдан.\n"
+            "Если считаешь, что это ошибка — обратись к администратору группы.",
+            reply_markup=ReplyKeyboardRemove())
+        await _fail_verify(uid, message.from_user, phone)
+
+
+async def _fail_verify(uid: int, user, phone: str) -> None:
+    """Номер не из белого списка: применяем PHONE_VERIFY_FAIL_ACTION в группе."""
+    st = verify_wait.get(uid)
+    pend = storage.get_pending_verify(uid)
+    chat_id = (st or {}).get("chat_id") or (pend or {}).get("chat")
+    task = (st or {}).get("task")
+    if task and not task.done():
+        task.cancel()
+    tail = phone[-4:] if phone else "—"
+    act = storage.get_str("PHONE_VERIFY_FAIL_ACTION", config.PHONE_VERIFY_FAIL_ACTION)
+    if chat_id:
+        if act == "ban":
+            await ban_user(chat_id, uid)
+        elif act == "kick":
+            await ban_user(chat_id, uid)
+            try:
+                await bot.unban_chat_member(chat_id, uid, only_if_banned=True)
+            except TelegramBadRequest:
+                pass
+        # act == "mute": юзер и так в муте после капчи — оставляем как есть.
+        notice_id = (st or {}).get("notice_id") or (pend or {}).get("notice")
+        if notice_id:
+            try:
+                await bot.delete_message(chat_id, notice_id)
+            except TelegramBadRequest:
+                pass
+        await report(chat_id,
+                     f"🚫 {id_mention(uid, (st or {}).get('name') or 'пользователь')} "
+                     f"не прошёл верификацию по номеру (код не из белого списка, "
+                     f"…{esc(tail)}) — {act}.")
+    audit("верификация", f"отказ по номеру …{tail} ({act})", uid,
+          getattr(user, "full_name", ""))
+    if flag("NOTIFY_VIOLATIONS"):
+        await notify_panel(event_card("🚫 Верификация: чужая страна", user,
+                                      reason=f"номер …{tail}, действие: {act}"))
+    verify_wait.pop(uid, None)
+    storage.clear_pending_verify(uid)
+
+
 @dp.message(Command("admin", "start"), F.chat.type == "private")
 async def panel_entry(message: Message):
     uid = message.from_user.id
+    # Deep-link верификации по номеру: /start verify_<chat_id> из кнопки в группе.
+    payload = ""
+    parts = (message.text or "").split(maxsplit=1)
+    if len(parts) == 2:
+        payload = parts[1].strip()
+    if payload.startswith("verify"):
+        await begin_phone_verify(message)
+        return
     if uid in panel_auth:
         await open_panel(message.chat.id)
     else:
@@ -3583,6 +3828,16 @@ async def panel_private(message: Message):
     if not message.from_user:
         return
     uid = message.from_user.id
+    # Новичок, ожидающий верификацию (не знает пароль панели): не пугаем «паролем»,
+    # а мягко направляем поделиться номером.
+    if (uid not in panel_auth and flag("PHONE_VERIFY_ENABLED")
+            and not storage.is_phone_verified(uid)
+            and (uid in verify_wait or storage.get_pending_verify(uid))):
+        await message.answer(
+            "Чтобы получить доступ к чату, нажми кнопку "
+            "<b>«Поделиться моим номером»</b> ниже 👇",
+            reply_markup=phone_kb())
+        return
     if uid not in panel_auth:
         if message.text and message.text.strip() == config.PANEL_PASSWORD:
             panel_auth.add(uid)
@@ -4223,8 +4478,9 @@ async def main():
             log.info("Запущено дочерних ботов: %d", n)
         asyncio.create_task(watchdog())  # следить за дочерними
     me = await bot.get_me()
-    global bot_self_id
+    global bot_self_id, bot_username
     bot_self_id = me.id
+    bot_username = me.username
     role = "дочерний" if IS_CHILD else "родительский"
     updates = list(dp.resolve_used_update_types())
     for u in ("chat_join_request", "chat_member"):  # подстраховка: точно подписаны
