@@ -396,6 +396,16 @@ def set_pending_verify(user_id: int, chat_id: int, notice_id=None, ts: str = "")
     save()
 
 
+def set_pending_review(user_id: int, chat_id: int, notice_id, prefix: str,
+                       tail: str, ts: str = "") -> None:
+    """Как pending_verify, но с данными для ручного одобрения (код/2 цифры)."""
+    _data.setdefault("pending_verify", {})[str(user_id)] = {
+        "chat": chat_id, "notice": notice_id, "prefix": prefix, "tail": tail,
+        "review": True, "ts": ts,
+    }
+    save()
+
+
 def get_pending_verify(user_id: int) -> dict | None:
     return _data.setdefault("pending_verify", {}).get(str(user_id))
 

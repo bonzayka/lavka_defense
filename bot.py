@@ -1062,7 +1062,7 @@ def antiflood_hit(chat_id: int, user_id: int) -> bool:
 
 
 # Команды, доступные ВСЕМ участникам (не считаются «чужой админ-командой»).
-PUBLIC_CMDS = {"rules", "report", "ping", "help", "vb", "start"}
+PUBLIC_CMDS = {"rules", "report", "ping", "help", "vb", "start", "privacy"}
 
 
 def _cmd_name(text: str) -> str | None:
@@ -1961,6 +1961,64 @@ async def on_hide(cb: CallbackQuery):
     await cb.answer("Скрыто")
     try:
         await cb.message.delete()
+    except TelegramBadRequest:
+        pass
+
+
+@dp.callback_query(F.data.startswith("vrf:"))
+async def on_verify_review(cb: CallbackQuery):
+    """Ручное решение по «серому» номеру: Впустить / Отклонить."""
+    parts = cb.data.split(":")
+    try:
+        decision, gid, uid = parts[1], int(parts[2]), int(parts[3])
+    except (ValueError, IndexError):
+        await cb.answer()
+        return
+    # Решать может админ чата, авторизованный в панели или владелец.
+    presser = cb.from_user.id
+    allowed = (presser in panel_auth or storage.is_owner(presser)
+               or await is_admin(gid, presser))
+    if not allowed:
+        await cb.answer("Решать может только администратор.", show_alert=True)
+        return
+
+    pend = storage.get_pending_verify(uid) or {}
+    prefix = pend.get("prefix", "")
+    tail = pend.get("tail", "")
+    admin = mod_name(cb.from_user)
+    try:
+        _m = await bot.get_chat_member(gid, uid)
+        user_obj = _m.user
+        tgt = id_mention(uid, user_obj.full_name)
+    except TelegramBadRequest:
+        user_obj = None
+        tgt = id_mention(uid)
+
+    if decision == "ok":
+        storage.set_phone_verified(uid, prefix or "?", tail, fmt_when())
+        if user_obj is not None:
+            await _release_after_verify(uid, user_obj)
+        else:                                   # объект не достали — впустим по id
+            await grant_full_or_quarantine(gid, uid)
+            verify_wait.pop(uid, None)
+            storage.clear_pending_verify(uid)
+        await _safe_dm(uid, "✅ Модератор одобрил твою заявку. Доступ в чат открыт, добро пожаловать!")
+        audit(f"админ {cb.from_user.full_name}", "верификация одобрена", uid)
+        await cb.answer("Впущен")
+        result = f"✅ {tgt} — впущен вручную. Решение: {admin}."
+    elif decision == "no":
+        await _fail_verify(uid, user_obj, tail or "—")
+        await _safe_dm(uid, "🚫 Модератор отклонил твою заявку на доступ к чату.")
+        audit(f"админ {cb.from_user.full_name}", "верификация отклонена", uid)
+        await cb.answer("Отклонён")
+        result = f"🚫 {tgt} — отклонён. Решение: {admin}."
+    else:
+        await cb.answer()
+        return
+    base = cb.message.html_text if cb.message.html_text else ""
+    text = f"{base}\n\n{result}" if base else result
+    try:
+        await cb.message.edit_text(text[:4000])
     except TelegramBadRequest:
         pass
 
@@ -2909,6 +2967,12 @@ async def cmd_rules(message: Message):
                          disable_web_page_preview=True)
 
 
+@dp.message(Command("privacy"))
+async def cmd_privacy(message: Message):
+    await message.answer(storage.get_str("PRIVACY_TEXT", config.PRIVACY_TEXT),
+                         disable_web_page_preview=True)
+
+
 @dp.message(Command("setrules"))
 async def cmd_setrules(message: Message):
     if not await _admin_only(message):
@@ -3505,6 +3569,7 @@ def panel_keyboard() -> InlineKeyboardMarkup:
     rows.append([InlineKeyboardButton(text="💾 Бэкап", callback_data="panel:backup"),
                  InlineKeyboardButton(text="🔄 База картинок", callback_data="panel:reload")])
     rows.append([InlineKeyboardButton(text="🧹 Чистка удалёнок", callback_data="panel:cleandel")])
+    rows.append([InlineKeyboardButton(text="📞 Верификация номеров", callback_data="panel:phone")])
     rows.append([InlineKeyboardButton(text="🔑 Юзербот (полный скан)", callback_data="panel:ub")])
     rows.append([InlineKeyboardButton(text="🎖 Роли и права", callback_data="panel:roles"),
                  InlineKeyboardButton(text="🧹 Сброс заявок", callback_data="panel:reqs")])
@@ -3649,6 +3714,38 @@ def words_keyboard() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
+def phone_panel_text() -> str:
+    allow = ", ".join(_prefix_list("PHONE_ALLOW_PREFIXES", config.PHONE_ALLOW_PREFIXES)) or "—"
+    review = ", ".join(_prefix_list("PHONE_REVIEW_PREFIXES", config.PHONE_REVIEW_PREFIXES)) or "—"
+    onoff = "включена ✅" if flag("PHONE_VERIFY_ENABLED") else "выключена ❌"
+    fail = storage.get_str("PHONE_VERIFY_FAIL_ACTION", config.PHONE_VERIFY_FAIL_ACTION)
+    return ("📞 <b>Верификация по номеру</b> — " + onoff + "\n\n"
+            f"🟢 <b>Пускать сразу</b> (100% вход): {esc(allow)}\n"
+            f"🟡 <b>На ручную проверку</b>: {esc(review)}\n"
+            f"🔴 Остальные — отказ (действие: <b>{esc(fail)}</b>)\n\n"
+            "Нажми префикс, чтобы удалить его из списка. Списки видны только тут — "
+            "пользователям они не показываются.")
+
+
+def phone_panel_keyboard() -> InlineKeyboardMarkup:
+    allow = _prefix_list("PHONE_ALLOW_PREFIXES", config.PHONE_ALLOW_PREFIXES)
+    review = _prefix_list("PHONE_REVIEW_PREFIXES", config.PHONE_REVIEW_PREFIXES)
+    rows = []
+    for i, p in enumerate(allow):
+        rows.append([InlineKeyboardButton(text=f"🟢 {p}  ❌", callback_data=f"panel:phdel:a:{i}")])
+    for i, p in enumerate(review):
+        rows.append([InlineKeyboardButton(text=f"🟡 {p}  ❌", callback_data=f"panel:phdel:r:{i}")])
+    rows.append([InlineKeyboardButton(text="➕ Пускать сразу", callback_data="panel:phadd:a"),
+                 InlineKeyboardButton(text="➕ На проверку", callback_data="panel:phadd:r")])
+    fail = storage.get_str("PHONE_VERIFY_FAIL_ACTION", config.PHONE_VERIFY_FAIL_ACTION)
+    rows.append([InlineKeyboardButton(text=f"🔴 Отказ: {fail} (тап — сменить)",
+                                      callback_data="panel:phfail")])
+    rows.append([InlineKeyboardButton(text="✏️ Политика конфиденциальности",
+                                      callback_data="panel:phpriv")])
+    rows.append([InlineKeyboardButton(text="⬅️ Назад", callback_data="panel:back")])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
 def nums_keyboard() -> InlineKeyboardMarkup:
     rows = [[InlineKeyboardButton(text=f"{label}: {num(key)}", callback_data=f"panel:sn:{key}")]
             for key, label in PANEL_NUMS]
@@ -3689,7 +3786,7 @@ def phone_kb() -> ReplyKeyboardMarkup:
 
 
 async def begin_phone_verify(message: Message) -> None:
-    """Юзер открыл бота по deep-link из группы — просим поделиться номером."""
+    """Юзер открыл бота по deep-link из группы — показываем политику и просим номер."""
     uid = message.from_user.id
     if storage.is_phone_verified(uid):
         # Уже верифицирован глобально — сразу впустим там, где ждёт (если ждёт).
@@ -3698,11 +3795,35 @@ async def begin_phone_verify(message: Message) -> None:
         await _release_after_verify(uid, message.from_user)
         return
     await message.answer(
-        "👋 Привет! Чтобы получить доступ к чату, подтверди, что ты живой человек.\n\n"
+        storage.get_str("PRIVACY_TEXT", config.PRIVACY_TEXT),
+        disable_web_page_preview=True)
+    await message.answer(
+        "👋 Чтобы получить доступ к чату, подтверди, что ты живой человек.\n\n"
         "Нажми кнопку <b>«Поделиться моим номером»</b> ниже. "
-        "Бот проверит номер автоматически — он <b>никому не показывается</b> и "
-        "нигде не публикуется.",
+        "Номер проверится автоматически, <b>никому не показывается</b> и "
+        "третьим лицам не передаётся. Полностью его мы не храним.",
         reply_markup=phone_kb())
+
+
+def _prefix_list(name: str, default: list) -> list[str]:
+    """Список префиксов из storage-оверрайда (CSV) либо из config."""
+    raw = storage.get_str(name, ",".join(default))
+    return [p.strip() for p in raw.split(",") if p.strip()]
+
+
+def phone_tier(phone: str) -> str:
+    """Куда попадает номер: 'allow' (пускать сразу) | 'review' (ручное одобрение)
+    | 'deny' (отказ). Длинные префиксы проверяем раньше (более специфичные)."""
+    allow = _prefix_list("PHONE_ALLOW_PREFIXES", config.PHONE_ALLOW_PREFIXES)
+    review = _prefix_list("PHONE_REVIEW_PREFIXES", config.PHONE_REVIEW_PREFIXES)
+    best, tier = "", "deny"
+    for p in allow:
+        if phone.startswith(p) and len(p) > len(best):
+            best, tier = p, "allow"
+    for p in review:
+        if phone.startswith(p) and len(p) > len(best):
+            best, tier = p, "review"
+    return tier
 
 
 def _normalize_phone(raw: str) -> str:
@@ -3735,7 +3856,7 @@ async def _release_after_verify(uid: int, user) -> None:
 
 @dp.message(F.contact, F.chat.type == "private")
 async def on_contact(message: Message) -> None:
-    """Юзер прислал контакт в ЛС — проверяем номер (свой ли + разрешённый ли код)."""
+    """Юзер прислал контакт в ЛС — три уровня: пустить / на ручное одобрение / отказ."""
     if not flag("PHONE_VERIFY_ENABLED"):
         return
     uid = message.from_user.id
@@ -3749,37 +3870,77 @@ async def on_contact(message: Message) -> None:
         return
 
     phone = _normalize_phone(contact.phone_number)
-    prefixes = tuple(storage.get_str("PHONE_ALLOWED_PREFIXES",
-                                     ",".join(config.PHONE_ALLOWED_PREFIXES)).split(","))
-    prefixes = tuple(p.strip() for p in prefixes if p.strip())
-    ok = any(phone.startswith(p) for p in prefixes)
+    tier = phone_tier(phone)
 
-    if ok:
-        matched = next(p for p in prefixes if phone.startswith(p))
+    if tier == "allow":
+        matched = phone[:2]
         storage.set_phone_verified(uid, matched, phone[-2:], fmt_when())
-        await message.answer(
-            "✅ Готово! Ты подтверждён. Добро пожаловать 🙂",
-            reply_markup=ReplyKeyboardRemove())
+        await message.answer("✅ Готово! Ты подтверждён. Добро пожаловать 🙂",
+                             reply_markup=ReplyKeyboardRemove())
         await _release_after_verify(uid, message.from_user)
         audit("верификация", "номер подтверждён", uid, message.from_user.full_name)
+    elif tier == "review":
+        await message.answer(
+            "⏳ Спасибо! Твоя заявка отправлена на проверку модератору. "
+            "Как только её одобрят — ты сможешь писать в чат. Обычно это быстро.",
+            reply_markup=ReplyKeyboardRemove())
+        await _send_for_review(uid, message.from_user, phone)
     else:
         # Нейтральный отказ — НЕ раскрываем, какие коды принимаются.
         await message.answer(
             "🚫 Не удалось подтвердить номер. Доступ к чату не выдан.\n"
             "Если считаешь, что это ошибка — обратись к администратору группы.",
             reply_markup=ReplyKeyboardRemove())
-        await _fail_verify(uid, message.from_user, phone)
+        await _fail_verify(uid, message.from_user, phone[-4:] if phone else "—")
 
 
-async def _fail_verify(uid: int, user, phone: str) -> None:
-    """Номер не из белого списка: применяем PHONE_VERIFY_FAIL_ACTION в группе."""
+def verify_review_kb(chat_id: int, uid: int) -> InlineKeyboardMarkup:
+    p = f"{chat_id}:{uid}"
+    return InlineKeyboardMarkup(inline_keyboard=[[
+        InlineKeyboardButton(text="✅ Впустить", callback_data=f"vrf:ok:{p}"),
+        InlineKeyboardButton(text="🚫 Отклонить", callback_data=f"vrf:no:{p}")]])
+
+
+async def _send_for_review(uid: int, user, phone: str) -> None:
+    """«Серый» номер: держим юзера в муте, шлём админам карточку с кнопками."""
     st = verify_wait.get(uid)
     pend = storage.get_pending_verify(uid)
     chat_id = (st or {}).get("chat_id") or (pend or {}).get("chat")
     task = (st or {}).get("task")
     if task and not task.done():
         task.cancel()
-    tail = phone[-4:] if phone else "—"
+    prefix, tail = phone[:3], (phone[-2:] if phone else "")
+    notice_id = (st or {}).get("notice_id") or (pend or {}).get("notice")
+    storage.set_pending_review(uid, chat_id, notice_id, prefix, tail, fmt_when())
+    verify_wait.pop(uid, None)
+    name = getattr(user, "full_name", "") or "пользователь"
+    card = event_card("🕵 Заявка на верификацию (ручная проверка)", user,
+                      reason=f"номер {prefix}…{tail}; чат {chat_id}")
+    kb = verify_review_kb(chat_id, uid) if chat_id else None
+    sent_any = False
+    for admin_id in list(panel_auth):
+        try:
+            await bot.send_message(admin_id, card, reply_markup=kb)
+            sent_any = True
+        except (TelegramBadRequest, TelegramForbiddenError):
+            pass
+    # Продублируем в лог-чат/группу, чтобы не потерялось, если панель никто не открыл.
+    if chat_id and (config.LOG_CHAT_ID or not sent_any):
+        await report(chat_id,
+                     f"🕵 {id_mention(uid, name)} ждёт ручной верификации "
+                     f"(номер {esc(prefix)}…{esc(tail)}).", kb)
+    audit("верификация", f"на ручную проверку {prefix}…{tail}", uid, name)
+    log.info("Юзер %s (номер %s…%s) отправлен на ручное одобрение.", uid, prefix, tail)
+
+
+async def _fail_verify(uid: int, user, tail: str) -> None:
+    """Номер не из списков: применяем PHONE_VERIFY_FAIL_ACTION в группе."""
+    st = verify_wait.get(uid)
+    pend = storage.get_pending_verify(uid)
+    chat_id = (st or {}).get("chat_id") or (pend or {}).get("chat")
+    task = (st or {}).get("task")
+    if task and not task.done():
+        task.cancel()
     act = storage.get_str("PHONE_VERIFY_FAIL_ACTION", config.PHONE_VERIFY_FAIL_ACTION)
     if chat_id:
         if act == "ban":
@@ -3803,7 +3964,7 @@ async def _fail_verify(uid: int, user, phone: str) -> None:
                      f"…{esc(tail)}) — {act}.")
     audit("верификация", f"отказ по номеру …{tail} ({act})", uid,
           getattr(user, "full_name", ""))
-    if flag("NOTIFY_VIOLATIONS"):
+    if flag("NOTIFY_VIOLATIONS") and user is not None:
         await notify_panel(event_card("🚫 Верификация: чужая страна", user,
                                       reason=f"номер …{tail}, действие: {act}"))
     verify_wait.pop(uid, None)
@@ -3833,16 +3994,20 @@ async def panel_private(message: Message):
     if not message.from_user:
         return
     uid = message.from_user.id
-    # Новичок, ожидающий верификацию (не знает пароль панели): не пугаем «паролем»,
-    # а мягко направляем поделиться номером.
+    # Новичок, ожидающий верификацию (не знает пароль панели): не пугаем «паролем».
     if (uid not in panel_auth and flag("PHONE_VERIFY_ENABLED")
-            and not storage.is_phone_verified(uid)
-            and (uid in verify_wait or storage.get_pending_verify(uid))):
-        await message.answer(
-            "Чтобы получить доступ к чату, нажми кнопку "
-            "<b>«Поделиться моим номером»</b> ниже 👇",
-            reply_markup=phone_kb())
-        return
+            and not storage.is_phone_verified(uid)):
+        pend = storage.get_pending_verify(uid)
+        if pend and pend.get("review"):
+            await message.answer("⏳ Твоя заявка на проверке у модератора. "
+                                 "Как только её рассмотрят — придёт ответ.")
+            return
+        if uid in verify_wait or pend:
+            await message.answer(
+                "Чтобы получить доступ к чату, нажми кнопку "
+                "<b>«Поделиться моим номером»</b> ниже 👇",
+                reply_markup=phone_kb())
+            return
     if uid not in panel_auth:
         if message.text and message.text.strip() == config.PANEL_PASSWORD:
             panel_auth.add(uid)
@@ -3894,6 +4059,34 @@ async def panel_private(message: Message):
         elif st == "set_rules":
             storage.set_rules(val)
             await message.answer("✅ Правила сохранены.")
+        elif st == "set_privacy":
+            if val == "-":
+                storage.set_str("PRIVACY_TEXT", config.PRIVACY_TEXT)
+                await message.answer("✅ Политика сброшена к стандартной. Проверь: /privacy")
+            else:
+                storage.set_str("PRIVACY_TEXT", val)
+                await message.answer("✅ Политика конфиденциальности сохранена. Проверь: /privacy",
+                                     disable_web_page_preview=True)
+        elif st in ("phadd_a", "phadd_r"):
+            name = "PHONE_ALLOW_PREFIXES" if st == "phadd_a" else "PHONE_REVIEW_PREFIXES"
+            default = (config.PHONE_ALLOW_PREFIXES if st == "phadd_a"
+                       else config.PHONE_REVIEW_PREFIXES)
+            cur = _prefix_list(name, default)
+            added = []
+            for token in re.split(r"[,\s]+", val):
+                token = token.strip()
+                if not token:
+                    continue
+                if not token.startswith("+"):
+                    token = "+" + token
+                if re.fullmatch(r"\+\d{1,6}", token) and token not in cur:
+                    cur.append(token)
+                    added.append(token)
+            if added:
+                storage.set_str(name, ",".join(cur))
+                await message.answer(f"✅ Добавлено: {esc(', '.join(added))}")
+            else:
+                await message.answer("Ничего не добавил (нужен код вида +81; либо уже есть).")
         elif st.startswith("rename_role:"):
             role = st.split(":", 1)[1]
             if role not in config.ROLES:
@@ -4152,6 +4345,52 @@ async def panel_cb(cb: CallbackQuery):
     elif action == "reload":
         load_reference_hashes()
         await cb.answer(f"База обновлена: {len(ref_hashes)} картинок.", show_alert=True)
+    elif action == "phone":
+        await cb.answer()
+        try:
+            await cb.message.edit_text(phone_panel_text(), reply_markup=phone_panel_keyboard())
+        except TelegramBadRequest:
+            pass
+    elif action == "phdel":
+        lst, i = parts[2], int(parts[3])
+        name = "PHONE_ALLOW_PREFIXES" if lst == "a" else "PHONE_REVIEW_PREFIXES"
+        default = config.PHONE_ALLOW_PREFIXES if lst == "a" else config.PHONE_REVIEW_PREFIXES
+        cur = _prefix_list(name, default)
+        if 0 <= i < len(cur):
+            cur.pop(i)
+            storage.set_str(name, ",".join(cur))
+        await cb.answer("Удалено")
+        try:
+            await cb.message.edit_text(phone_panel_text(), reply_markup=phone_panel_keyboard())
+        except TelegramBadRequest:
+            pass
+    elif action == "phadd":
+        panel_state[uid] = "phadd_a" if parts[2] == "a" else "phadd_r"
+        await cb.answer()
+        where = "🟢 пускать сразу" if parts[2] == "a" else "🟡 на ручную проверку"
+        await bot.send_message(
+            cb.message.chat.id,
+            f"✍️ Пришли код страны для списка «{where}» в формате <code>+81</code> "
+            "(можно несколько через запятую):")
+    elif action == "phfail":
+        cur = storage.get_str("PHONE_VERIFY_FAIL_ACTION", config.PHONE_VERIFY_FAIL_ACTION)
+        cyc = ["mute", "kick", "ban"]
+        nxt = cyc[(cyc.index(cur) + 1) % len(cyc)] if cur in cyc else cyc[0]
+        storage.set_str("PHONE_VERIFY_FAIL_ACTION", nxt)
+        await cb.answer(f"Отказ: {nxt}")
+        try:
+            await cb.message.edit_text(phone_panel_text(), reply_markup=phone_panel_keyboard())
+        except TelegramBadRequest:
+            pass
+    elif action == "phpriv":
+        panel_state[uid] = "set_privacy"
+        await cb.answer()
+        cur = storage.get_str("PRIVACY_TEXT", config.PRIVACY_TEXT)
+        await bot.send_message(
+            cb.message.chat.id,
+            "✏️ Пришли новый текст политики конфиденциальности одним сообщением "
+            "(HTML-теги можно). Сброс к стандартному — пришли <code>-</code>.\n\n"
+            f"Текущий:\n{cur}", disable_web_page_preview=True)
     elif action == "cleandel":
         await cb.answer("Сканирую удалёнок…")
         chats = list(known_chats)
