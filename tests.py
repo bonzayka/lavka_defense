@@ -643,6 +643,42 @@ bot.newcomer.pop((-200, 44), None)
 check("userbot: available булев", isinstance(bot.userbot.available(), bool))
 check("userbot: status строка", isinstance(bot.userbot.status(), str))
 
+# ---- анти-деанон: чистый PII-детектор (find_pii / is_deanon) ----
+import deanon  # noqa: E402
+# срабатывания
+check("deanon: телефон РФ", "phone" in deanon.find_pii("звони +7 999 123-45-67"))
+check("deanon: 8-номер", "phone" in deanon.find_pii("тел 8(999)123-45-67"))
+check("deanon: email", "email" in deanon.find_pii("почта ivan.petrov@mail.ru"))
+check("deanon: @ник", "handle" in deanon.find_pii("его тг @petrov_ivan"))
+check("deanon: t.me ссылка", "handle" in deanon.find_pii("вот https://t.me/petrov"))
+# валидный номер карты (проходит Луна): 4111 1111 1111 1111
+check("deanon: карта (Луна)", "card" in deanon.find_pii("карта 4111 1111 1111 1111"))
+check("deanon: паспорт РФ", "passport_ru" in deanon.find_pii("паспорт 12 34 567890"))
+check("deanon: снилс", "snils" in deanon.find_pii("СНИЛС 112-233-445 95"))
+check("deanon: адрес", "address" in deanon.find_pii("живёт г. Москва ул. Ленина д. 5 кв. 10"))
+check("deanon: подпись", "label" in deanon.find_pii("его домашний адрес такой:"))
+# НЕ должно срабатывать на обычном тексте
+for clean in ["привет как дела", "цена 1000 рублей за штуку", "встречаемся в 12:30",
+              "заказ №123456 готов", "2+2=4 отвечай быстрее"]:
+    check(f"deanon: чисто '{clean[:20]}'", deanon.find_pii(clean) == [] or
+          not deanon.is_deanon(clean, 2)[0])
+# случайные 16 цифр без Луна — НЕ карта
+check("deanon: не-карта (Луна режектит)", "card" not in deanon.find_pii("код 1234 5678 9012 3456 7"))
+# is_deanon: один «тяжёлый» тип срабатывает; один «лёгкий» — нет
+check("deanon: паспорт один -> деанон", deanon.is_deanon("паспорт 12 34 567890", 2)[0])
+check("deanon: один телефон -> НЕ деанон (нужно 2)", not deanon.is_deanon("тел +79991234567", 2)[0])
+check("deanon: телефон+адрес -> деанон",
+      deanon.is_deanon("+7 999 123-45-67, г. Москва ул. Ленина д.5 кв.10", 2)[0])
+check("deanon: телефон+email -> деанон",
+      deanon.is_deanon("пиши +7 999 123 45 67 или a@b.ru", 2)[0])
+check("deanon: 'скинь телефон' -> НЕ деанон",
+      not deanon.is_deanon("скинь телефон если что", 2)[0])
+# OCR-обёртка опциональна: не падает без движка
+check("deanon: available булев", isinstance(deanon.available(), bool))
+check("deanon: status строка", isinstance(deanon.status(), str))
+check("deanon: extract без движка -> ''", deanon.available() or deanon.extract_text(b"x") == "")
+check("deanon: describe читаемо", "телефон" in deanon.describe(["phone"]))
+
 
 print(f"\nИтог: {PASS} ок, {FAIL} провалов.")
 sys.exit(1 if FAIL else 0)

@@ -54,6 +54,7 @@ from aiogram.exceptions import TelegramBadRequest, TelegramRetryAfter, TelegramF
 
 import config
 import dcguard
+import deanon
 import deleted
 import gore
 import manager
@@ -1893,6 +1894,33 @@ async def on_media(message: Message):
             await handle_violation(message, f"шок-контент/гор ({score:.0%})")
             return
 
+    # 4) Анти-деанон: OCR картинки на чужие персональные данные (скрин с
+    #    телефоном/паспортом/адресом жертвы). По умолчанию — только у новичков.
+    if flag("DEANON_ENABLED") and deanon.available():
+        if not flag("DEANON_NEWCOMERS_ONLY") or _is_newcomer(message.chat.id, message.from_user.id):
+            text = await asyncio.to_thread(
+                deanon.extract_text, data, storage.get_str("DEANON_OCR_LANG", config.DEANON_OCR_LANG))
+            if text:
+                hit, types = deanon.is_deanon(text, num("DEANON_MIN_HITS"))
+                if hit:
+                    await apply_punishment(
+                        message, f"чужие персональные данные на картинке ({deanon.describe(types)})",
+                        action_for("DEANON_ACTION"))
+                    if flag("NOTIFY_VIOLATIONS"):
+                        await notify_panel(event_card("🕵 Анти-деанон: данные на картинке",
+                                                      message.from_user,
+                                                      reason=deanon.describe(types)))
+                    return
+
+
+def _is_newcomer(chat_id: int, user_id: int) -> bool:
+    """Юзер считается новичком, пока действует медиа-карантин (или базовое окно 24ч)."""
+    joined = newcomer.get((chat_id, user_id))
+    if not joined:
+        return False
+    hrs = num("NEWCOMER_MEDIA_HOURS") or 24
+    return (now() - joined).total_seconds() < hrs * 3600
+
 
 @dp.callback_query(F.data.startswith("mod:"))
 async def on_moderation(cb: CallbackQuery):
@@ -2483,6 +2511,40 @@ async def cmd_check(message: Message):
     )
 
 
+@dp.message(Command("deanon"))
+async def cmd_deanon(message: Message):
+    """Диагностика анти-деанона: ответом на картинку показать OCR-текст и найденные данные."""
+    if not await _admin_only(message):
+        return
+    if not deanon.available():
+        await message.answer(f"Анти-деанон OCR: {esc(deanon.status())}.\n"
+                             "Установи движок: <code>pip install rapidocr-onnxruntime</code>, "
+                             "затем перезапусти бота.")
+        return
+    reply = message.reply_to_message
+    file_obj = pick_image_file(reply) if reply else None
+    if file_obj is None:
+        await message.answer("Ответь /deanon на сообщение с картинкой.")
+        return
+    try:
+        data = (await bot.download(file_obj)).read()
+    except Exception as e:
+        await message.answer(f"Не смог скачать: {e}")
+        return
+    text = await asyncio.to_thread(
+        deanon.extract_text, data, storage.get_str("DEANON_OCR_LANG", config.DEANON_OCR_LANG))
+    hit, types = deanon.is_deanon(text or "", num("DEANON_MIN_HITS"))
+    mark = "🔴 деанон" if hit else "🟢 чисто"
+    snippet = (text or "").strip()
+    snippet = snippet[:500] + "…" if len(snippet) > 500 else snippet
+    await message.answer(
+        "🕵 <b>Проверка на деанон</b>\n"
+        f"OCR-движок: {esc(deanon.status())}\n"
+        f"Найдено: {esc(deanon.describe(types)) or '—'}\n"
+        f"Вердикт: {mark} (нужно типов: {num('DEANON_MIN_HITS')}, действие: {action_for('DEANON_ACTION')})\n\n"
+        f"Распознанный текст:\n<code>{esc(snippet) or '(пусто)'}</code>")
+
+
 @dp.message(Command("diag"))
 async def cmd_diag(message: Message):
     """Полная самодиагностика: ИИ-модели, апдейты, права бота в этом чате."""
@@ -2526,6 +2588,7 @@ async def cmd_diag(message: Message):
         f"• Гор (CLIP): {esc(gore.status())} | GORE_ENABLED={config.GORE_ENABLED}\n"
         f"• Детектор 18+ (ViT {config.NSFW_MODEL}): {esc(nsfwvit.status())} "
         f"(порог {config.NSFW_THRESHOLD:.0%}) | NSFW_ENABLED={config.NSFW_ENABLED}\n"
+        f"• Анти-деанон OCR: {esc(deanon.status())} | DEANON_ENABLED={config.DEANON_ENABLED}\n"
         f"• Эталонов в базе: {len(ref_hashes)}\n\n"
         f"<b>Заявки/апдейты:</b>\n"
         f"• Автоприём (AUTO_ACCEPT): {'вкл' if flag('AUTO_ACCEPT') else 'выкл'}\n"
@@ -3460,6 +3523,7 @@ PANEL_FLAGS = [
     ("BLOCK_APK", ".apk"),
     ("BLOCK_PREMIUM_EMOJI", "Прем.эмодзи"),
     ("GORE_ON", "Шок-контент/гор"),
+    ("DEANON_ENABLED", "Анти-деанон (OCR)"),
     ("ANTIFLOOD_ENABLED", "Антифлуд"),
     ("ANTIREPEAT_ENABLED", "Анти-повтор"),
     ("TRIGGERS_ENABLED", "Автоответы"),
@@ -3499,6 +3563,7 @@ PANEL_NUMS = [
     ("RESTRICT_NEWCOMERS_HOURS", "Новичкам без ссылок (ч)"),
     ("NEWCOMER_MEDIA_HOURS", "Новичкам без медиа (ч)"),
     ("PHONE_VERIFY_MINUTES", "Верификация: лимит (мин)"),
+    ("DEANON_MIN_HITS", "Деанон: типов данных"),
     ("GORE_THRESHOLD_PCT", "Порог гора (%)"),
     ("ANTIREPEAT_COUNT", "Анти-повтор: одинаковых"),
     ("ACCEPT_BURST_LIMIT", "Заявок до стопа автоприёма"),
@@ -3515,6 +3580,7 @@ PANEL_ACTS = [
     ("FORWARD_ACTION", "Пересылки"),
     ("TEXT_ACTION", "Мат/стоп-слова"),
     ("ANTIFLOOD_ACTION", "Флуд"),
+    ("DEANON_ACTION", "Деанон на картинке"),
     ("WARN_ACTION", "Лимит варнов →"),
     ("RISK_ACTION", "Риск на входе"),
     ("PROBATION_ACTION", "Наблюдение"),
@@ -3538,8 +3604,8 @@ PERM_LABELS = [
 PANEL_CATEGORIES = [
     ("spam", "🛡 Антиспам", ["ANTIMAT_ENABLED", "BLOCK_LINKS", "ALLOW_MENTIONS",
                              "BLOCK_FORWARDS", "BLOCK_CHANNEL_MESSAGES", "BLOCK_APK",
-                             "BLOCK_PREMIUM_EMOJI", "GORE_ON", "ANTIFLOOD_ENABLED",
-                             "ANTIREPEAT_ENABLED", "TRIGGERS_ENABLED"]),
+                             "BLOCK_PREMIUM_EMOJI", "GORE_ON", "DEANON_ENABLED",
+                             "ANTIFLOOD_ENABLED", "ANTIREPEAT_ENABLED", "TRIGGERS_ENABLED"]),
     ("entry", "🚪 Вход и капча", ["CHECK_JOIN_NAMES", "CAPTCHA_IMAGE", "AUTO_ACCEPT",
                                   "DC_CHECK_JOIN", "LOCKDOWN", "WELCOME_ENABLED",
                                   "ANTIRAID_ENABLED", "PHONE_VERIFY_ENABLED"]),
@@ -4711,6 +4777,8 @@ async def main():
     load_nsfw_detector()
     if config.GORE_ENABLED:
         gore.load(config.GORE_MODEL)
+    if config.DEANON_ENABLED:
+        deanon.load(config.DEANON_OCR_LANG)
     dp.message.outer_middleware(CommandCleanupMiddleware())  # самый внешний: удаляет команду после обработки
     dp.message.outer_middleware(TrackMiddleware())
     dp.message.outer_middleware(ModerationMiddleware())
