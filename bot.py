@@ -141,11 +141,15 @@ FULL = ChatPermissions(
 )
 # Медиа-карантин новичка: можно ТОЛЬКО текст (никаких гиф/стикеров/фото/видео/
 # аудио/голосовых/кружков/файлов/опросов). Ставится с until_date на NEWCOMER_MEDIA_HOURS.
+# ВНИМАНИЕ: этот набор применяется ТОЛЬКО с use_independent_chat_permissions=True,
+# иначе Telegram считает права зависимыми и can_add_web_page_previews=True
+# автоматически включил бы обратно фото/видео/аудио/файлы. Поэтому превью тут тоже
+# выключено — двойная страховка (см. grant_full_or_quarantine).
 NEWCOMER_QUARANTINE = ChatPermissions(
     can_send_messages=True, can_send_audios=False, can_send_documents=False,
     can_send_photos=False, can_send_videos=False, can_send_video_notes=False,
     can_send_voice_notes=False, can_send_polls=False, can_send_other_messages=False,
-    can_add_web_page_previews=True, can_invite_users=False,
+    can_add_web_page_previews=False, can_invite_users=False,
 )
 
 SHAPES = {"треугольника": 3, "квадрата": 4, "пятиугольника": 5, "шестиугольника": 6}
@@ -1366,8 +1370,9 @@ async def grant_full_or_quarantine(chat_id: int, user_id: int) -> None:
     if hrs > 0:
         until = now() + timedelta(hours=hrs)
         try:
-            await bot.restrict_chat_member(chat_id, user_id,
-                                           permissions=NEWCOMER_QUARANTINE, until_date=until)
+            await bot.restrict_chat_member(
+                chat_id, user_id, permissions=NEWCOMER_QUARANTINE, until_date=until,
+                use_independent_chat_permissions=True)
             return
         except TelegramBadRequest as e:
             log.warning("Не смог включить медиа-карантин %s: %s", user_id, e)
