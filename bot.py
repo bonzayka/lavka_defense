@@ -1268,22 +1268,30 @@ def make_captcha_image(code: str) -> bytes:
     return buf.getvalue()
 
 
+def captcha_steps_count() -> int:
+    """Сколько заданий в капче — зажато в диапазон 1..3."""
+    return max(1, min(3, num("CAPTCHA_STEPS")))
+
+
 def build_questions() -> list[dict]:
+    total = captcha_steps_count()
     q, ans, wrongs = random.choice(COMMONSENSE)
     name, n = random.choice(list(SHAPES.items()))
     if flag("CAPTCHA_IMAGE"):
         code = "".join(random.choice("0123456789") for _ in range(num("CAPTCHA_DIGITS")))
-        step1 = {"q": "Шаг 1/3. Введите цифры с картинки одним сообщением:",
+        step1 = {"q": f"Шаг 1/{total}. Введите цифры с картинки одним сообщением:",
                  "answer": code, "kind": "image"}
     else:
         a, b = random.randint(2, 9), random.randint(2, 9)
-        step1 = {"q": f"Шаг 1/3. Реши пример:\n<b>{a} + {b} = ?</b>",
+        step1 = {"q": f"Шаг 1/{total}. Реши пример:\n<b>{a} + {b} = ?</b>",
                  "answer": str(a + b), "kind": "num"}
-    return [
+    steps = [
         step1,
-        {"q": f"Шаг 2/3. {esc(q)}", "answer": ans, "wrongs": wrongs},
-        {"q": f"Шаг 3/3. Сколько углов у <b>{name}</b>? (ответ цифрой)", "answer": str(n), "kind": "num"},
+        {"q": f"Шаг 2/{total}. {esc(q)}", "answer": ans, "wrongs": wrongs},
+        {"q": f"Шаг 3/{total}. Сколько углов у <b>{name}</b>? (ответ цифрой)",
+         "answer": str(n), "kind": "num"},
     ]
+    return steps[:total]
 
 
 def options_for(step: dict) -> list[str]:
@@ -1315,8 +1323,10 @@ def captcha_photo_kb() -> InlineKeyboardMarkup:
 
 
 def captcha_caption(user, question: str) -> str:
+    total = captcha_steps_count()
+    task_word = {1: "задания", 2: "заданий", 3: "заданий"}.get(total, "заданий")
     return (f"👋 {mention(user)}, добро пожаловать!\n"
-            f"Пройди проверку из <b>3 заданий</b> за <b>{num('CAPTCHA_TIMEOUT')} сек</b>. "
+            f"Пройди проверку из <b>{total} {task_word}</b> за <b>{num('CAPTCHA_TIMEOUT')} сек</b>. "
             f"Ошибка или тишина — бан.\n\n{question}")
 
 
@@ -3556,6 +3566,7 @@ PANEL_FLAGS = [
 # Числовые настройки, редактируемые из панели.
 PANEL_NUMS = [
     ("CAPTCHA_TIMEOUT", "Таймаут капчи (сек)"),
+    ("CAPTCHA_STEPS", "Капча: заданий (1-3)"),
     ("CAPTCHA_DIGITS", "Фото-капча: цифр"),
     ("ANTIFLOOD_COUNT", "Антифлуд: сообщений"),
     ("ANTIFLOOD_SECONDS", "Антифлуд: секунд"),
@@ -4165,11 +4176,13 @@ async def panel_private(message: Message):
                 await message.answer(f"✅ Ранг теперь отображается как {role_label(role)}")
         elif st.startswith("setnum:"):
             key = st.split(":", 1)[1]
-            if val.lstrip("-").isdigit():
+            if not val.lstrip("-").isdigit():
+                await message.answer("Нужно число.")
+            elif key == "CAPTCHA_STEPS" and not (1 <= int(val) <= 3):
+                await message.answer("Капча: допустимо 1, 2 или 3 задания.")
+            else:
                 storage.set_num(key, int(val))
                 await message.answer(f"✅ {key} = {val}.")
-            else:
-                await message.answer("Нужно число.")
         elif st == "add_owner":
             if val.lstrip("-").isdigit():
                 added = storage.add_owner(int(val))

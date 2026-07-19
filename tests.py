@@ -78,6 +78,16 @@ for _ in range(100):
             ok = False
 check("captcha: ответ всегда среди 4 вариантов", ok)
 
+# ---- количество заданий капчи (CAPTCHA_STEPS 1..3) ----
+for want in (1, 2, 3):
+    bot.storage.set_num("CAPTCHA_STEPS", want)
+    check(f"captcha steps: {want} шаг(ов)", len(bot.build_questions()) == want)
+bot.storage.set_num("CAPTCHA_STEPS", 5)   # выше максимума -> зажать до 3
+check("captcha steps: >3 -> 3", len(bot.build_questions()) == 3)
+bot.storage.set_num("CAPTCHA_STEPS", 0)   # ниже минимума -> зажать до 1
+check("captcha steps: <1 -> 1", len(bot.build_questions()) == 1)
+bot.storage.set_num("CAPTCHA_STEPS", 3)   # вернуть дефолт
+
 # ---- фото-капча ----
 png = bot.make_captcha_image("12345")
 check("photocaptcha: PNG сгенерирован", png[:4] == b"\x89PNG" and len(png) > 200)
