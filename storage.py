@@ -17,6 +17,7 @@ _PATH = os.environ.get("DATA_FILE") or os.path.join(
 
 _DEFAULT = {
     "stopwords": [],          # список запрещённых слов/подстрок (нижний регистр)
+    "hidden_words": [],       # подмножество stopwords, которые НЕ показываем публично (анонимный бан)
     "warns": {},              # "chat:user" -> int
     "link_whitelist": [],     # ["chat:user", ...] — кому можно ссылки
     "trusted": [],            # ["chat:user", ...] — «свои», мимо всех проверок
@@ -75,22 +76,54 @@ def stopwords() -> list[str]:
     return _data["stopwords"]
 
 
-def add_stopword(word: str) -> bool:
-    w = word.strip().lower()
-    if not w or w in _data["stopwords"]:
-        return False
-    _data["stopwords"].append(w)
-    save()
-    return True
-
-
 def del_stopword(word: str) -> bool:
     w = word.strip().lower()
     if w in _data["stopwords"]:
         _data["stopwords"].remove(w)
+        _data.setdefault("hidden_words", [])
+        if w in _data["hidden_words"]:
+            _data["hidden_words"].remove(w)
         save()
         return True
     return False
+
+
+# --- скрытые (анонимные) стоп-слова: срабатывают, но не показываются в чате ---
+
+def hidden_words() -> list[str]:
+    return _data.setdefault("hidden_words", [])
+
+
+def is_hidden_word(word: str) -> bool:
+    return (word or "").strip().lower() in _data.setdefault("hidden_words", [])
+
+
+def set_hidden_word(word: str, hidden: bool) -> bool:
+    """Пометить стоп-слово скрытым/видимым. True — если состояние изменилось."""
+    w = (word or "").strip().lower()
+    if not w or w not in _data["stopwords"]:
+        return False
+    h = _data.setdefault("hidden_words", [])
+    if hidden and w not in h:
+        h.append(w)
+        save()
+        return True
+    if not hidden and w in h:
+        h.remove(w)
+        save()
+        return True
+    return False
+
+
+def add_stopword(word: str, hidden: bool = False) -> bool:
+    w = word.strip().lower()
+    if not w or w in _data["stopwords"]:
+        return False
+    _data["stopwords"].append(w)
+    if hidden:
+        _data.setdefault("hidden_words", []).append(w)
+    save()
+    return True
 
 
 # --- варны ---
@@ -426,3 +459,9 @@ def add_audit(entry: dict) -> None:
 
 def get_audit(n: int = 15) -> list[dict]:
     return list(reversed(_data.get("audit", [])[-n:]))
+
+
+def get_audit_for(target_id: int, n: int = 20) -> list[dict]:
+    """История действий по конкретному пользователю (свежие сверху)."""
+    hits = [e for e in _data.get("audit", []) if str(e.get("target_id")) == str(target_id)]
+    return list(reversed(hits[-n:]))

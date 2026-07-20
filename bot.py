@@ -223,6 +223,46 @@ async def display_name(chat_id: int, uid: int) -> str:
 _MD_LINK = re.compile(r"\[([^\]]+)\]\(([^)\s]+)\)")
 
 
+def message_markdown(message: "Message") -> str:
+    """Собрать markdown-текст сообщения, восстановив entity-ссылки.
+
+    Telegram-клиент часть ссылок [текст](url) превращает в rich-entity (и
+    markdown из .text пропадает), часть оставляет как есть — из-за этого в
+    /rules «одна ссылка вставилась, другие нет». Приводим всё к единому виду
+    [текст](url), чтобы render_rules отрисовал все ссылки одинаково.
+    """
+    text = message.text or message.caption or ""
+    ents = message.entities or message.caption_entities or []
+    if not text or not ents:
+        return text
+    # Entity-офсеты Telegram считает в кодовых единицах UTF-16 — режем по ним.
+    u16 = text.encode("utf-16-le")
+
+    def sub(off: int, length: int) -> str:
+        return u16[off * 2:(off + length) * 2].decode("utf-16-le")
+
+    out, last = [], 0
+    for e in sorted(ents, key=lambda x: x.offset):
+        if e.offset < last:            # перекрытие (вложенное форматирование) — пропускаем
+            continue
+        out.append(sub(last, e.offset - last))
+        seg = sub(e.offset, e.length)
+        if e.type == "text_link" and e.url:
+            out.append(f"[{seg}]({e.url})")
+        else:                          # обычный url/текст — оставляем как есть (ТГ сам линкует)
+            out.append(seg)
+        last = e.offset + e.length
+    out.append(sub(last, len(u16) // 2 - last))
+    return "".join(out)
+
+
+def _md_after_command(message: "Message") -> str:
+    """Markdown-тело команды без ведущего «/cmd» (ссылки восстановлены)."""
+    md = message_markdown(message)
+    parts = md.split(maxsplit=1)
+    return parts[1].strip() if len(parts) > 1 else ""
+
+
 def render_rules(text: str) -> str:
     """Текст со ссылками вида [текст](https://...) -> кликабельный HTML. Безопасно."""
     out, last = [], 0
@@ -238,6 +278,25 @@ def render_rules(text: str) -> str:
         last = m.end()
     out.append(esc(text[last:]))
     return "".join(out)
+
+
+def name_check(name: str):
+    """Проверка имени вступающего с учётом скрытых стоп-слов.
+
+    Возвращает (public_reason, audit_reason) или (None, None), если чисто.
+    Для скрытого слова публично пишем нейтральное «недопустимое имя», а в
+    журнал — настоящую причину.
+    """
+    if not name:
+        return None, None
+    if textguard.has_profanity(name):
+        return "мат в имени", "мат в имени"
+    sw = textguard.find_stopword(name, storage.stopwords())
+    if not sw:
+        return None, None
+    if storage.is_hidden_word(sw):
+        return "недопустимое имя", f"скрытое стоп-слово «{sw}» в имени"
+    return f"стоп-слово «{sw}» в имени", f"стоп-слово «{sw}» в имени"
 
 
 def flag(name: str) -> bool:
@@ -965,12 +1024,19 @@ async def mute_user(chat_id: int, user_id: int, seconds: int | None = None):
         await _maybe_rights_alert(chat_id, e)
 
 
-async def apply_punishment(message: Message, reason: str, action: str):
-    """Удалить сообщение и применить действие: delete | warn | mute | ban."""
+async def apply_punishment(message: Message, reason: str, action: str,
+                           audit_reason: str | None = None):
+    """Удалить сообщение и применить действие: delete | warn | mute | ban.
+
+    reason — что показываем публично в чате; audit_reason (если задан) — что
+    пишем в журнал/панель (для скрытых стоп-слов: в чате «стоп-слово», а в
+    журнале настоящее слово).
+    """
     chat_id = message.chat.id
     user = message.from_user
     uid = user.id
     msg_text = message.text or message.caption or ""
+    audit_reason = audit_reason or reason
     try:
         await message.delete()
     except TelegramBadRequest:
@@ -998,9 +1064,9 @@ async def apply_punishment(message: Message, reason: str, action: str):
         await report(chat_id, f"🔨 {mention(user)} забанен: {esc(reason)}.")
     # action == "delete": тихо удаляем, без уведомления в чат
 
-    audit("авто-фильтр", action, uid, user.full_name, reason)
+    audit("авто-фильтр", action, uid, user.full_name, audit_reason)
     if flag("NOTIFY_VIOLATIONS"):
-        await notify_panel(event_card("🚨 Нарушение", user, text=msg_text, reason=reason))
+        await notify_panel(event_card("🚨 Нарушение", user, text=msg_text, reason=audit_reason))
 
 
 # --------------------------------------------------- проверки сообщений
@@ -1215,7 +1281,12 @@ class ModerationMiddleware(BaseMiddleware):
                 return True
             sw = textguard.find_stopword(text, storage.stopwords())
             if sw:
-                await apply_punishment(msg, f"стоп-слово «{sw}»", action_for("TEXT_ACTION"))
+                if storage.is_hidden_word(sw):
+                    # Скрытое слово: в чате — обезличенная причина, в журнале — настоящее слово.
+                    await apply_punishment(msg, "нарушение правил", action_for("TEXT_ACTION"),
+                                           audit_reason=f"скрытое стоп-слово «{sw}»")
+                else:
+                    await apply_punishment(msg, f"стоп-слово «{sw}»", action_for("TEXT_ACTION"))
                 return True
         return False
 
@@ -1532,12 +1603,12 @@ async def challenge(chat_id: int, user) -> None:
 
         # Стоп-слова/мат в имени вступающего.
         if flag("CHECK_JOIN_NAMES"):
-            bad = textguard.is_bad_name(
-                f"{user.full_name or ''} {user.username or ''}", storage.stopwords())
-            if bad:
+            public, why = name_check(f"{user.full_name or ''} {user.username or ''}")
+            if public:
                 pending.pop(key, None)
                 await ban_user(chat_id, user.id)
-                await report(chat_id, f"🚫 {mention(user)} забанен на входе: {esc(bad)}.")
+                audit("имена", why, user.id, user.full_name)
+                await report(chat_id, f"🚫 {mention(user)} забанен на входе: {esc(public)}.")
                 return
 
         # Риск-скоринг профиля: иностранное имя, случайный ник, нет фото,
@@ -1632,11 +1703,10 @@ async def on_join_request(req: ChatJoinRequest):
     if not flag("AUTO_ACCEPT"):
         return  # оставляем заявку в очереди (pending_requests) — очистить: /clearrequests
     if flag("CHECK_JOIN_NAMES"):
-        bad = textguard.is_bad_name(
-            f"{user.full_name or ''} {user.username or ''}", storage.stopwords())
-        if bad:
-            await _decline(f"отклонена по имени: {bad}")
-            await report(chat_id, f"🚫 Заявка отклонена: {mention(user)} — {esc(bad)}.")
+        public, why = name_check(f"{user.full_name or ''} {user.username or ''}")
+        if public:
+            await _decline(f"отклонена по имени: {why}")
+            await report(chat_id, f"🚫 Заявка отклонена: {mention(user)} — {esc(public)}.")
             return
     try:
         await bot.approve_chat_join_request(chat_id, user.id)
@@ -2878,6 +2948,10 @@ async def cmd_whitelist(message: Message):
         await message.answer("🚫 Разрешение на ссылки снято.")
 
 
+# Маркеры «скрытого» слова в конце команды /addword (анонимный бан).
+_HIDDEN_MARKERS = {"скрыто", "скрытое", "тихо", "тайно", "hidden", "-h", "!"}
+
+
 @dp.message(Command("addword"))
 async def cmd_addword(message: Message):
     if not await _admin_only(message):
@@ -2885,11 +2959,23 @@ async def cmd_addword(message: Message):
     arg = (message.text or "").split(maxsplit=1)
     word = arg[1].strip() if len(arg) > 1 else ((message.reply_to_message.text or "").strip()
                                                  if message.reply_to_message else "")
+    # Последнее слово-маркер («скрыто», «!») делает стоп-слово анонимным.
+    hidden = False
+    parts = word.split()
+    if len(parts) > 1 and parts[-1].lower() in _HIDDEN_MARKERS:
+        hidden = True
+        word = " ".join(parts[:-1]).strip()
     if not word:
-        await message.answer("Использование: /addword слово (или ответом на сообщение).")
+        await message.answer(
+            "Использование: /addword слово — обычное стоп-слово.\n"
+            "/addword слово скрыто — <b>скрытое</b>: срабатывает, но в чате не "
+            "показывается (в журнале видно админам).")
         return
-    if storage.add_stopword(word):
-        await message.answer(f"✅ Добавлено стоп-слово. Всего: {len(storage.stopwords())}.")
+    if storage.add_stopword(word, hidden=hidden):
+        tag = " 🕵️ (скрытое)" if hidden else ""
+        await message.answer(f"✅ Добавлено стоп-слово{tag}. Всего: {len(storage.stopwords())}.")
+    elif hidden and storage.set_hidden_word(word, True):
+        await message.answer("🕵️ Существующее стоп-слово помечено скрытым.")
     else:
         await message.answer("Такое стоп-слово уже есть.")
 
@@ -2908,6 +2994,36 @@ async def cmd_delword(message: Message):
         await message.answer("Такого стоп-слова нет.")
 
 
+@dp.message(Command("hideword"))
+async def cmd_hideword(message: Message):
+    """Пометить существующее стоп-слово скрытым (анонимный бан)."""
+    if not await _admin_only(message):
+        return
+    arg = (message.text or "").split(maxsplit=1)
+    if len(arg) < 2:
+        await message.answer("Использование: /hideword слово — сделать стоп-слово скрытым.")
+        return
+    if storage.set_hidden_word(arg[1].strip(), True):
+        await message.answer("🕵️ Слово теперь скрытое: срабатывает, но в чате не называется.")
+    else:
+        await message.answer("Нет такого стоп-слова (или оно уже скрытое).")
+
+
+@dp.message(Command("showword"))
+async def cmd_showword(message: Message):
+    """Снять скрытость со стоп-слова (снова показывать в чате)."""
+    if not await _admin_only(message):
+        return
+    arg = (message.text or "").split(maxsplit=1)
+    if len(arg) < 2:
+        await message.answer("Использование: /showword слово — снять скрытость.")
+        return
+    if storage.set_hidden_word(arg[1].strip(), False):
+        await message.answer("👁 Слово снова открытое: причина показывается в чате.")
+    else:
+        await message.answer("Нет такого скрытого стоп-слова.")
+
+
 @dp.message(Command("words"))
 async def cmd_words(message: Message):
     if not await _admin_only(message):
@@ -2915,8 +3031,15 @@ async def cmd_words(message: Message):
     words = storage.stopwords()
     if not words:
         await message.answer("Список стоп-слов пуст.")
-    else:
-        await message.answer("📋 Стоп-слова:\n" + ", ".join(esc(w) for w in words))
+        return
+    shown = [esc(w) for w in words if not storage.is_hidden_word(w)]
+    hidden = [esc(w) for w in words if storage.is_hidden_word(w)]
+    out = []
+    if shown:
+        out.append("📋 <b>Открытые</b> (причина видна в чате):\n" + ", ".join(shown))
+    if hidden:
+        out.append("🕵️ <b>Скрытые</b> (в чате не называются):\n" + ", ".join(hidden))
+    await message.answer("\n\n".join(out))
 
 
 @dp.message(Command("trust"))
@@ -3050,9 +3173,13 @@ async def cmd_privacy(message: Message):
 async def cmd_setrules(message: Message):
     if not await _admin_only(message):
         return
-    arg = (message.text or "").split(maxsplit=1)
-    txt = (arg[1].strip() if len(arg) > 1
-           else ((message.reply_to_message.text or "").strip() if message.reply_to_message else ""))
+    # Восстанавливаем ссылки из entity — иначе часть [текст](url) теряется.
+    if len(message.text.split(maxsplit=1)) > 1:
+        txt = _md_after_command(message)
+    elif message.reply_to_message:
+        txt = message_markdown(message.reply_to_message).strip()
+    else:
+        txt = ""
     if not txt:
         await message.answer(
             "Использование: /setrules текст (или ответом на сообщение).\n"
@@ -3067,9 +3194,13 @@ async def cmd_setrules(message: Message):
 async def cmd_setwelcome(message: Message):
     if not await _admin_only(message):
         return
-    arg = (message.text or "").split(maxsplit=1)
-    txt = (arg[1].strip() if len(arg) > 1
-           else ((message.reply_to_message.text or "").strip() if message.reply_to_message else ""))
+    # Восстанавливаем ссылки из entity — иначе часть [текст](url) теряется.
+    if len(message.text.split(maxsplit=1)) > 1:
+        txt = _md_after_command(message)
+    elif message.reply_to_message:
+        txt = message_markdown(message.reply_to_message).strip()
+    else:
+        txt = ""
     if not txt:
         await message.answer("Использование: /setwelcome текст. Ссылки: [текст](https://...).")
         return
@@ -3430,6 +3561,29 @@ async def cmd_info(message: Message):
     await message.answer(txt)
 
 
+@dp.message(Command("history"))
+async def cmd_history(message: Message):
+    """История наказаний/действий по пользователю (из журнала). /history (ответом|id|@ник)."""
+    if not await _admin_only(message):
+        return
+    uid = _target_id(message)
+    if await _need_target(message, uid, "Ответь /history на пользователя или укажи id/@ник."):
+        return
+    items = storage.get_audit_for(uid, 20)
+    if not items:
+        await message.answer(f"📭 По <code>{uid}</code> в журнале пусто "
+                             f"(хранятся последние {storage.AUDIT_LIMIT} записей).")
+        return
+    name = items[0].get("target_name") or str(uid)
+    lines = [f"🗂 <b>История</b> — {esc(str(name))} (<code>{uid}</code>), свежие сверху:"]
+    for e in items:
+        line = f"{e['ts']} · {esc(e['actor'])} → <b>{esc(e['action'])}</b>"
+        if e.get("reason"):
+            line += f" ({esc(e['reason'])})"
+        lines.append(line)
+    await message.answer("\n".join(lines))
+
+
 @dp.message(Command("help"))
 async def cmd_help(message: Message):
     u = message.from_user
@@ -3446,23 +3600,43 @@ async def cmd_help(message: Message):
         return
     await message.answer(
         "🛡 <b>Команды админов</b>\n"
-        "Модерация: /ban /unban /mute /unmute — ответом, по id или по @нику "
-        "(срок и причина: /mute @ivan 3 дня флуд)\n"
+        "\n"
+        "🔨 <b>Модерация</b>\n"
+        "/ban /unban /mute /unmute — ответом, по id или @нику\n"
+        "  (срок и причина: <code>/mute @ivan 3 дня флуд</code>)\n"
+        "/warn /unwarn — предупреждения\n"
+        "/whitelist — разрешить ссылку | /trust — доверенный\n"
         "Текстом ответом: <code>мут 3 часа</code>, <code>бан 2 дня</code>, "
         "<code>размут</code>, <code>варн</code>, <code>кик</code>\n"
-        "/warn /unwarn — предупреждения | /whitelist — ссылки | /trust — доверенный\n"
-        "Роли (иерархия: 👑админ &gt; ⭐старший &gt; 🎖модератор): /setrole [@ник|id] роль "
-        "/delrole /roles /renamerole &lt;роль&gt; &lt;новое имя&gt;\n"
-        "База спама: /spam (ответом на картинку) /reload\n"
-        "Стикерпаки (не 18+): /allowpack (ответом на стикер) /denypack /stickers\n"
-        "Стоп-слова: /addword /delword /words | Правила: /rules /setrules\n"
-        "Приветствие: /setwelcome | Автоответы: /addtrigger ключ | ответ, /deltrigger, /triggers\n"
-        "Режимы: /night /quiet /antimat on|off\n"
-        "🚨 Рейд: /lockdown on|off | /checkdc | /purgedc | /clearrequests (отклонить заявки)\n"
-        "🎯 Профили: /risk (ответом — оценка) | 🧹 Удалёнки: /cleandeleted | /scanall (юзербот)\n"
-        "Голосование: /vb (ответом — голосование за заглушение)\n"
-        "Инфо: /info (досье) /log (журнал) /diag /check (ответом на фото) /settings /stats /ping\n"
-        "Жалоба участника: /report (ответом)\n\n"
+        "\n"
+        "🎖 <b>Роли</b> (👑админ &gt; ⭐старший &gt; 🎖модератор)\n"
+        "/setrole [@ник|id] роль | /delrole | /roles\n"
+        "/renamerole &lt;роль&gt; &lt;новое имя&gt;\n"
+        "\n"
+        "🧱 <b>Фильтры и контент</b>\n"
+        "/spam (ответом на картинку) | /reload — база спама\n"
+        "/allowpack /denypack /stickers — стикерпаки (не 18+)\n"
+        "/addword /delword /words — стоп-слова\n"
+        "  (скрытые — не видны в чате: <code>/addword слово скрыто</code>, "
+        "/hideword, /showword)\n"
+        "\n"
+        "💬 <b>Чат</b>\n"
+        "/rules /setrules — правила | /setwelcome — приветствие\n"
+        "/addtrigger ключ | ответ, /deltrigger, /triggers — автоответы\n"
+        "/night /quiet /antimat on|off — режимы\n"
+        "\n"
+        "🚨 <b>Рейд и заявки</b>\n"
+        "/lockdown on|off | /checkdc | /purgedc\n"
+        "/clearrequests — отклонить заявки\n"
+        "\n"
+        "🎯 <b>Профили и чистка</b>\n"
+        "/risk (ответом) — оценка | /cleandeleted — удалёнки\n"
+        "/scanall — полный скан (юзербот)\n"
+        "\n"
+        "📊 <b>Инфо</b>\n"
+        "/info (досье) | /history (наказания) | /log | /diag | /settings | /stats | /ping\n"
+        "/check (ответом на фото) | /vb (голосование) | /report\n"
+        "\n"
         "⚙️ Всё это удобнее в личке бота — команда /admin (пароль)."
     )
 
@@ -3645,12 +3819,12 @@ def panel_keyboard() -> InlineKeyboardMarkup:
                  InlineKeyboardButton(text="📒 Журнал", callback_data="panel:log")])
     rows.append([InlineKeyboardButton(text="💾 Бэкап", callback_data="panel:backup"),
                  InlineKeyboardButton(text="🔄 База картинок", callback_data="panel:reload")])
-    rows.append([InlineKeyboardButton(text="🧹 Чистка удалёнок", callback_data="panel:cleandel")])
-    rows.append([InlineKeyboardButton(text="📞 Верификация номеров", callback_data="panel:phone")])
-    rows.append([InlineKeyboardButton(text="🔑 Юзербот (полный скан)", callback_data="panel:ub")])
-    rows.append([InlineKeyboardButton(text="🎖 Роли и права", callback_data="panel:roles"),
-                 InlineKeyboardButton(text="🧹 Сброс заявок", callback_data="panel:reqs")])
-    rows.append([InlineKeyboardButton(text="👑 Владельцы", callback_data="panel:owners")])
+    rows.append([InlineKeyboardButton(text="🧹 Чистка удалёнок", callback_data="panel:cleandel"),
+                 InlineKeyboardButton(text="📞 Верификация номеров", callback_data="panel:phone")])
+    rows.append([InlineKeyboardButton(text="🔑 Юзербот (скан)", callback_data="panel:ub"),
+                 InlineKeyboardButton(text="🎖 Роли и права", callback_data="panel:roles")])
+    rows.append([InlineKeyboardButton(text="🧹 Сброс заявок", callback_data="panel:reqs"),
+                 InlineKeyboardButton(text="👑 Владельцы", callback_data="panel:owners")])
     if not IS_CHILD:
         rows.append([InlineKeyboardButton(text="🤖 Мои боты", callback_data="panel:bots")])
     rows.append([InlineKeyboardButton(text="❌ Закрыть", callback_data="panel:close")])
@@ -3783,10 +3957,26 @@ def back_keyboard() -> InlineKeyboardMarkup:
         InlineKeyboardButton(text="⬅️ Назад", callback_data="panel:back")]])
 
 
+def words_panel_text() -> str:
+    total = len(storage.stopwords())
+    hidden = len(storage.hidden_words())
+    return (f"📋 <b>Стоп-слова</b> ({total}, из них скрытых 🕵️ {hidden})\n"
+            "👁 — открытое (в чате видно причину), 🕵️ — скрытое (причина не "
+            "показывается). Нажми 👁/🕵️ — переключить, ❌ — удалить.")
+
+
 def words_keyboard() -> InlineKeyboardMarkup:
-    rows = [[InlineKeyboardButton(text=f"❌ {w[:24]}", callback_data=f"panel:dw:{i}")]
-            for i, w in enumerate(storage.stopwords())]
-    rows.append([InlineKeyboardButton(text="➕ Добавить слово", callback_data="panel:addword")])
+    # Каждая строка: [🕵️/👁 переключить скрытость] [❌ удалить слово].
+    rows = []
+    for i, w in enumerate(storage.stopwords()):
+        hidden = storage.is_hidden_word(w)
+        eye = "🕵️" if hidden else "👁"
+        rows.append([
+            InlineKeyboardButton(text=f"{eye} {w[:22]}", callback_data=f"panel:hw:{i}"),
+            InlineKeyboardButton(text="❌", callback_data=f"panel:dw:{i}"),
+        ])
+    rows.append([InlineKeyboardButton(text="➕ Открытое", callback_data="panel:addword"),
+                 InlineKeyboardButton(text="🕵️ Скрытое", callback_data="panel:addwordh")])
     rows.append([InlineKeyboardButton(text="⬅️ Назад", callback_data="panel:back")])
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
@@ -4130,11 +4320,13 @@ async def panel_private(message: Message):
         panel_state.pop(uid, None)
         if val.startswith("/"):
             await message.answer("Отменено.")
-        elif st == "add_word":
-            ok = storage.add_stopword(val)
-            await message.answer(f"✅ Добавлено «{esc(val)}»." if ok else "Уже есть.")
+        elif st in ("add_word", "add_word_hidden"):
+            hidden = st == "add_word_hidden"
+            ok = storage.add_stopword(val, hidden=hidden)
+            tag = " 🕵️ (скрытое)" if hidden else ""
+            await message.answer(f"✅ Добавлено «{esc(val)}»{tag}." if ok else "Уже есть.")
         elif st == "set_rules":
-            storage.set_rules(val)
+            storage.set_rules(message_markdown(message).strip() or val)
             await message.answer("✅ Правила сохранены.")
         elif st == "set_privacy":
             if val == "-":
@@ -4397,28 +4589,41 @@ async def panel_cb(cb: CallbackQuery):
             pass
     elif action == "words":
         await cb.answer()
-        n = len(storage.stopwords())
         try:
-            await cb.message.edit_text(
-                f"📋 Стоп-слова ({n}). Нажми на слово, чтобы удалить:",
-                reply_markup=words_keyboard())
+            await cb.message.edit_text(words_panel_text(), reply_markup=words_keyboard())
         except TelegramBadRequest:
             pass
     elif action == "addword":
         panel_state[uid] = "add_word"
         await cb.answer()
         await bot.send_message(cb.message.chat.id, "✍️ Напиши новое стоп-слово одним сообщением:")
+    elif action == "addwordh":
+        panel_state[uid] = "add_word_hidden"
+        await cb.answer()
+        await bot.send_message(cb.message.chat.id,
+                               "🕵️ Напиши новое СКРЫТОЕ стоп-слово одним сообщением "
+                               "(в чате не показывается):")
     elif action == "dw":
         words = storage.stopwords()
         i = int(parts[2])
         if 0 <= i < len(words):
             storage.del_stopword(words[i])
         await cb.answer("Удалено")
-        n = len(storage.stopwords())
         try:
-            await cb.message.edit_text(
-                f"📋 Стоп-слова ({n}). Нажми на слово, чтобы удалить:",
-                reply_markup=words_keyboard())
+            await cb.message.edit_text(words_panel_text(), reply_markup=words_keyboard())
+        except TelegramBadRequest:
+            pass
+    elif action == "hw":
+        words = storage.stopwords()
+        i = int(parts[2])
+        if 0 <= i < len(words):
+            new_hidden = not storage.is_hidden_word(words[i])
+            storage.set_hidden_word(words[i], new_hidden)
+            await cb.answer("Скрыто 🕵️" if new_hidden else "Открыто 👁")
+        else:
+            await cb.answer()
+        try:
+            await cb.message.edit_text(words_panel_text(), reply_markup=words_keyboard())
         except TelegramBadRequest:
             pass
     elif action == "reload":
