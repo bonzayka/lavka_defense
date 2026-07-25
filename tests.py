@@ -426,6 +426,20 @@ storage.set_role(560, None)
 check("roleperm: фоллбэк на config без оверрайда",
       bot.role_perms("старший") == set(bot.config.ROLES["старший"]))
 
+# ---- пер-юзерный оверрайд прав (лично человеку, поверх роли) ----
+storage.set_role(570, "старший")                       # у роли есть ban
+check("userperm: до оверрайда права от роли", bot.has_perm(570, "ban"))
+storage.set_user_perms(570, ["mute"])                  # лично оставили только mute
+check("userperm: оверрайд перебил роль (ban убран)", not bot.has_perm(570, "ban"))
+check("userperm: оверрайд оставил mute", bot.has_perm(570, "mute"))
+check("userperm: effective_perms = личный набор", bot.effective_perms(570) == {"mute"})
+storage.set_user_perms(570, None)                      # сброс к роли
+check("userperm: сброс вернул права роли", bot.has_perm(570, "ban"))
+check("userperm: без оверрайда get вернёт None",
+      storage.get_user_perms_override(570) is None)
+storage.set_role(570, None)
+storage.set_user_perms(570, None)
+
 # ---- таргет по @нику / id / text_mention ----
 async def run_target():
     bot.uname_cache.clear()
@@ -688,6 +702,89 @@ check("deanon: available булев", isinstance(deanon.available(), bool))
 check("deanon: status строка", isinstance(deanon.status(), str))
 check("deanon: extract без движка -> ''", deanon.available() or deanon.extract_text(b"x") == "")
 check("deanon: describe читаемо", "телефон" in deanon.describe(["phone"]))
+
+
+# ---- ЧС-автопилот: детект волны сообщений ----
+bot.msg_wave.clear()
+_t0 = bot.now()
+# 7 разных юзеров за окно -> ещё не волна (WAVE_USERS=8 по умолчанию)
+bot.config.WAVE_USERS = 8
+bot.config.WAVE_WINDOW = 20
+for i in range(7):
+    n = bot.wave_detect(-700, 6000 + i, _t0)
+check("wave: 7 юзеров -> нет волны", n < bot.config.WAVE_USERS)
+n = bot.wave_detect(-700, 6099, _t0)
+check("wave: 8-й юзер -> волна", n >= bot.config.WAVE_USERS)
+# повторы от одного юзера не раздувают счётчик уникальных
+for _ in range(20):
+    n2 = bot.wave_detect(-701, 42, _t0)
+check("wave: спам от одного = 1 уникальный", n2 == 1)
+# старые сообщения выпадают из окна
+bot.msg_wave.clear()
+bot.wave_detect(-702, 1, _t0 - bot.timedelta(seconds=100))
+n3 = bot.wave_detect(-702, 2, _t0)
+check("wave: старьё за окном отброшено", n3 == 1)
+
+# ---- ЧС-автопилот: вход сохраняет и мягко ужесточает, выход откатывает ----
+async def run_crisis_toggle():
+    async def noop(*a, **k):
+        return None
+    bot.report = noop
+    bot.notify_panel = noop
+    async def _ping(cid, reason):
+        return None
+    bot._crisis_staff_ping = _ping
+    bot.crisis.clear()
+    bot.storage.set_flag("AUTO_ACCEPT", True)      # было включено
+    bot.storage.set_flag("RISK_ENABLED", False)    # было выключено
+    _before_accept = bot.flag("AUTO_ACCEPT")
+    _before_risk = bot.flag("RISK_ENABLED")
+    await bot.enter_crisis(-710, "тест", force=True)
+    check("crisis: режим активен после входа", bot.crisis_active(-710))
+    check("crisis: AUTO_ACCEPT выключен на время ЧС", bot.flag("AUTO_ACCEPT") is False)
+    check("crisis: RISK_ENABLED включён на время ЧС", bot.flag("RISK_ENABLED") is True)
+    await bot.exit_crisis(-710)
+    check("crisis: режим снят после выхода", not bot.crisis_active(-710))
+    check("crisis: AUTO_ACCEPT восстановлен", bot.flag("AUTO_ACCEPT") == _before_accept)
+    check("crisis: RISK_ENABLED восстановлен", bot.flag("RISK_ENABLED") == _before_risk)
+
+
+asyncio.run(run_crisis_toggle())
+
+# ---- ЧС-автопилот: эскалация при молчании модеров ----
+async def run_crisis_escalate():
+    async def noop(*a, **k):
+        return None
+    bot.report = noop
+    bot.notify_panel = noop
+    async def _ping(cid, reason):
+        return None
+    bot._crisis_staff_ping = _ping
+    bot.crisis.clear()
+    await bot.enter_crisis(-720, "тест", force=True)
+    st = bot.crisis[-720]
+    _saved_ld = st["saved"]["flags"].get("LOCKDOWN", bot.flag("LOCKDOWN"))
+    # модеры молчат: отматываем «вход» в прошлое за порог эскалации
+    st["entered"] = bot.now() - bot.timedelta(seconds=bot.config.CRISIS_ESCALATE_AFTER + 5)
+    await bot.escalate_crisis(-720)
+    check("crisis: эскалация -> уровень 2", bot.crisis[-720]["level"] == 2)
+    check("crisis: эскалация включает LOCKDOWN", bot.flag("LOCKDOWN") is True)
+    # ack останавливает эскалацию
+    await bot.exit_crisis(-720)
+    check("crisis: выход после эскалации вернул LOCKDOWN", bot.flag("LOCKDOWN") == _saved_ld)
+    # Гейт монитора: при acked эскалации быть НЕ должно, даже если время вышло.
+    await bot.enter_crisis(-721, "тест", force=True)
+    _st = bot.crisis[-721]
+    _st["acked"] = True
+    _st["entered"] = bot.now() - bot.timedelta(seconds=bot.config.CRISIS_ESCALATE_AFTER + 5)
+    _t = bot.now()
+    _would_escalate = (not _st["acked"] and _st["level"] < 2
+                       and (_t - _st["entered"]).total_seconds() > bot.config.CRISIS_ESCALATE_AFTER)
+    check("crisis: acked -> монитор не эскалирует", _would_escalate is False)
+    await bot.exit_crisis(-721)
+
+
+asyncio.run(run_crisis_escalate())
 
 
 print(f"\nИтог: {PASS} ок, {FAIL} провалов.")

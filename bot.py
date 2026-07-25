@@ -53,6 +53,7 @@ from aiogram.types import (
 from aiogram.exceptions import TelegramBadRequest, TelegramRetryAfter, TelegramForbiddenError
 
 import config
+import channel_scan
 import dcguard
 import deanon
 import deleted
@@ -123,8 +124,11 @@ vb_cooldown: dict[tuple[int, int], datetime] = {}  # (chat, uid) -> когда �
 probation: dict[tuple[int, int], dict] = {}        # (chat, uid) -> {until, score, reasons} — новичок «под наблюдением»
 known_chats: set[int] = set()                      # чаты, где бот видел активность (для свипа удалёнок)
 last_deleted_sweep: datetime | None = None         # когда крутили автосвип удалёнок
+crisis: dict[int, dict] = {}                        # chat_id -> состояние ЧС-режима (автопилот антирейда)
+msg_wave: dict[int, deque] = {}                     # chat_id -> deque[(dt, uid)] для детекта волны сообщений
 stats = {"challenged": 0, "passed": 0, "failed": 0, "img_muted": 0,
-         "banned": 0, "reports": 0, "raids": 0, "risk_muted": 0, "deleted_kicked": 0}
+         "banned": 0, "reports": 0, "raids": 0, "risk_muted": 0, "deleted_kicked": 0,
+         "crises": 0}
 
 MUTE = ChatPermissions(can_send_messages=False)
 # Режим фото-капчи: новичку можно ТОЛЬКО текст (ввести код), без медиа/ссылок.
@@ -460,10 +464,18 @@ def set_role_perm(role: str, perm: str, on: bool) -> None:
     storage.set_role_perms(role, sorted(cur))
 
 
-def has_perm(user_id: int, perm: str) -> bool:
-    """Есть ли у юзера внутреннее право (по назначенной роли)."""
+def effective_perms(user_id: int) -> set:
+    """Итоговые права юзера: личный оверрайд из панели, иначе права его роли."""
+    ov = storage.get_user_perms_override(user_id)
+    if ov is not None:
+        return set(ov)
     role = storage.get_role(user_id)
-    return bool(role and perm in role_perms(role))
+    return role_perms(role) if role else set()
+
+
+def has_perm(user_id: int, perm: str) -> bool:
+    """Есть ли у юзера внутреннее право (личный оверрайд > права роли)."""
+    return perm in effective_perms(user_id)
 
 
 def role_rank(role: str | None) -> int:
@@ -782,6 +794,12 @@ class TrackMiddleware(BaseMiddleware):
             msgcount[key] = msgcount.get(key, 0) + 1
             if msg.from_user.username:                 # запоминаем @ник -> id для таргета по нику
                 uname_cache[msg.from_user.username.lower()] = msg.from_user.id
+            # Сигнал ЧС: волна сообщений от многих РАЗНЫХ юзеров за короткое окно.
+            if flag("AUTO_CRISIS_ENABLED") and not crisis_active(msg.chat.id):
+                senders = wave_detect(msg.chat.id, msg.from_user.id)
+                if senders >= config.WAVE_USERS:
+                    asyncio.create_task(enter_crisis(
+                        msg.chat.id, f"волна сообщений ({senders} юзеров за {config.WAVE_WINDOW}с)"))
         return await handler(event, data)
 
 
@@ -1556,8 +1574,152 @@ async def check_raid(chat_id: int) -> bool:
                               f"Локдаун на {config.RAID_LOCKDOWN // 60} мин.")
         await notify_panel(f"🛡 РЕЙД в чате <code>{chat_id}</code>: "
                            f"{len(buf)} входов за {config.RAID_WINDOW}с.")
+        await enter_crisis(chat_id, f"всплеск входов ({len(buf)} за {config.RAID_WINDOW}с)")
         return True
     return False
+
+
+# ======================= Автономный режим ЧС (автопилот) ====================
+# Ловим рейд по 3 сигналам (входы/заявки/волна сообщений), МЯГКО ужесточаем
+# защиту, пингуем модеров; не откликнулись — эскалируем. Стихло — откатываем.
+
+# Настройки, которые ЧС-режим временно перекрывает (уровень 1 «мягкое усиление»).
+# Сохраняем прежние значения в crisis[...]['saved'] и возвращаем при выходе.
+_CRISIS_FLAGS_ON = ("RISK_ENABLED", "PROBATION_ENABLED", "PROBATION_ON_MEDIA",
+                    "PROBATION_ON_LINK", "ANTIFLOOD_ENABLED", "CHECK_JOIN_NAMES")
+_CRISIS_FLAGS_OFF = ("AUTO_ACCEPT",)
+# Числа: строже пороги на время ЧС (капча в 3 шага, ниже риск-пороги, короче флуд-окно).
+_CRISIS_NUMS = {"CAPTCHA_STEPS": 3, "RISK_WATCH_THRESHOLD": 30,
+                "ANTIFLOOD_COUNT": 4, "PROBATION_MINUTES": 20}
+
+
+def wave_detect(chat_id: int, uid: int, t: datetime | None = None) -> int:
+    """Регистрирует сообщение и возвращает число РАЗНЫХ отправителей в окне WAVE_WINDOW."""
+    t = t or now()
+    buf = msg_wave.setdefault(chat_id, deque(maxlen=400))
+    buf.append((t, uid))
+    cut = t - timedelta(seconds=config.WAVE_WINDOW)
+    while buf and buf[0][0] < cut:
+        buf.popleft()
+    return len({u for _, u in buf})
+
+
+def crisis_active(chat_id: int) -> bool:
+    st = crisis.get(chat_id)
+    return bool(st and st.get("until", now()) > now())
+
+
+async def _crisis_staff_ping(chat_id: int, reason: str) -> None:
+    """@-пинг носителей ролей в чате + карточка в ЛС с кнопкой «Беру контроль»."""
+    mentions = []
+    for uid, role in storage.roles_all().items():
+        try:
+            m = await bot.get_chat_member(chat_id, int(uid))
+        except (TelegramBadRequest, ValueError, TypeError):
+            continue
+        if m.status in ("left", "kicked"):
+            continue
+        u = getattr(m, "user", None)
+        if u:
+            mentions.append(mention(u))
+    line = " ".join(mentions[:10]) if mentions else "модераторы"
+    kb = InlineKeyboardMarkup(inline_keyboard=[[
+        InlineKeyboardButton(text="🛡 Беру контроль", callback_data=f"crisisack:{chat_id}")]])
+    await report(chat_id, f"🚨 <b>Похоже на рейд</b> — включил усиленную защиту ({esc(reason)}).\n"
+                          f"{line}, если вы на связи — нажмите кнопку, иначе через "
+                          f"{config.CRISIS_ESCALATE_AFTER // 60} мин ужесточу автоматически.", kb)
+    await notify_panel(f"🚨 ЧС в чате <code>{chat_id}</code>: {esc(reason)}. Автозащита включена.")
+
+
+async def enter_crisis(chat_id: int, reason: str, force: bool = False) -> None:
+    """Войти в ЧС-режим: сохранить настройки, мягко ужесточить, пингануть модеров."""
+    if not force and not flag("AUTO_CRISIS_ENABLED"):
+        return
+    st = crisis.get(chat_id)
+    t = now()
+    if st and st.get("until", t) > t:
+        # Уже в ЧС — просто продлеваем окно затишья.
+        st["until"] = t + timedelta(seconds=config.CRISIS_COOLDOWN)
+        st["last_signal"] = t
+        return
+    # Снимок текущих значений — вернём при выходе.
+    saved = {"flags": {}, "nums": {}}
+    for name in _CRISIS_FLAGS_ON + _CRISIS_FLAGS_OFF:
+        saved["flags"][name] = flag(name)
+    for name in _CRISIS_NUMS:
+        saved["nums"][name] = num(name)
+    crisis[chat_id] = {
+        "level": 1, "reason": reason, "entered": t, "acked": False,
+        "last_signal": t, "until": t + timedelta(seconds=config.CRISIS_COOLDOWN),
+        "saved": saved,
+    }
+    stats["crises"] += 1
+    for name in _CRISIS_FLAGS_ON:
+        storage.set_flag(name, True)
+    for name in _CRISIS_FLAGS_OFF:
+        storage.set_flag(name, False)
+    for name, val in _CRISIS_NUMS.items():
+        storage.set_num(name, val)
+    audit("ЧС-автопилот", "включён режим ЧС", 0, "", reason)
+    await _crisis_staff_ping(chat_id, reason)
+
+
+async def escalate_crisis(chat_id: int) -> None:
+    """Уровень 2: модеры не откликнулись — автобан входящих на время ЧС."""
+    st = crisis.get(chat_id)
+    if not st or st["level"] >= 2:
+        return
+    st["level"] = 2
+    # Запоминаем прежнее значение LOCKDOWN ДО включения, чтобы вернуть при выходе.
+    st["saved"].setdefault("flags", {}).setdefault("LOCKDOWN", flag("LOCKDOWN"))
+    storage.set_flag("LOCKDOWN", True)
+    audit("ЧС-автопилот", "эскалация: автобан входящих", 0, "", "модеры не откликнулись")
+    await report(chat_id, "🛡 Модераторы не на связи — <b>ужесточаю</b>: новые входящие "
+                          "временно банятся до конца ЧС.")
+    await notify_panel(f"🛡 ЧС в <code>{chat_id}</code> эскалирована (автобан входящих).")
+
+
+async def exit_crisis(chat_id: int, manual: bool = False) -> None:
+    """Выйти из ЧС: вернуть сохранённые настройки как было."""
+    st = crisis.pop(chat_id, None)
+    if not st:
+        return
+    saved = st.get("saved", {})
+    for name, val in saved.get("flags", {}).items():
+        storage.set_flag(name, val)
+    for name, val in saved.get("nums", {}).items():
+        storage.set_num(name, val)
+    raid_until.pop(chat_id, None)
+    msg_wave.pop(chat_id, None)
+    audit("ЧС-автопилот", "режим ЧС снят" + (" (вручную)" if manual else ""), 0)
+    await report(chat_id, "✅ Похоже, рейд закончился — вернул обычный режим модерации.")
+    await notify_panel(f"✅ ЧС в чате <code>{chat_id}</code> завершён, настройки восстановлены.")
+
+
+async def crisis_monitor():
+    """Фон: эскалация при молчании модеров и авто-выход, когда рейд стих."""
+    while True:
+        try:
+            await asyncio.sleep(15)
+        except asyncio.CancelledError:
+            return
+        t = now()
+        for chat_id in list(crisis.keys()):
+            st = crisis.get(chat_id)
+            if not st:
+                continue
+            # Предохранитель: слишком долго в ЧС -> выходим.
+            if (t - st["entered"]).total_seconds() > config.CRISIS_MAX_MINUTES * 60:
+                await exit_crisis(chat_id)
+                continue
+            # Затишье дольше COOLDOWN -> рейд закончился.
+            if st.get("until", t) <= t:
+                await exit_crisis(chat_id)
+                continue
+            # Модеры молчат дольше порога -> эскалация.
+            if (not st["acked"] and st["level"] < 2
+                    and (t - st["entered"]).total_seconds() > config.CRISIS_ESCALATE_AFTER):
+                await escalate_crisis(chat_id)
 
 
 async def challenge(chat_id: int, user) -> None:
@@ -1736,6 +1898,7 @@ async def on_join_request(req: ChatJoinRequest):
         await notify_panel(f"🚨 В чате <code>{chat_id}</code> всплеск заявок "
                            f"(>{num('ACCEPT_BURST_LIMIT')} за {num('ACCEPT_BURST_WINDOW')}с). "
                            "Автоприём выключен.")
+        await enter_crisis(chat_id, "всплеск заявок на вступление")
 
 
 @dp.chat_member(ChatMemberUpdatedFilter(member_status_changed=JOIN_TRANSITION))
@@ -2012,8 +2175,11 @@ async def on_moderation(cb: CallbackQuery):
         await cb.answer()
         return
 
-    if not await is_admin(gid, cb.from_user.id):
-        await cb.answer("Решать может только админ.", show_alert=True)
+    # Право под конкретное действие кнопки (TG-админ проходит всегда через can()).
+    _perm_for = {"ban": "ban", "banwipe": "ban", "mute": "mute",
+                 "warn": "warn", "kick": "kick"}.get(action, "ban")
+    if not await can(gid, cb.from_user.id, _perm_for):
+        await cb.answer("Нет прав на это действие.", show_alert=True)
         return
 
     if action in ("ban", "mute", "banwipe"):
@@ -2154,8 +2320,8 @@ async def on_clearreq(cb: CallbackQuery):
     except (ValueError, IndexError):
         await cb.answer()
         return
-    if not await is_admin(gid, cb.from_user.id):
-        await cb.answer("Только админ.", show_alert=True)
+    if not await can(gid, cb.from_user.id, "requests"):
+        await cb.answer("Нужно право на заявки.", show_alert=True)
         return
     n = len(pending_requests.get(gid, set()))
     await cb.answer(f"Отклоняю {n} заявок…")
@@ -2163,6 +2329,31 @@ async def on_clearreq(cb: CallbackQuery):
     try:
         await cb.message.edit_text(cb.message.html_text +
                                    f"\n\n🧹 Отклонено заявок: {declined}. ({mod_name(cb.from_user)})")
+    except TelegramBadRequest:
+        pass
+
+
+@dp.callback_query(F.data.startswith("crisisack:"))
+async def on_crisis_ack(cb: CallbackQuery):
+    """Модер нажал «Беру контроль» — останавливаем авто-эскалацию."""
+    try:
+        gid = int(cb.data.split(":")[1])
+    except (ValueError, IndexError):
+        await cb.answer()
+        return
+    if not await can(gid, cb.from_user.id, "mute"):
+        await cb.answer("Только модератор.", show_alert=True)
+        return
+    st = crisis.get(gid)
+    if not st:
+        await cb.answer("ЧС уже завершён.", show_alert=True)
+        return
+    st["acked"] = True
+    await cb.answer("Принято — ручное управление, авто-эскалация остановлена.")
+    audit("ЧС-автопилот", "модер взял контроль", cb.from_user.id, cb.from_user.full_name)
+    try:
+        await cb.message.edit_text(cb.message.html_text +
+                                   f"\n\n🛡 Контроль взял {mod_name(cb.from_user)}.")
     except TelegramBadRequest:
         pass
 
@@ -2262,7 +2453,7 @@ async def on_vote(cb: CallbackQuery):
     uid = cb.from_user.id
 
     if choice == "no":
-        if await is_admin(v["chat"], uid):           # админский 👎 = вето, отмена
+        if await can(v["chat"], uid, "ban"):         # 👎 админа/персонала с правом = вето, отмена
             v["done"] = True
             votes.pop(mid, None)
             await cb.answer("Голосование отменено.")
@@ -2304,8 +2495,21 @@ async def on_vote(cb: CallbackQuery):
 
 # ---------------------------------------------------------------- команды
 
-async def _admin_only(message: Message) -> bool:
-    return bool(message.from_user and await is_admin(message.chat.id, message.from_user.id))
+async def _staff_only(message: Message, perm: str | None = None) -> bool:
+    """Пускает TG-админа ИЛИ носителя внутренней роли (в т.ч. без TG-админки).
+
+    perm=None — достаточно быть персоналом (для ЧТЕНИЯ: /info, /stats, /log…);
+    perm задан — нужно это конкретное право (как _can, наказания/настройки).
+    Владелец бота проходит всегда.
+    """
+    if not message.from_user:
+        return False
+    uid = message.from_user.id
+    if storage.is_owner(uid):
+        return True
+    if perm is not None:
+        return await can(message.chat.id, uid, perm)
+    return await is_admin(message.chat.id, uid) or storage.get_role(uid) is not None
 
 
 def _mention_uid(message: Message):
@@ -2430,7 +2634,7 @@ async def _need_target(message: Message, uid, hint: str = _NO_TARGET) -> bool:
 
 @dp.message(Command("spam"))
 async def cmd_spam(message: Message):
-    if not await _admin_only(message):
+    if not await _staff_only(message, "manage"):
         return
     reply = message.reply_to_message
     if not reply:
@@ -2465,7 +2669,7 @@ async def cmd_spam(message: Message):
 
 @dp.message(Command("reload"))
 async def cmd_reload(message: Message):
-    if not await _admin_only(message):
+    if not await _staff_only(message, "manage"):
         return
     load_reference_hashes()
     await message.answer(f"🔄 База перезагружена: {len(ref_hashes)} картинок.")
@@ -2488,7 +2692,7 @@ def _pack_from_message(message: Message):
 @dp.message(Command("allowpack"))
 async def cmd_allowpack(message: Message):
     """Добавить стикерпак в белый список (его стикеры не проверяются на 18+)."""
-    if not await _admin_only(message):
+    if not await _staff_only(message, "manage"):
         return
     pack = _pack_from_message(message)
     if not pack:
@@ -2505,7 +2709,7 @@ async def cmd_allowpack(message: Message):
 @dp.message(Command("denypack"))
 async def cmd_denypack(message: Message):
     """Убрать стикерпак из белого списка (снова проверять на 18+)."""
-    if not await _admin_only(message):
+    if not await _staff_only(message, "manage"):
         return
     pack = _pack_from_message(message)
     if not pack:
@@ -2521,7 +2725,7 @@ async def cmd_denypack(message: Message):
 @dp.message(Command("stickers", "packs"))
 async def cmd_stickers(message: Message):
     """Показать белый список стикерпаков."""
-    if not await _admin_only(message):
+    if not await _staff_only(message):
         return
     packs = storage.sticker_packs()
     if not packs:
@@ -2538,7 +2742,7 @@ async def cmd_stickers(message: Message):
 @dp.message(Command("reloadgore"))
 async def cmd_reloadgore(message: Message):
     """Подгрузить гор-детектор на лету (после установки torch/transformers)."""
-    if not await _admin_only(message):
+    if not await _staff_only(message, "manage"):
         return
     if gore.available():
         await message.answer("Гор-детектор уже загружен ✅")
@@ -2551,7 +2755,7 @@ async def cmd_reloadgore(message: Message):
 @dp.message(Command("check", "checkgore"))
 async def cmd_check(message: Message):
     """Диагностика: ответом на картинку показать баллы хеша/18+/гора."""
-    if not await _admin_only(message):
+    if not await _staff_only(message):
         return
     reply = message.reply_to_message
     file_obj = pick_image_file(reply) if reply else None
@@ -2594,7 +2798,7 @@ async def cmd_check(message: Message):
 @dp.message(Command("deanon"))
 async def cmd_deanon(message: Message):
     """Диагностика анти-деанона: ответом на картинку показать OCR-текст и найденные данные."""
-    if not await _admin_only(message):
+    if not await _staff_only(message, "manage"):
         return
     if not deanon.available():
         await message.answer(f"Анти-деанон OCR: {esc(deanon.status())}.\n"
@@ -2628,7 +2832,7 @@ async def cmd_deanon(message: Message):
 @dp.message(Command("diag"))
 async def cmd_diag(message: Message):
     """Полная самодиагностика: ИИ-модели, апдейты, права бота в этом чате."""
-    if not await _admin_only(message):
+    if not await _staff_only(message):
         return
     # torch
     try:
@@ -2695,6 +2899,43 @@ async def cmd_lockdown(message: Message):
     storage.set_flag("LOCKDOWN", v)
     await message.answer("🚨 ЛОКДАУН ВКЛЮЧЁН — все входящие банятся без капчи."
                          if v else "✅ Локдаун снят, обычный режим.")
+
+
+@dp.message(Command("crisis"))
+async def cmd_crisis(message: Message):
+    """Автономный ЧС-режим: статус и ручной вход/выход. /crisis on|off."""
+    if not await _can(message, "requests"):
+        return
+    chat_id = message.chat.id
+    v = _parse_onoff(message)
+    if v is None:
+        st = crisis.get(chat_id)
+        if st and crisis_active(chat_id):
+            left = int((st["until"] - now()).total_seconds())
+            lvl = "усиление" if st["level"] < 2 else "автобан входящих"
+            ack = "модер на связи" if st["acked"] else "модеры не ответили"
+            await message.answer(
+                f"🚨 <b>ЧС-режим активен</b>\n"
+                f"Причина: {esc(st['reason'])}\n"
+                f"Уровень: {st['level']} ({lvl}) — {ack}\n"
+                f"Затишье до авто-выхода: ~{max(0, left)}с\n\n"
+                f"Автопилот {'ВКЛ' if flag('AUTO_CRISIS_ENABLED') else 'выкл'}. "
+                f"/crisis off — снять вручную.")
+        else:
+            await message.answer(
+                f"🟢 Сейчас всё спокойно. Автопилот ЧС: "
+                f"{'ВКЛ' if flag('AUTO_CRISIS_ENABLED') else 'выкл'}.\n"
+                f"Ловит рейд по 3 сигналам (входы/заявки/волна сообщений), сам "
+                f"усиливает защиту и откатывает. /crisis on — включить вручную.")
+        return
+    if v:
+        await enter_crisis(chat_id, f"вручную ({mod_name(message.from_user)})", force=True)
+        await message.answer("🚨 ЧС-режим включён вручную.")
+    else:
+        if crisis_active(chat_id):
+            await exit_crisis(chat_id, manual=True)
+        else:
+            await message.answer("ЧС-режим и так не активен.")
 
 
 @dp.message(Command("checkdc"))
@@ -2811,7 +3052,7 @@ async def cmd_scanall(message: Message):
 @dp.message(Command("risk"))
 async def cmd_risk(message: Message):
     """Диагностика риск-скора: ответом на сообщение показать оценку профиля."""
-    if not await _admin_only(message):
+    if not await _staff_only(message):
         return
     target = message.reply_to_message.from_user if message.reply_to_message else None
     if target is None or target.is_bot:
@@ -2935,7 +3176,7 @@ async def cmd_unwarn(message: Message):
 
 @dp.message(Command("whitelist"))
 async def cmd_whitelist(message: Message):
-    if not await _admin_only(message):
+    if not await _staff_only(message, "words"):
         return
     uid = _target_id(message)
     if await _need_target(message, uid,
@@ -2954,7 +3195,7 @@ _HIDDEN_MARKERS = {"скрыто", "скрытое", "тихо", "тайно", "
 
 @dp.message(Command("addword"))
 async def cmd_addword(message: Message):
-    if not await _admin_only(message):
+    if not await _staff_only(message, "words"):
         return
     arg = (message.text or "").split(maxsplit=1)
     word = arg[1].strip() if len(arg) > 1 else ((message.reply_to_message.text or "").strip()
@@ -2982,7 +3223,7 @@ async def cmd_addword(message: Message):
 
 @dp.message(Command("delword"))
 async def cmd_delword(message: Message):
-    if not await _admin_only(message):
+    if not await _staff_only(message, "words"):
         return
     arg = (message.text or "").split(maxsplit=1)
     if len(arg) < 2:
@@ -2997,7 +3238,7 @@ async def cmd_delword(message: Message):
 @dp.message(Command("hideword"))
 async def cmd_hideword(message: Message):
     """Пометить существующее стоп-слово скрытым (анонимный бан)."""
-    if not await _admin_only(message):
+    if not await _staff_only(message, "words"):
         return
     arg = (message.text or "").split(maxsplit=1)
     if len(arg) < 2:
@@ -3012,7 +3253,7 @@ async def cmd_hideword(message: Message):
 @dp.message(Command("showword"))
 async def cmd_showword(message: Message):
     """Снять скрытость со стоп-слова (снова показывать в чате)."""
-    if not await _admin_only(message):
+    if not await _staff_only(message, "words"):
         return
     arg = (message.text or "").split(maxsplit=1)
     if len(arg) < 2:
@@ -3026,7 +3267,7 @@ async def cmd_showword(message: Message):
 
 @dp.message(Command("words"))
 async def cmd_words(message: Message):
-    if not await _admin_only(message):
+    if not await _staff_only(message):
         return
     words = storage.stopwords()
     if not words:
@@ -3044,7 +3285,7 @@ async def cmd_words(message: Message):
 
 @dp.message(Command("trust"))
 async def cmd_trust(message: Message):
-    if not await _admin_only(message):
+    if not await _staff_only(message, "manage"):
         return
     uid = _target_id(message)
     if await _need_target(message, uid,
@@ -3171,7 +3412,7 @@ async def cmd_privacy(message: Message):
 
 @dp.message(Command("setrules"))
 async def cmd_setrules(message: Message):
-    if not await _admin_only(message):
+    if not await _staff_only(message, "manage"):
         return
     # Восстанавливаем ссылки из entity — иначе часть [текст](url) теряется.
     if len(message.text.split(maxsplit=1)) > 1:
@@ -3192,7 +3433,7 @@ async def cmd_setrules(message: Message):
 
 @dp.message(Command("setwelcome"))
 async def cmd_setwelcome(message: Message):
-    if not await _admin_only(message):
+    if not await _staff_only(message, "manage"):
         return
     # Восстанавливаем ссылки из entity — иначе часть [текст](url) теряется.
     if len(message.text.split(maxsplit=1)) > 1:
@@ -3211,7 +3452,7 @@ async def cmd_setwelcome(message: Message):
 
 @dp.message(Command("addtrigger"))
 async def cmd_addtrigger(message: Message):
-    if not await _admin_only(message):
+    if not await _staff_only(message, "manage"):
         return
     arg = (message.text or "").split(maxsplit=1)
     if len(arg) < 2 or "|" not in arg[1]:
@@ -3229,7 +3470,7 @@ async def cmd_addtrigger(message: Message):
 
 @dp.message(Command("deltrigger"))
 async def cmd_deltrigger(message: Message):
-    if not await _admin_only(message):
+    if not await _staff_only(message, "manage"):
         return
     arg = (message.text or "").split(maxsplit=1)
     if len(arg) < 2:
@@ -3243,7 +3484,7 @@ async def cmd_deltrigger(message: Message):
 
 @dp.message(Command("triggers"))
 async def cmd_triggers(message: Message):
-    if not await _admin_only(message):
+    if not await _staff_only(message):
         return
     trg = storage.triggers()
     if not trg:
@@ -3419,7 +3660,7 @@ def _parse_onoff(message: Message) -> bool | None:
 
 @dp.message(Command("night"))
 async def cmd_night(message: Message):
-    if not await _admin_only(message):
+    if not await _staff_only(message, "manage"):
         return
     v = _parse_onoff(message)
     if v is None:
@@ -3432,7 +3673,7 @@ async def cmd_night(message: Message):
 
 @dp.message(Command("quiet"))
 async def cmd_quiet(message: Message):
-    if not await _admin_only(message):
+    if not await _staff_only(message, "manage"):
         return
     v = _parse_onoff(message)
     if v is None:
@@ -3444,7 +3685,7 @@ async def cmd_quiet(message: Message):
 
 @dp.message(Command("antimat"))
 async def cmd_antimat(message: Message):
-    if not await _admin_only(message):
+    if not await _staff_only(message, "manage"):
         return
     v = _parse_onoff(message)
     if v is None:
@@ -3456,7 +3697,7 @@ async def cmd_antimat(message: Message):
 
 @dp.message(Command("settings"))
 async def cmd_settings(message: Message):
-    if not await _admin_only(message):
+    if not await _staff_only(message):
         return
     def s(name):
         return "вкл" if flag(name) else "выкл"
@@ -3481,7 +3722,8 @@ def stats_text() -> str:
         f"Выдано капч: {stats['challenged']} | прошли: {stats['passed']} | "
         f"завалили: {stats['failed']}\n"
         f"Мутов за картинки: {stats['img_muted']} | банов всего: {stats['banned']}\n"
-        f"Жалоб: {stats.get('reports', 0)} | рейдов: {stats.get('raids', 0)}\n"
+        f"Жалоб: {stats.get('reports', 0)} | рейдов: {stats.get('raids', 0)} | "
+        f"ЧС: {stats.get('crises', 0)}\n"
         f"Риск-мутов: {stats.get('risk_muted', 0)} | кикнуто удалёнок: {stats.get('deleted_kicked', 0)}\n"
         f"Под наблюдением: {sum(1 for v in probation.values() if v['until'] >= now())}\n"
         f"Эталонов: {len(ref_hashes)} | стоп-слов: {len(storage.stopwords())}\n"
@@ -3505,21 +3747,21 @@ def audit_text(n: int = 15) -> str:
 
 @dp.message(Command("stats"))
 async def cmd_stats(message: Message):
-    if not await _admin_only(message):
+    if not await _staff_only(message):
         return
     await message.answer(stats_text())
 
 
 @dp.message(Command("log"))
 async def cmd_log(message: Message):
-    if not await _admin_only(message):
+    if not await _staff_only(message):
         return
     await message.answer(audit_text(20))
 
 
 @dp.message(Command("info"))
 async def cmd_info(message: Message):
-    if not await _admin_only(message):
+    if not await _staff_only(message):
         return
     uid = _target_id(message)
     if await _need_target(message, uid, "Ответь /info на пользователя или укажи id/@ник."):
@@ -3539,8 +3781,10 @@ async def cmd_info(message: Message):
     if await is_admin(chat_id, uid):
         role_line = "Роль: 🛡 TG-админ чата (все права)"
     elif role:
+        override = storage.get_user_perms_override(uid) is not None
+        src = " ✏️ личный набор" if override else ""
         role_line = (f"Роль: {role_label(role)} (ранг {role_rank(role)}, "
-                     f"права: {', '.join(sorted(role_perms(role))) or '—'})")
+                     f"права: {', '.join(sorted(effective_perms(uid))) or '—'}){src}")
     else:
         role_line = "Роль: — (обычный участник)"
     if storage.is_owner(uid):
@@ -3564,7 +3808,7 @@ async def cmd_info(message: Message):
 @dp.message(Command("history"))
 async def cmd_history(message: Message):
     """История наказаний/действий по пользователю (из журнала). /history (ответом|id|@ник)."""
-    if not await _admin_only(message):
+    if not await _staff_only(message):
         return
     uid = _target_id(message)
     if await _need_target(message, uid, "Ответь /history на пользователя или укажи id/@ник."):
@@ -3626,6 +3870,7 @@ async def cmd_help(message: Message):
         "/night /quiet /antimat on|off — режимы\n"
         "\n"
         "🚨 <b>Рейд и заявки</b>\n"
+        "/crisis on|off — автономный ЧС-режим (сам ловит рейд и откатывает)\n"
         "/lockdown on|off | /checkdc | /purgedc\n"
         "/clearrequests — отклонить заявки\n"
         "\n"
@@ -3712,6 +3957,7 @@ PANEL_FLAGS = [
     ("ANTIREPEAT_ENABLED", "Анти-повтор"),
     ("TRIGGERS_ENABLED", "Автоответы"),
     ("ANTIRAID_ENABLED", "Антирейд"),
+    ("AUTO_CRISIS_ENABLED", "🚨 Автопилот ЧС"),
     ("CHECK_JOIN_NAMES", "Имена"),
     ("CAPTCHA_IMAGE", "Фото-капча (ввод кода)"),
     ("AUTO_ACCEPT", "Автоприём заявок"),
@@ -3793,7 +4039,8 @@ PANEL_CATEGORIES = [
                              "ANTIFLOOD_ENABLED", "ANTIREPEAT_ENABLED", "TRIGGERS_ENABLED"]),
     ("entry", "🚪 Вход и капча", ["CHECK_JOIN_NAMES", "CAPTCHA_IMAGE", "AUTO_ACCEPT",
                                   "DC_CHECK_JOIN", "LOCKDOWN", "WELCOME_ENABLED",
-                                  "ANTIRAID_ENABLED", "PHONE_VERIFY_ENABLED"]),
+                                  "ANTIRAID_ENABLED", "AUTO_CRISIS_ENABLED",
+                                  "PHONE_VERIFY_ENABLED"]),
     ("modes", "🌙 Режимы", ["NIGHT_MODE", "QUIET_MODE", "DELETE_SERVICE_MESSAGES",
                             "DELETE_ADMIN_COMMANDS", "DELETE_USER_COMMANDS",
                             "VOTE_ANYONE", "ANON_ADMIN"]),
@@ -3913,7 +4160,7 @@ def role_perm_keyboard(role: str) -> InlineKeyboardMarkup:
 
 
 def asg_keyboard() -> InlineKeyboardMarkup:
-    """Назначенные роли: тап по строке снимает роль; «Выдать роль» — назначить по id."""
+    """Назначенные роли: тап по строке открывает карточку прав юзера; «Выдать роль» — по id."""
     rows = []
     ordered = sorted(storage.roles_all().items(), key=lambda kv: role_rank(kv[1]), reverse=True)
     for u, role in ordered:
@@ -3921,12 +4168,37 @@ def asg_keyboard() -> InlineKeyboardMarkup:
             who = cached_name(int(u))
         except (ValueError, TypeError):
             who = str(u)
-        rows.append([InlineKeyboardButton(text=f"❌ {role_badge(role)} {role_title(role)} — {who}",
-                                          callback_data=f"panel:unrole:{u}")])
+        # ✏️ если у человека личный оверрайд прав (отличается от роли).
+        custom = "✏️" if storage.get_user_perms_override(int(u)) is not None else "👤"
+        rows.append([InlineKeyboardButton(text=f"{custom} {role_badge(role)} {role_title(role)} — {who}",
+                                          callback_data=f"panel:uperm:{u}")])
     if not rows:
         rows.append([InlineKeyboardButton(text="Никому не назначено", callback_data="panel:noop")])
     rows.append([InlineKeyboardButton(text="➕ Выдать роль", callback_data="panel:asgnew")])
     rows.append([InlineKeyboardButton(text="⬅️ К ролям", callback_data="panel:roles")])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def user_perm_keyboard(uid: int) -> InlineKeyboardMarkup:
+    """Тумблеры прав ЛИЧНО для юзера (поверх роли) + сброс к роли и снятие роли."""
+    perms = effective_perms(uid)
+    has_override = storage.get_user_perms_override(uid) is not None
+    rows, buf = [], []
+    for key, label in PERM_LABELS:
+        mark = "✅" if key in perms else "❌"
+        buf.append(InlineKeyboardButton(text=f"{mark} {label}",
+                                        callback_data=f"panel:up:{uid}:{key}"))
+        if len(buf) == 2:
+            rows.append(buf)
+            buf = []
+    if buf:
+        rows.append(buf)
+    if has_override:
+        rows.append([InlineKeyboardButton(text="↩️ Сбросить к правам роли",
+                                          callback_data=f"panel:upreset:{uid}")])
+    rows.append([InlineKeyboardButton(text="❌ Снять роль",
+                                      callback_data=f"panel:unrole:{uid}")])
+    rows.append([InlineKeyboardButton(text="⬅️ К назначениям", callback_data="panel:asg")])
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
@@ -4870,7 +5142,8 @@ async def panel_cb(cb: CallbackQuery):
                f"Банов: {s.get('banned', 0)} | мутов за картинки: {s.get('img_muted', 0)}\n"
                f"Капч: {s.get('challenged', 0)} (прошли {s.get('passed', 0)}, "
                f"завалили {s.get('failed', 0)})\n"
-               f"Жалоб: {s.get('reports', 0)} | рейдов: {s.get('raids', 0)}")
+               f"Жалоб: {s.get('reports', 0)} | рейдов: {s.get('raids', 0)} | "
+               f"ЧС: {s.get('crises', 0)}")
         kb = InlineKeyboardMarkup(inline_keyboard=[[
             InlineKeyboardButton(text="⬅️ К ботам", callback_data="panel:bots")]])
         try:
@@ -4919,16 +5192,51 @@ async def panel_cb(cb: CallbackQuery):
             f"(ключ <code>{esc(role)}</code>).\nСброс к исходному — пришли <code>-</code>.")
     elif action in ("asg", "unrole"):
         if action == "unrole" and len(parts) > 2 and parts[2].lstrip("-").isdigit():
-            storage.set_role(int(parts[2]), None)
+            tgt = int(parts[2])
+            storage.set_role(tgt, None)
+            storage.set_user_perms(tgt, None)   # снимаем и личный оверрайд прав
             await cb.answer("Роль снята")
         else:
             await cb.answer()
         n = len(storage.roles_all())
         txt = (f"👥 <b>Назначения ролей</b> ({n})\n"
-               "Тап по строке — снять роль. «Выдать роль» — назначить по id.\n"
-               "В чате роли раздаёт только владелец (/setrole роль ответом).")
+               "Тап по строке — открыть права человека (можно урезать лично).\n"
+               "«Выдать роль» — назначить по id. В чате роли раздаёт только владелец "
+               "(/setrole роль ответом).")
         try:
             await cb.message.edit_text(txt, reply_markup=asg_keyboard())
+        except TelegramBadRequest:
+            pass
+    elif action in ("uperm", "up", "upreset"):
+        if len(parts) < 3 or not parts[2].lstrip("-").isdigit():
+            await cb.answer("Нет пользователя.", show_alert=True)
+            return
+        tgt = int(parts[2])
+        role = storage.get_role(tgt)
+        if not role:
+            await cb.answer("У человека нет роли.", show_alert=True)
+            return
+        if action == "up" and len(parts) > 3 and parts[3] in dict(PERM_LABELS):
+            perm = parts[3]
+            cur = effective_perms(tgt)
+            cur.discard(perm) if perm in cur else cur.add(perm)
+            storage.set_user_perms(tgt, sorted(cur))   # фиксируем как личный набор
+            await cb.answer("Переключено")
+        elif action == "upreset":
+            storage.set_user_perms(tgt, None)
+            await cb.answer("Сброшено к правам роли")
+        else:
+            await cb.answer()
+        who = cached_name(tgt)
+        perms = ", ".join(sorted(effective_perms(tgt))) or "(нет прав)"
+        override = storage.get_user_perms_override(tgt) is not None
+        src = "личный набор" if override else f"по роли {role_title(role)}"
+        txt = (f"👤 <b>Права: {esc(who)}</b> (<code>{tgt}</code>)\n"
+               f"Роль: {role_label(role)}\nИсточник прав: {src}\n"
+               f"Текущие права: {esc(perms)}\n"
+               "Жми, чтобы переключить лично этому человеку:")
+        try:
+            await cb.message.edit_text(txt, reply_markup=user_perm_keyboard(tgt))
         except TelegramBadRequest:
             pass
     elif action == "asgnew":
@@ -5002,6 +5310,7 @@ async def main():
     dp.message.outer_middleware(ModerationMiddleware())
     dp.edited_message.outer_middleware(ModerationMiddleware())
     asyncio.create_task(janitor())
+    asyncio.create_task(crisis_monitor())
     if not IS_CHILD:
         n = manager.start_all()  # поднять дочерних ботов
         if n:

@@ -302,6 +302,27 @@ def role_perms_all() -> dict:
     return _data.setdefault("role_perms", {})
 
 
+# --- пер-юзерный оверрайд прав (лично человеку, поверх его роли) ---
+
+def get_user_perms_override(user_id: int) -> list | None:
+    """Личный набор прав юзера, если задан из панели, иначе None (=права роли)."""
+    return _data.setdefault("user_perms", {}).get(str(user_id))
+
+
+def set_user_perms(user_id: int, perms: list | None) -> None:
+    """Задать личный набор прав (перебивает роль). None — сбросить к правам роли."""
+    up = _data.setdefault("user_perms", {})
+    if perms is None:
+        up.pop(str(user_id), None)
+    else:
+        up[str(user_id)] = sorted(set(perms))
+    save()
+
+
+def user_perms_all() -> dict:
+    return _data.setdefault("user_perms", {})
+
+
 # --- кастомные названия рангов (только отображаемое имя; ключ роли не меняется) ---
 
 def get_role_title(role: str) -> str | None:
