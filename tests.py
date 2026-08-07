@@ -788,4 +788,8 @@ asyncio.run(run_crisis_escalate())
 
 
 print(f"\nИтог: {PASS} ок, {FAIL} провалов.")
+# Importing the application creates an aiogram HTTP session. Some async tests
+# open it, so close it explicitly before the interpreter exits.
+asyncio.run(bot.bot.session.close())
+
 sys.exit(1 if FAIL else 0)

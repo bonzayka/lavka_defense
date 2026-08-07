@@ -186,11 +186,18 @@ def mention(user) -> str:
 
 
 def mod_name(user) -> str:
-    """Имя админа для решений: 'Модератор #N' в анонимном режиме, иначе ник."""
+    """Публичное имя исполнителя; в анонимном режиме без идентификаторов."""
     if flag("ANON_ADMIN"):
-        return f"Модератор #{storage.mod_number(user.id)}"
+        return "модерация"
     uname = f" (@{user.username})" if getattr(user, "username", None) else ""
     return f"{esc(user.full_name)}{uname}"
+
+
+def mod_decision(user) -> str:
+    """Безопасная для публичного чата подпись решения модерации."""
+    if flag("ANON_ADMIN"):
+        return "Решение модерации."
+    return f"Решение: {mod_name(user)}."
 
 
 def id_mention(uid: int, name: str = "пользователь") -> str:
@@ -525,6 +532,12 @@ def role_label(role: str | None) -> str:
 async def can(chat_id: int, user_id: int, perm: str) -> bool:
     """Право = Telegram-админ (всё) ИЛИ внутренняя роль с этим разрешением."""
     return await is_admin(chat_id, user_id) or has_perm(user_id, perm)
+
+
+async def is_staff_user(chat_id: int, user_id: int) -> bool:
+    """TG-админ, владелец бота или носитель любой внутренней роли."""
+    return (storage.is_owner(user_id) or storage.get_role(user_id) is not None
+            or await is_admin(chat_id, user_id))
 
 
 async def _can(message, perm: str) -> bool:
@@ -1609,6 +1622,11 @@ def crisis_active(chat_id: int) -> bool:
     return bool(st and st.get("until", now()) > now())
 
 
+def _join_notifications_allowed(chat_id: int, raid: bool = False) -> bool:
+    """Не отправлять уведомления о входах во время рейда или ЧС."""
+    return flag("NOTIFY_JOINS") and not raid and not crisis_active(chat_id)
+
+
 async def _crisis_staff_ping(chat_id: int, reason: str) -> None:
     """@-пинг носителей ролей в чате + карточка в ЛС с кнопкой «Беру контроль»."""
     mentions = []
@@ -1622,7 +1640,7 @@ async def _crisis_staff_ping(chat_id: int, reason: str) -> None:
         u = getattr(m, "user", None)
         if u:
             mentions.append(mention(u))
-    line = " ".join(mentions[:10]) if mentions else "модераторы"
+    line = "модераторы" if flag("ANON_ADMIN") else (" ".join(mentions[:10]) or "модераторы")
     kb = InlineKeyboardMarkup(inline_keyboard=[[
         InlineKeyboardButton(text="🛡 Беру контроль", callback_data=f"crisisack:{chat_id}")]])
     await report(chat_id, f"🚨 <b>Похоже на рейд</b> — включил усиленную защиту ({esc(reason)}).\n"
@@ -1736,7 +1754,13 @@ async def challenge(chat_id: int, user) -> None:
             return
 
         newcomer[key] = now()
-        if flag("NOTIFY_JOINS"):
+
+        # Сначала фиксируем вход в антирейде, чтобы не отправить лишнее
+        # уведомление о входе, который сам включил локдаун.
+        raid = flag("LOCKDOWN")
+        if not raid:
+            raid = await check_raid(chat_id)
+        if _join_notifications_allowed(chat_id, raid):
             await notify_panel(event_card("👤 Вход в группу", user))
 
         # ПАНИКА (/lockdown): банить всех входящих без капчи.
@@ -1747,7 +1771,6 @@ async def challenge(chat_id: int, user) -> None:
             return
 
         # Антирейд: при рейде либо баним входящих, либо просто продолжаем капчу.
-        raid = await check_raid(chat_id)
         if raid and config.RAID_AUTOBAN:
             pending.pop(key, None)
             await ban_user(chat_id, user.id)
@@ -2188,7 +2211,6 @@ async def on_moderation(cb: CallbackQuery):
             await cb.answer(reason, show_alert=True)
             return
 
-    admin = mod_name(cb.from_user)
     actor = f"админ {cb.from_user.full_name}"
     try:  # ник цели (чтобы было видно, КОГО наказали)
         _m = await bot.get_chat_member(gid, uid)
@@ -2199,25 +2221,25 @@ async def on_moderation(cb: CallbackQuery):
         await ban_user(gid, uid)
         audit(actor, "ban", uid)
         await cb.answer("Забанен")
-        result = f"🔨 {tgt} — бан. Решение: {admin}."
+        result = f"🔨 {tgt} — бан. {mod_decision(cb.from_user)}"
     elif action == "banwipe":
         await ban_user(gid, uid)
         n = await purge_recent(gid, uid)
         audit(actor, "ban+чистка", uid)
         await cb.answer("Бан + чистка")
-        result = f"🧹 {tgt} — бан + удалено {n} сообщ. Решение: {admin}."
+        result = f"🧹 {tgt} — бан + удалено {n} сообщ. {mod_decision(cb.from_user)}"
     elif action == "mute":
         await mute_user(gid, uid, secs)
         audit(actor, f"mute {human_duration(secs)}", uid)
         await cb.answer("Замучен")
-        result = f"🔇 {tgt} — мут ({human_duration(secs)}). Решение: {admin}."
+        result = f"🔇 {tgt} — мут ({human_duration(secs)}). {mod_decision(cb.from_user)}"
     elif action == "unmute":
         try:
             await bot.restrict_chat_member(gid, uid, permissions=FULL)
         except TelegramBadRequest as e:
             log.warning("Не смог размутить %s: %s", uid, e)
         await cb.answer("Размучен")
-        result = f"✅ {tgt} — размут. Решение: {admin}."
+        result = f"✅ {tgt} — размут. {mod_decision(cb.from_user)}"
     else:
         await cb.answer()
         return
@@ -2259,7 +2281,6 @@ async def on_verify_review(cb: CallbackQuery):
     pend = storage.get_pending_verify(uid) or {}
     prefix = pend.get("prefix", "")
     tail = pend.get("tail", "")
-    admin = mod_name(cb.from_user)
     try:
         _m = await bot.get_chat_member(gid, uid)
         user_obj = _m.user
@@ -2279,13 +2300,13 @@ async def on_verify_review(cb: CallbackQuery):
         await _safe_dm(uid, "✅ Модератор одобрил твою заявку. Доступ в чат открыт, добро пожаловать!")
         audit(f"админ {cb.from_user.full_name}", "верификация одобрена", uid)
         await cb.answer("Впущен")
-        result = f"✅ {tgt} — впущен вручную. Решение: {admin}."
+        result = f"✅ {tgt} — впущен вручную. {mod_decision(cb.from_user)}"
     elif decision == "no":
         await _fail_verify(uid, user_obj, tail or "—")
         await _safe_dm(uid, "🚫 Модератор отклонил твою заявку на доступ к чату.")
         audit(f"админ {cb.from_user.full_name}", "верификация отклонена", uid)
         await cb.answer("Отклонён")
-        result = f"🚫 {tgt} — отклонён. Решение: {admin}."
+        result = f"🚫 {tgt} — отклонён. {mod_decision(cb.from_user)}"
     else:
         await cb.answer()
         return
@@ -2327,8 +2348,9 @@ async def on_clearreq(cb: CallbackQuery):
     await cb.answer(f"Отклоняю {n} заявок…")
     declined = await clear_requests(gid, cb.from_user.id)
     try:
+        suffix = " Решение модерации." if flag("ANON_ADMIN") else f" ({mod_name(cb.from_user)})"
         await cb.message.edit_text(cb.message.html_text +
-                                   f"\n\n🧹 Отклонено заявок: {declined}. ({mod_name(cb.from_user)})")
+                                   f"\n\n🧹 Отклонено заявок: {declined}.{suffix}")
     except TelegramBadRequest:
         pass
 
@@ -2352,8 +2374,9 @@ async def on_crisis_ack(cb: CallbackQuery):
     await cb.answer("Принято — ручное управление, авто-эскалация остановлена.")
     audit("ЧС-автопилот", "модер взял контроль", cb.from_user.id, cb.from_user.full_name)
     try:
-        await cb.message.edit_text(cb.message.html_text +
-                                   f"\n\n🛡 Контроль взял {mod_name(cb.from_user)}.")
+        result = ("🛡 Контроль принят модерацией." if flag("ANON_ADMIN") else
+                  f"🛡 Контроль взял {mod_name(cb.from_user)}.")
+        await cb.message.edit_text(cb.message.html_text + f"\n\n{result}")
     except TelegramBadRequest:
         pass
 
@@ -2390,8 +2413,12 @@ def vote_render(v: dict) -> str:
     ]
     if v["yes"]:
         lines.append("\nПроголосовали:")
+        anonymous = v.get("anonymous_yes", set())
         for uid, name in v["yes"].items():
-            lines.append(f"👍🏻 {esc(name)} #{uid}")
+            if uid in anonymous:
+                lines.append("👍🏻 Модерация")
+            else:
+                lines.append(f"👍🏻 {esc(name)} #{uid}")
     return "\n".join(lines)
 
 
@@ -2428,8 +2455,11 @@ async def cmd_vb(message: Message):
         pass
     vote_seq += 1
     vid = vote_seq
+    anonymous_starter = bool(flag("ANON_ADMIN") and is_staff)
     v = {"chat": message.chat.id, "target": target.id, "tname": target.full_name,
-         "starter_name": mod_name(starter), "yes": {starter.id: starter.full_name},
+         "starter_name": "Модерация" if anonymous_starter else esc(starter.full_name),
+         "yes": {starter.id: starter.full_name},
+         "anonymous_yes": {starter.id} if anonymous_starter else set(),
          "no": set(), "done": False, "ts": now()}
     votes[vid] = v
     # Отправляем СРАЗУ с клавиатурой (по vote_id) — кнопки не теряются.
@@ -2458,15 +2488,23 @@ async def on_vote(cb: CallbackQuery):
             votes.pop(mid, None)
             await cb.answer("Голосование отменено.")
             try:
-                await cb.message.edit_text(f"❌ Голосование отменено админом {mod_name(cb.from_user)}.")
+                text = ("❌ Голосование отменено модерацией." if flag("ANON_ADMIN") else
+                        f"❌ Голосование отменено админом {mod_name(cb.from_user)}.")
+                await cb.message.edit_text(text)
             except TelegramBadRequest:
                 pass
             return
         v["no"].add(uid)
         v["yes"].pop(uid, None)
+        v.setdefault("anonymous_yes", set()).discard(uid)
     else:                                             # 👍 (в т.ч. админский — обычный голос)
         v["yes"][uid] = cb.from_user.full_name
         v["no"].discard(uid)
+        anonymous = v.setdefault("anonymous_yes", set())
+        if flag("ANON_ADMIN") and await is_staff_user(v["chat"], uid):
+            anonymous.add(uid)
+        else:
+            anonymous.discard(uid)
 
     if len(v["yes"]) >= config.VOTE_LIMIT and not v["done"]:
         v["done"] = True
@@ -2505,11 +2543,11 @@ async def _staff_only(message: Message, perm: str | None = None) -> bool:
     if not message.from_user:
         return False
     uid = message.from_user.id
-    if storage.is_owner(uid):
-        return True
     if perm is not None:
+        if storage.is_owner(uid):
+            return True
         return await can(message.chat.id, uid, perm)
-    return await is_admin(message.chat.id, uid) or storage.get_role(uid) is not None
+    return await is_staff_user(message.chat.id, uid)
 
 
 def _mention_uid(message: Message):
@@ -2929,7 +2967,8 @@ async def cmd_crisis(message: Message):
                 f"усиливает защиту и откатывает. /crisis on — включить вручную.")
         return
     if v:
-        await enter_crisis(chat_id, f"вручную ({mod_name(message.from_user)})", force=True)
+        reason = "вручную (модерация)" if flag("ANON_ADMIN") else f"вручную ({mod_name(message.from_user)})"
+        await enter_crisis(chat_id, reason, force=True)
         await message.answer("🚨 ЧС-режим включён вручную.")
     else:
         if crisis_active(chat_id):
@@ -3085,7 +3124,7 @@ async def cmd_ban(message: Message):
     await ban_user(message.chat.id, uid, seconds)
     rp = f" Причина: {esc(reason)}." if reason else ""
     await message.answer(f"🔨 {id_mention(uid)} забанен ({human_duration(seconds)})."
-                         f"{rp} Решение: {mod_name(message.from_user)}.")
+                         f"{rp} {mod_decision(message.from_user)}")
 
 
 @dp.message(Command("unban"))
@@ -3117,8 +3156,40 @@ async def cmd_mute(message: Message):
     await mute_user(message.chat.id, uid, seconds)
     rp = f" Причина: {esc(reason)}." if reason else ""
     await message.answer(f"🔇 {id_mention(uid)} в муте ({human_duration(seconds)})."
-                         f"{rp} Решение: {mod_name(message.from_user)}.",
+                         f"{rp} {mod_decision(message.from_user)}",
                          reply_markup=mod_keyboard(message.chat.id, uid))
+
+
+@dp.message(Command("del", "delete"))
+async def cmd_del(message: Message):
+    """Тихо удалить сообщение, на которое ответили командой /del."""
+    if not await _can(message, "delete"):
+        return
+    target = message.reply_to_message
+    if not target:
+        await message.answer("Ответь командой /del на сообщение, которое нужно удалить.")
+        return
+
+    deleted = False
+    try:
+        await target.delete()
+        deleted = True
+    except TelegramBadRequest as e:
+        log.warning("Не смог удалить сообщение %s в чате %s: %s",
+                    target.message_id, message.chat.id, e)
+        await _maybe_rights_alert(message.chat.id, e)
+    finally:
+        try:
+            await message.delete()
+        except TelegramBadRequest:
+            pass
+
+    if deleted:
+        target_user = getattr(target, "from_user", None)
+        audit(f"админ {message.from_user.full_name}", "delete message",
+              getattr(target_user, "id", 0), getattr(target_user, "full_name", ""))
+    else:
+        await bot.send_message(message.chat.id, "Не удалось удалить сообщение: проверь права бота.")
 
 
 @dp.message(Command("unmute"))
@@ -3597,6 +3668,12 @@ async def nl_command(message: Message):
     word = re.match(r"^\s*([а-яёa-z]+)", text).group(1)
     if not await can(chat_id, message.from_user.id, _WORD_PERM.get(word, "ban")):
         return
+    # Прячем запрос до проверки цели, чтобы даже неудачное действие
+    # администратора не оставалось в общем чате.
+    try:
+        await message.delete()
+    except TelegramBadRequest:
+        pass
     # Само-защита/иерархия — только для карающих слов (размут/разбан пропускаем).
     if word in ("мут", "mute", "бан", "ban", "варн", "warn", "кик", "kick"):
         reason = await _deny_target(chat_id, message.from_user.id, uid)
@@ -3604,14 +3681,9 @@ async def nl_command(message: Message):
             await message.answer(reason)
             return
     seconds = parse_duration(text)
-    by = f" Решение: {mod_name(message.from_user)}."
+    by = f" {mod_decision(message.from_user)}"
     audit(f"админ {message.from_user.full_name}", f"{word} {human_duration(seconds)}",
           uid, target.full_name)
-    try:
-        await message.delete()
-    except TelegramBadRequest:
-        pass
-
     if word in ("мут", "mute"):
         await mute_user(chat_id, uid, seconds)
         await report(chat_id, f"🔇 {mention(target)} в муте ({human_duration(seconds)}).{by}",
@@ -3731,14 +3803,15 @@ def stats_text() -> str:
     )
 
 
-def audit_text(n: int = 15) -> str:
+def audit_text(n: int = 15, *, include_actor: bool = True) -> str:
     items = storage.get_audit(n)
     if not items:
         return "📒 Журнал действий пуст."
     lines = ["📒 <b>Журнал действий</b> (свежие сверху)"]
     for e in items:
         who = e.get("target_name") or e.get("target_id")
-        line = f"{e['ts']} · {esc(e['actor'])} → <b>{esc(e['action'])}</b> · {esc(str(who))}"
+        actor = f"{esc(e['actor'])} → " if include_actor else ""
+        line = f"{e['ts']} · {actor}<b>{esc(e['action'])}</b> · {esc(str(who))}"
         if e.get("reason"):
             line += f" ({esc(e['reason'])})"
         lines.append(line)
@@ -3756,7 +3829,8 @@ async def cmd_stats(message: Message):
 async def cmd_log(message: Message):
     if not await _staff_only(message):
         return
-    await message.answer(audit_text(20))
+    public_anon = (message.chat.type in ("group", "supergroup") and flag("ANON_ADMIN"))
+    await message.answer(audit_text(20, include_actor=not public_anon))
 
 
 @dp.message(Command("info"))
@@ -3820,8 +3894,10 @@ async def cmd_history(message: Message):
         return
     name = items[0].get("target_name") or str(uid)
     lines = [f"🗂 <b>История</b> — {esc(str(name))} (<code>{uid}</code>), свежие сверху:"]
+    public_anon = (message.chat.type in ("group", "supergroup") and flag("ANON_ADMIN"))
     for e in items:
-        line = f"{e['ts']} · {esc(e['actor'])} → <b>{esc(e['action'])}</b>"
+        actor = f"{esc(e['actor'])} → " if not public_anon else ""
+        line = f"{e['ts']} · {actor}<b>{esc(e['action'])}</b>"
         if e.get("reason"):
             line += f" ({esc(e['reason'])})"
         lines.append(line)
@@ -3846,6 +3922,7 @@ async def cmd_help(message: Message):
         "🛡 <b>Команды админов</b>\n"
         "\n"
         "🔨 <b>Модерация</b>\n"
+        "/del — тихо удалить сообщение ответом\n"
         "/ban /unban /mute /unmute — ответом, по id или @нику\n"
         "  (срок и причина: <code>/mute @ivan 3 дня флуд</code>)\n"
         "/warn /unwarn — предупреждения\n"
@@ -3922,20 +3999,21 @@ async def on_edited(message: Message):
 # --------------------------------- удаление команд админов после выполнения
 
 class CommandCleanupMiddleware(BaseMiddleware):
-    """После обработки удаляет в группе сообщение-команду админа (чистый чат)."""
+    """До обработки скрывает команду всего персонала в групповом чате."""
 
     async def __call__(self, handler, event, data):
-        result = await handler(event, data)
         msg = event
         try:
-            if (flag("DELETE_ADMIN_COMMANDS") and getattr(msg, "text", None)
+            cleanup = flag("DELETE_ADMIN_COMMANDS") or flag("ANON_ADMIN")
+            if (cleanup and getattr(msg, "text", None)
                     and msg.text.startswith("/")
                     and msg.chat.type in ("group", "supergroup")
-                    and msg.from_user and await is_admin(msg.chat.id, msg.from_user.id)):
+                    and msg.from_user
+                    and await is_staff_user(msg.chat.id, msg.from_user.id)):
                 await bot.delete_message(msg.chat.id, msg.message_id)
         except TelegramBadRequest:
             pass
-        return result
+        return await handler(event, data)
 
 
 # ----------------------------------------- админ-панель в личке (пароль)
@@ -4022,6 +4100,7 @@ FLAG_LABELS = dict(PANEL_FLAGS)
 
 # Внутренние права ролей (для редактора «Роли и права» в панели).
 PERM_LABELS = [
+    ("delete", "🗑 Удаление"),
     ("mute", "🔇 Мут"),
     ("ban", "🔨 Бан"),
     ("warn", "⚠️ Варн"),
