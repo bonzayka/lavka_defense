@@ -302,7 +302,9 @@ def name_check(name: str):
         return None, None
     if textguard.has_profanity(name):
         return "мат в имени", "мат в имени"
-    sw = textguard.find_stopword(name, storage.stopwords())
+    sw = textguard.find_stopword(name, storage.stopwords(),
+                                 fuzzy=flag("FUZZY_STOPWORDS"),
+                                 max_distance=num("FUZZY_MAX_DISTANCE"))
     if not sw:
         return None, None
     if storage.is_hidden_word(sw):
@@ -805,6 +807,7 @@ class TrackMiddleware(BaseMiddleware):
             buf = recent.setdefault(key, deque(maxlen=200))
             buf.append((msg.message_id, now()))
             msgcount[key] = msgcount.get(key, 0) + 1
+            storage.bump_activity(msg.chat.id, msg.from_user.id, now().isoformat())
             if msg.from_user.username:                 # запоминаем @ник -> id для таргета по нику
                 uname_cache[msg.from_user.username.lower()] = msg.from_user.id
             # Сигнал ЧС: волна сообщений от многих РАЗНЫХ юзеров за короткое окно.
@@ -1209,6 +1212,8 @@ class ModerationMiddleware(BaseMiddleware):
                 or storage.is_trusted(chat_id, user.id)):
             return False
 
+        regular = is_regular(chat_id, user.id)
+
         # Наблюдение (probation): подозрительный новичок в первые минуты.
         # Классический кейс — «иностранный акк спустя пару минут кидает фотки/ссылку».
         if flag("PROBATION_ENABLED"):
@@ -1279,19 +1284,20 @@ class ModerationMiddleware(BaseMiddleware):
             return True
 
         # Ссылки (если не в белом списке).
-        if (flag("BLOCK_LINKS") and not storage.link_allowed(chat_id, user.id)
+        if (flag("BLOCK_LINKS") and not regular
+                and not storage.link_allowed(chat_id, user.id)
                 and has_link(msg)):
             await apply_punishment(msg, "ссылка/инвайт", action_for("LINK_ACTION"))
             return True
 
         # Антифлуд.
-        if flag("ANTIFLOOD_ENABLED") and antiflood_hit(chat_id, user.id):
+        if flag("ANTIFLOOD_ENABLED") and not regular and antiflood_hit(chat_id, user.id):
             await apply_punishment(msg, "флуд", action_for("ANTIFLOOD_ACTION"))
             return True
 
         # Анти-повтор: одинаковые сообщения подряд.
         body = (msg.text or msg.caption or "").strip().lower()
-        if flag("ANTIREPEAT_ENABLED") and body:
+        if flag("ANTIREPEAT_ENABLED") and not regular and body:
             rk = (chat_id, user.id)
             st = repeat.get(rk)
             if st and st[0] == body:
@@ -1306,11 +1312,13 @@ class ModerationMiddleware(BaseMiddleware):
 
         # Мат и стоп-слова.
         text = msg.text or msg.caption or ""
-        if text:
+        if text and not regular:
             if flag("ANTIMAT_ENABLED") and textguard.has_profanity(text):
                 await apply_punishment(msg, "мат", action_for("TEXT_ACTION"))
                 return True
-            sw = textguard.find_stopword(text, storage.stopwords())
+            sw = textguard.find_stopword(text, storage.stopwords(),
+                                         fuzzy=flag("FUZZY_STOPWORDS"),
+                                         max_distance=num("FUZZY_MAX_DISTANCE"))
             if sw:
                 if storage.is_hidden_word(sw):
                     # Скрытое слово: в чате — обезличенная причина, в журнале — настоящее слово.
@@ -1617,6 +1625,31 @@ def wave_detect(chat_id: int, uid: int, t: datetime | None = None) -> int:
     return len({u for _, u in buf})
 
 
+def _parse_ts(ts):
+    if not ts:
+        return None
+    try:
+        dt = datetime.fromisoformat(str(ts))
+    except ValueError:
+        return None
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt
+
+
+def is_regular(chat_id: int, user_id: int) -> bool:
+    if not flag("REGULARS_ENABLED"):
+        return False
+    act = storage.get_activity(chat_id, user_id)
+    if not act:
+        return False
+    first = _parse_ts(act.get("first_seen"))
+    if not first:
+        return False
+    return ((now() - first).days >= num("REGULAR_MIN_DAYS")
+            and act.get("msgs", 0) >= num("REGULAR_MIN_MSGS"))
+
+
 def crisis_active(chat_id: int) -> bool:
     st = crisis.get(chat_id)
     return bool(st and st.get("until", now()) > now())
@@ -1774,7 +1807,8 @@ async def challenge(chat_id: int, user) -> None:
         if raid and config.RAID_AUTOBAN:
             pending.pop(key, None)
             await ban_user(chat_id, user.id)
-            await notify_panel(event_card("🛡 Бан по антирейду", user))
+            if _join_notifications_allowed(chat_id, raid):
+                await notify_panel(event_card("🛡 Бан по антирейду", user))
             return
 
         # Фильтр по датацентру (DC5 = частый у ботов).
@@ -1821,7 +1855,7 @@ async def challenge(chat_id: int, user) -> None:
                     audit("риск-фильтр", f"мут входа (скор {score})", user.id, user.full_name)
                     await report(chat_id, f"🔇 {mention(user)} в муте на входе — "
                                           f"риск {score}: {esc(why)}.", mod_keyboard(chat_id, user.id))
-                    if flag("NOTIFY_VIOLATIONS"):
+                    if flag("NOTIFY_VIOLATIONS") and not raid and not crisis_active(chat_id):
                         await notify_panel(event_card("🚨 Риск-профиль (мут на входе)",
                                                       user, reason=f"скор {score}: {why}"))
                     return
@@ -1829,7 +1863,7 @@ async def challenge(chat_id: int, user) -> None:
                 start_probation(chat_id, user, score, reasons)
             elif v == "watch":
                 start_probation(chat_id, user, score, reasons)
-                if flag("NOTIFY_JOINS"):
+                if _join_notifications_allowed(chat_id, raid):
                     await notify_panel(event_card("👀 Под наблюдением", user,
                                                   reason=f"скор {score}: {'; '.join(reasons[:4])}"))
 
@@ -3874,6 +3908,14 @@ async def cmd_info(message: Message):
         f"ссылки: {'разрешены' if storage.link_allowed(chat_id, uid) else 'нет'}\n"
         f"Сообщений (с запуска бота): {msgcount.get((chat_id, uid), 0)}"
     )
+    act = storage.get_activity(chat_id, uid)
+    if act:
+        _first = _parse_ts(act.get("first_seen"))
+        _reg = "старожил (мягкий режим)" if is_regular(chat_id, uid) else "обычный"
+        _amsgs = act.get("msgs", 0)
+        txt += chr(10) + f"Активность: {_amsgs} сообщений всего | статус: {_reg}"
+        if _first:
+            txt += chr(10) + f"Первое сообщение: {fmt_when(_first)}"
     if joined:
         txt += f"\nВошёл: {fmt_when(joined)}"
     await message.answer(txt)
@@ -3940,6 +3982,7 @@ async def cmd_help(message: Message):
         "/addword /delword /words — стоп-слова\n"
         "  (скрытые — не видны в чате: <code>/addword слово скрыто</code>, "
         "/hideword, /showword)\n"
+        "  (ловят похожие: «спааам», «с-п-а-м» — тумблер «Похожие слова» в /admin)\n"
         "\n"
         "💬 <b>Чат</b>\n"
         "/rules /setrules — правила | /setwelcome — приветствие\n"
@@ -4059,6 +4102,8 @@ PANEL_FLAGS = [
     ("PROBATION_ON_MEDIA", "Набл.: медиа → мут"),
     ("PROBATION_ON_LINK", "Набл.: ссылка → мут"),
     ("AUTO_CLEAN_DELETED", "Автосвип удалёнок"),
+    ("FUZZY_STOPWORDS", "Похожие слова"),
+    ("REGULARS_ENABLED", "Мягко к старожилам"),
 ]
 
 # Числовые настройки, редактируемые из панели.
@@ -4115,7 +4160,8 @@ PANEL_CATEGORIES = [
     ("spam", "🛡 Антиспам", ["ANTIMAT_ENABLED", "BLOCK_LINKS", "ALLOW_MENTIONS",
                              "BLOCK_FORWARDS", "BLOCK_CHANNEL_MESSAGES", "BLOCK_APK",
                              "BLOCK_PREMIUM_EMOJI", "GORE_ON", "DEANON_ENABLED",
-                             "ANTIFLOOD_ENABLED", "ANTIREPEAT_ENABLED", "TRIGGERS_ENABLED"]),
+                             "ANTIFLOOD_ENABLED", "ANTIREPEAT_ENABLED", "TRIGGERS_ENABLED",
+                             "FUZZY_STOPWORDS"]),
     ("entry", "🚪 Вход и капча", ["CHECK_JOIN_NAMES", "CAPTCHA_IMAGE", "AUTO_ACCEPT",
                                   "DC_CHECK_JOIN", "LOCKDOWN", "WELCOME_ENABLED",
                                   "ANTIRAID_ENABLED", "AUTO_CRISIS_ENABLED",
@@ -4127,7 +4173,7 @@ PANEL_CATEGORIES = [
                                   "REPORT_ENABLED"]),
     ("profile", "🎯 Профиль-фильтр", ["RISK_ENABLED", "PROBATION_ENABLED",
                                       "PROBATION_ON_MEDIA", "PROBATION_ON_LINK",
-                                      "AUTO_CLEAN_DELETED"]),
+                                      "AUTO_CLEAN_DELETED", "REGULARS_ENABLED"]),
 ]
 CAT_FLAGS = {c: keys for c, _, keys in PANEL_CATEGORIES}
 CAT_TITLES = {c: title for c, title, _ in PANEL_CATEGORIES}

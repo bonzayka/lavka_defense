@@ -36,6 +36,7 @@ _DEFAULT = {
     "sticker_packs": [],      # [set_name, ...] — стикерпаки, которые НЕ проверять на 18+
     "verified_phones": {},    # str(user_id) -> {"prefix","tail","ts"} — прошли верификацию по номеру (глобально)
     "pending_verify": {},     # str(user_id) -> {"chat","notice","ts"} — ждут подтверждения номера в ЛС
+    "activity": {},           # "chat:user" -> {"msgs","first_seen","last_seen"} — активность (старожилы + бэкап)
 }
 
 AUDIT_LIMIT = 200
@@ -486,3 +487,36 @@ def get_audit_for(target_id: int, n: int = 20) -> list[dict]:
     """История действий по конкретному пользователю (свежие сверху)."""
     hits = [e for e in _data.get("audit", []) if str(e.get("target_id")) == str(target_id)]
     return list(reversed(hits[-n:]))
+
+
+# --- активность участников (персистится; видна админу в /info и в бэкапе) ---
+
+def activity_all() -> dict:
+    return _data.setdefault("activity", {})
+
+
+def get_activity(chat_id: int, user_id: int) -> dict:
+    return activity_all().get(_key(chat_id, user_id), {})
+
+
+def bump_activity(chat_id: int, user_id: int, ts_iso: str, add: int = 1,
+                  do_save: bool = False) -> None:
+    """Инкремент счётчика сообщений. save() дорогой — по умолчанию
+    копим в памяти и сбрасываем раз в janitor (_flush_activity в bot.py)."""
+    k = _key(chat_id, user_id)
+    rec = activity_all().setdefault(k, {})
+    if not rec.get("first_seen"):
+        rec["first_seen"] = ts_iso
+    rec["msgs"] = int(rec.get("msgs", 0)) + add
+    rec["last_seen"] = ts_iso
+    if do_save:
+        save()
+
+
+def set_activity_msgs(chat_id: int, user_id: int, msgs: int, ts_iso: str) -> None:
+    """Переписать счётчик (для flush: base + сессия)."""
+    k = _key(chat_id, user_id)
+    rec = activity_all().setdefault(k, {"msgs": 0})
+    rec["msgs"] = msgs
+    rec["last_seen"] = ts_iso
+    rec.setdefault("first_seen", ts_iso)

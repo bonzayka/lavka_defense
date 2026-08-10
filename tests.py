@@ -46,6 +46,19 @@ DIRTY = ["хуй", "нахуй", "ахуеть", "пизда", "ебать", "з
 check("antimat: нет ложных", not any(textguard.has_profanity(w) for w in CLEAN))
 check("antimat: ловит мат", all(textguard.has_profanity(w) for w in DIRTY))
 
+# ---- нечёткое совпадение стоп-слов (fuzzy) ----
+_SW = ["спам", "реклама"]
+check("fuzzy: точное", textguard.find_stopword("купи спам", _SW, fuzzy=True))
+check("fuzzy: растянуто", textguard.find_stopword("спааам", _SW, fuzzy=True))
+check("fuzzy: разделители", textguard.find_stopword("с-п-а-м", _SW, fuzzy=True))
+check("fuzzy: пробелы", textguard.find_stopword("с п а м", _SW, fuzzy=True))
+check("fuzzy: опечатка длинного", textguard.find_stopword("рекламма", _SW, fuzzy=True))
+check("fuzzy: пропуск буквы", textguard.find_stopword("реклам", _SW, fuzzy=True))
+check("fuzzy: не задевает храм", not textguard.find_stopword("храм", _SW, fuzzy=True))
+check("fuzzy: не задевает класс", not textguard.find_stopword("класс", _SW, fuzzy=True))
+check("fuzzy: не задевает река", not textguard.find_stopword("река", _SW, fuzzy=True))
+check("fuzzy=off: только точное", not textguard.find_stopword("спааам", _SW, fuzzy=False))
+
 # ---- парсер длительности ----
 check("dur 3 дня", bot.parse_duration("3 дня") == 259200)
 check("dur 2 часа", bot.parse_duration("2 часа") == 7200)

@@ -74,24 +74,85 @@ def has_profanity(text: str) -> bool:
     return any(bad in collapsed for bad in _COLLAPSED_BAD)
 
 
-def find_stopword(text: str, stopwords) -> str | None:
-    """Вернуть первое сработавшее стоп-слово или None."""
+def _squeeze(s: str) -> str:
+    """Схлопнуть повторы букв: «спааам» -> «спам» (любой повтор -> 1)."""
+    out = []
+    prev = ""
+    for ch in s:
+        if ch != prev:
+            out.append(ch)
+            prev = ch
+    return "".join(out)
+
+
+def _levenshtein(a: str, b: str, max_d: int) -> int:
+    """Расстояние редактирования с ранним выходом (если > max_d)."""
+    if abs(len(a) - len(b)) > max_d:
+        return max_d + 1
+    prev = list(range(len(b) + 1))
+    for i, ca in enumerate(a, 1):
+        cur = [i]
+        best = cur[0]
+        for j, cb in enumerate(b, 1):
+            cost = 0 if ca == cb else 1
+            v = min(prev[j] + 1, cur[j - 1] + 1, prev[j - 1] + cost)
+            cur.append(v)
+            if v < best:
+                best = v
+        if best > max_d:
+            return max_d + 1
+        prev = cur
+    return prev[-1]
+
+
+def _fuzzy_hit(sw: str, collapsed_sq: str, max_d: int) -> bool:
+    """Опечатка на <=max_d правок: скользящим окном по схлопнутому тексту.
+    Только для длинных стоп-слов (>=5), чтобы «спам»/«храм» не путались."""
+    if max_d <= 0 or len(sw) < 5:
+        return False
+    win = len(sw)
+    hay = collapsed_sq
+    if len(hay) < win - max_d:
+        return False
+    for i in range(0, len(hay) - win + max_d + 1):
+        if _levenshtein(sw, hay[i:i + win + max_d], max_d) <= max_d:
+            return True
+    return False
+
+
+def find_stopword(text: str, stopwords, fuzzy: bool = False,
+                  max_distance: int = 1) -> str | None:
+    """Вернуть первое сработавшее стоп-слово или None.
+
+    fuzzy=True ловит обходы: растянутые буквы (спааам),
+    разделители (с-п-а-м) и опечатки на 1 символ (спамм) — только для
+    пользовательских стоп-слов, мат-фильтр сюда не входит."""
     if not stopwords:
         return None
     norm = normalize(text)
-    collapsed = "".join(_words(norm))
+    collapsed = "".join(_words(norm))          # «с п а м» -> «спам» (снимает разделители)
+    collapsed_sq = _squeeze(collapsed) if fuzzy else ""
     for sw in stopwords:
         s = sw.lower()
-        if s and (s in norm or s in collapsed):
+        if not s:
+            continue
+        if s in norm or s in collapsed:        # быстрый точный путь (как раньше)
             return sw
+        if fuzzy:
+            s_sq = _squeeze(s)
+            if s_sq and s_sq in collapsed_sq:  # растянутые буквы
+                return sw
+            if _fuzzy_hit(s_sq, collapsed_sq, max_distance):  # опечатки
+                return sw
     return None
 
 
-def is_bad_name(name: str, stopwords) -> str | None:
+def is_bad_name(name: str, stopwords, fuzzy: bool = False,
+                max_distance: int = 1) -> str | None:
     """Проверка имени/ника вступающего: мат -> 'мат', стоп-слово -> само слово."""
     if not name:
         return None
     if has_profanity(name):
         return "мат в имени"
-    sw = find_stopword(name, stopwords)
+    sw = find_stopword(name, stopwords, fuzzy, max_distance)
     return f"стоп-слово «{sw}» в имени" if sw else None
