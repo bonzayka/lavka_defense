@@ -59,12 +59,6 @@ check("fuzzy: не задевает класс", not textguard.find_stopword("к
 check("fuzzy: не задевает река", not textguard.find_stopword("река", _SW, fuzzy=True))
 check("fuzzy=off: только точное", not textguard.find_stopword("спааам", _SW, fuzzy=False))
 
-# ---- игра «кубик»: лидеры/переброс ----
-check("dice: один лидер", bot._dice_leaders({1: 6, 2: 3, 3: 5}) == [1])
-check("dice: ничья на максимуме", set(bot._dice_leaders({1: 6, 2: 6, 3: 4})) == {1, 2})
-check("dice: все равны", set(bot._dice_leaders({1: 2, 2: 2})) == {1, 2})
-check("dice: пусто", bot._dice_leaders({}) == [])
-
 # ---- парсер длительности ----
 check("dur 3 дня", bot.parse_duration("3 дня") == 259200)
 check("dur 2 часа", bot.parse_duration("2 часа") == 7200)
