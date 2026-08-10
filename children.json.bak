@@ -1,0 +1,16 @@
+[
+ {
+  "id": "111111",
+  "token": "111111:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+  "username": "a",
+  "owner": 10,
+  "password": "pa"
+ },
+ {
+  "id": "333333",
+  "token": "333333:CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC",
+  "username": "c",
+  "owner": 10,
+  "password": "pc"
+ }
+]
