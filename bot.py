@@ -4012,6 +4012,125 @@ async def cmd_ping(message: Message):
     await message.answer("pong ✅ бот живой")
 
 
+# ------------------------------------------------------------- игра «кубик»
+def _dice_leaders(rolls: dict) -> list:
+    """uid с максимальным броском: один — победитель, несколько — переброс."""
+    if not rolls:
+        return []
+    top = max(rolls.values())
+    return [u for u, v in rolls.items() if v == top]
+
+
+def _dice_board(game: dict) -> str:
+    ps = game["players"]
+    who = "\n".join("• " + id_mention(u, n) for u, n in ps.items()) or "<i>пока никто</i>"
+    return ("🎲 <b>Игра в кубик</b>\n"
+            "Игроков: <b>%d</b>\n%s\n\n"
+            "Жми «🎲 Играть», затем организатор — «▶️ Бросать». У кого больше — тот выиграл."
+            % (len(ps), who))
+
+
+def _dice_kb() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(inline_keyboard=[[
+        InlineKeyboardButton(text="🎲 Играть", callback_data="dg:join"),
+        InlineKeyboardButton(text="▶️ Бросать", callback_data="dg:go"),
+        InlineKeyboardButton(text="❌ Отмена", callback_data="dg:cancel"),
+    ]])
+
+
+@dp.message(Command("kubik", "dice", "game"), F.chat.type.in_({"group", "supergroup"}))
+async def dice_start(message: Message):
+    chat_id = message.chat.id
+    if chat_id in dice_games:
+        await message.reply("🎲 Игра уже идёт — жми кнопки под сообщением игры.")
+        return
+    game = {"players": {}, "host": message.from_user.id, "rolling": False, "msg_id": 0}
+    dice_games[chat_id] = game
+    sent = await message.answer(_dice_board(game), reply_markup=_dice_kb())
+    game["msg_id"] = sent.message_id
+
+
+@dp.callback_query(F.data.startswith("dg:"))
+async def dice_cb(cb: CallbackQuery):
+    chat_id = cb.message.chat.id
+    game = dice_games.get(chat_id)
+    if not game:
+        await cb.answer("Игра уже завершена.")
+        return
+    action = cb.data.split(":", 1)[1]
+    uid = cb.from_user.id
+    if action == "join":
+        if game["rolling"]:
+            await cb.answer("Уже бросаем — дождись конца.")
+            return
+        game["players"][uid] = cb.from_user.full_name
+        await cb.answer("Ты в игре! 🎲")
+        try:
+            await cb.message.edit_text(_dice_board(game), reply_markup=_dice_kb())
+        except TelegramBadRequest:
+            pass
+    elif action == "cancel":
+        if uid != game["host"] and not await is_staff_user(chat_id, uid):
+            await cb.answer("Отменить может только организатор.")
+            return
+        dice_games.pop(chat_id, None)
+        await cb.answer("Отменено.")
+        try:
+            await cb.message.edit_text("🎲 Игра отменена.")
+        except TelegramBadRequest:
+            pass
+    elif action == "go":
+        if uid != game["host"] and not await is_staff_user(chat_id, uid):
+            await cb.answer("Запускает бросок только организатор.")
+            return
+        if len(game["players"]) < 2:
+            await cb.answer("Нужно минимум 2 игрока.", show_alert=True)
+            return
+        if game["rolling"]:
+            await cb.answer()
+            return
+        game["rolling"] = True
+        await cb.answer("Бросаем! 🎲")
+        try:
+            await cb.message.edit_reply_markup(reply_markup=None)
+        except TelegramBadRequest:
+            pass
+        await _dice_run(chat_id, game)
+    else:
+        await cb.answer()
+
+
+async def _dice_run(chat_id: int, game: dict):
+    players = dict(game["players"])
+    contenders = dict(players)
+    try:
+        while True:
+            rolls = {}
+            for u in list(contenders):
+                m = await bot.send_dice(chat_id)
+                rolls[u] = m.dice.value
+                await asyncio.sleep(0.4)
+            await asyncio.sleep(3.5)
+            summary = ", ".join("%s — <b>%d</b>" % (esc(contenders[u]), rolls[u])
+                                for u in contenders)
+            leaders = _dice_leaders(rolls)
+            if len(leaders) == 1:
+                win = leaders[0]
+                await bot.send_message(
+                    chat_id,
+                    "🏆 Победитель: %s (выпало <b>%d</b>)\n%s"
+                    % (id_mention(win, players[win]), rolls[win], summary))
+                return
+            tied = ", ".join(esc(contenders[u]) for u in leaders)
+            await bot.send_message(
+                chat_id,
+                "🤝 Ничья на <b>%d</b>: %s — перебрасывают!\n%s"
+                % (max(rolls.values()), tied, summary))
+            contenders = {u: players[u] for u in leaders}
+    finally:
+        dice_games.pop(chat_id, None)
+
+
 @dp.message(F.text, F.chat.type.in_({"group", "supergroup"}))
 async def on_trigger(message: Message):
     """Автоответы на ключевые слова. Регистрируется ПОСЛЕ всех команд."""
@@ -4701,6 +4820,7 @@ async def panel_private(message: Message):
     if uid not in panel_auth:
         if message.text and message.text.strip() == config.PANEL_PASSWORD:
             panel_auth.add(uid)
+            storage.add_owner(uid)  # знавший пароль = владелец: PrivacyGate его теперь узнаёт
             panel_state.pop(uid, None)
             await message.answer("✅ Доступ открыт.")
             await open_panel(message.chat.id)
@@ -5446,125 +5566,6 @@ async def panel_cb(cb: CallbackQuery):
 
 
 # ----------------------------------------------------------------- запуск
-
-# ------------------------------------------------------------- игра «кубик»
-def _dice_leaders(rolls: dict) -> list:
-    """uid с максимальным броском: один — победитель, несколько — переброс."""
-    if not rolls:
-        return []
-    top = max(rolls.values())
-    return [u for u, v in rolls.items() if v == top]
-
-
-def _dice_board(game: dict) -> str:
-    ps = game["players"]
-    who = "\n".join("• " + id_mention(u, n) for u, n in ps.items()) or "<i>пока никто</i>"
-    return ("🎲 <b>Игра в кубик</b>\n"
-            "Игроков: <b>%d</b>\n%s\n\n"
-            "Жми «🎲 Играть», затем организатор — «▶️ Бросать». У кого больше — тот выиграл."
-            % (len(ps), who))
-
-
-def _dice_kb() -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup(inline_keyboard=[[
-        InlineKeyboardButton(text="🎲 Играть", callback_data="dg:join"),
-        InlineKeyboardButton(text="▶️ Бросать", callback_data="dg:go"),
-        InlineKeyboardButton(text="❌ Отмена", callback_data="dg:cancel"),
-    ]])
-
-
-@dp.message(Command("kubik", "dice", "game"), F.chat.type.in_({"group", "supergroup"}))
-async def dice_start(message: Message):
-    chat_id = message.chat.id
-    if chat_id in dice_games:
-        await message.reply("🎲 Игра уже идёт — жми кнопки под сообщением игры.")
-        return
-    game = {"players": {}, "host": message.from_user.id, "rolling": False, "msg_id": 0}
-    dice_games[chat_id] = game
-    sent = await message.answer(_dice_board(game), reply_markup=_dice_kb())
-    game["msg_id"] = sent.message_id
-
-
-@dp.callback_query(F.data.startswith("dg:"))
-async def dice_cb(cb: CallbackQuery):
-    chat_id = cb.message.chat.id
-    game = dice_games.get(chat_id)
-    if not game:
-        await cb.answer("Игра уже завершена.")
-        return
-    action = cb.data.split(":", 1)[1]
-    uid = cb.from_user.id
-    if action == "join":
-        if game["rolling"]:
-            await cb.answer("Уже бросаем — дождись конца.")
-            return
-        game["players"][uid] = cb.from_user.full_name
-        await cb.answer("Ты в игре! 🎲")
-        try:
-            await cb.message.edit_text(_dice_board(game), reply_markup=_dice_kb())
-        except TelegramBadRequest:
-            pass
-    elif action == "cancel":
-        if uid != game["host"] and not await is_staff_user(chat_id, uid):
-            await cb.answer("Отменить может только организатор.")
-            return
-        dice_games.pop(chat_id, None)
-        await cb.answer("Отменено.")
-        try:
-            await cb.message.edit_text("🎲 Игра отменена.")
-        except TelegramBadRequest:
-            pass
-    elif action == "go":
-        if uid != game["host"] and not await is_staff_user(chat_id, uid):
-            await cb.answer("Запускает бросок только организатор.")
-            return
-        if len(game["players"]) < 2:
-            await cb.answer("Нужно минимум 2 игрока.", show_alert=True)
-            return
-        if game["rolling"]:
-            await cb.answer()
-            return
-        game["rolling"] = True
-        await cb.answer("Бросаем! 🎲")
-        try:
-            await cb.message.edit_reply_markup(reply_markup=None)
-        except TelegramBadRequest:
-            pass
-        await _dice_run(chat_id, game)
-    else:
-        await cb.answer()
-
-
-async def _dice_run(chat_id: int, game: dict):
-    players = dict(game["players"])
-    contenders = dict(players)
-    try:
-        while True:
-            rolls = {}
-            for u in list(contenders):
-                m = await bot.send_dice(chat_id)
-                rolls[u] = m.dice.value
-                await asyncio.sleep(0.4)
-            await asyncio.sleep(3.5)
-            summary = ", ".join("%s — <b>%d</b>" % (esc(contenders[u]), rolls[u])
-                                for u in contenders)
-            leaders = _dice_leaders(rolls)
-            if len(leaders) == 1:
-                win = leaders[0]
-                await bot.send_message(
-                    chat_id,
-                    "🏆 Победитель: %s (выпало <b>%d</b>)\n%s"
-                    % (id_mention(win, players[win]), rolls[win], summary))
-                return
-            tied = ", ".join(esc(contenders[u]) for u in leaders)
-            await bot.send_message(
-                chat_id,
-                "🤝 Ничья на <b>%d</b>: %s — перебрасывают!\n%s"
-                % (max(rolls.values()), tied, summary))
-            contenders = {u: players[u] for u in leaders}
-    finally:
-        dice_games.pop(chat_id, None)
-
 
 async def main():
     storage.load()
