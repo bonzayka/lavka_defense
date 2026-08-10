@@ -4070,8 +4070,8 @@ async def dice_cb(cb: CallbackQuery):
         except TelegramBadRequest:
             pass
     elif action == "cancel":
-        if uid != game["host"] and not await is_staff_user(chat_id, uid):
-            await cb.answer("Отменить может только организатор.")
+        if uid != game["host"]:
+            await cb.answer("Отменить может только основатель игры.")
             return
         dice_games.pop(chat_id, None)
         await cb.answer("Отменено.")
@@ -4080,8 +4080,8 @@ async def dice_cb(cb: CallbackQuery):
         except TelegramBadRequest:
             pass
     elif action == "go":
-        if uid != game["host"] and not await is_staff_user(chat_id, uid):
-            await cb.answer("Запускает бросок только организатор.")
+        if uid != game["host"]:
+            await cb.answer("Запускать бросок может только основатель игры.")
             return
         if len(game["players"]) < 2:
             await cb.answer("Нужно минимум 2 игрока.", show_alert=True)
