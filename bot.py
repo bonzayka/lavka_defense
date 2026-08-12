@@ -295,22 +295,22 @@ def render_rules(text: str) -> str:
 def name_check(name: str):
     """Проверка имени вступающего с учётом скрытых стоп-слов.
 
-    Возвращает (public_reason, audit_reason) или (None, None), если чисто.
-    Для скрытого слова публично пишем нейтральное «недопустимое имя», а в
-    журнал — настоящую причину.
+    Возвращает (public_reason, audit_reason, hidden) или (None, None, False),
+    если чисто. Для скрытого слова публично пишем нейтральное «недопустимое
+    имя», настоящую причину — только в спец-чат (hidden=True), не в журнал.
     """
     if not name:
-        return None, None
+        return None, None, False
     if textguard.has_profanity(name):
-        return "мат в имени", "мат в имени"
+        return "мат в имени", "мат в имени", False
     sw = textguard.find_stopword(name, storage.stopwords(),
                                  fuzzy=flag("FUZZY_STOPWORDS"),
                                  max_distance=num("FUZZY_MAX_DISTANCE"))
     if not sw:
-        return None, None
+        return None, None, False
     if storage.is_hidden_word(sw):
-        return "недопустимое имя", f"скрытое стоп-слово «{sw}» в имени"
-    return f"стоп-слово «{sw}» в имени", f"стоп-слово «{sw}» в имени"
+        return "недопустимое имя", f"скрытое стоп-слово «{sw}» в имени", True
+    return f"стоп-слово «{sw}» в имени", f"стоп-слово «{sw}» в имени", False
 
 
 def flag(name: str) -> bool:
@@ -386,6 +386,22 @@ async def notify_panel(text: str):
             await bot.send_message(uid, text)
         except TelegramBadRequest:
             pass
+
+
+async def notify_hidden(user, reason: str, text: str = ""):
+    """Уведомление о срабатывании СКРЫТОГО стоп-слова — только в спец-чат.
+
+    Настоящее слово не должно попасть ни в чат группы, ни в /log, ни в панель,
+    ни на глаза обычным юзерам. Поэтому detail идёт лишь в HIDDEN_WORD_CHAT_ID.
+    """
+    if not config.HIDDEN_WORD_CHAT_ID:
+        return
+    try:
+        await bot.send_message(
+            config.HIDDEN_WORD_CHAT_ID,
+            event_card("🕵️ Скрытое стоп-слово", user, text=text, reason=reason))
+    except (TelegramBadRequest, TelegramForbiddenError):
+        pass
 
 
 async def notify_report(reported: "Message", reporter, card: str):
@@ -1060,12 +1076,12 @@ async def mute_user(chat_id: int, user_id: int, seconds: int | None = None):
 
 
 async def apply_punishment(message: Message, reason: str, action: str,
-                           audit_reason: str | None = None):
+                           audit_reason: str | None = None, hidden: bool = False):
     """Удалить сообщение и применить действие: delete | warn | mute | ban.
 
     reason — что показываем публично в чате; audit_reason (если задан) — что
-    пишем в журнал/панель (для скрытых стоп-слов: в чате «стоп-слово», а в
-    журнале настоящее слово).
+    пишем в журнал/панель. hidden=True (скрытое стоп-слово): в журнал и панель
+    настоящее слово НЕ пишем (только generic reason), а detail шлём в спец-чат.
     """
     chat_id = message.chat.id
     user = message.from_user
@@ -1099,9 +1115,14 @@ async def apply_punishment(message: Message, reason: str, action: str,
         await report(chat_id, f"🔨 {mention(user)} забанен: {esc(reason)}.")
     # action == "delete": тихо удаляем, без уведомления в чат
 
-    audit("авто-фильтр", action, uid, user.full_name, audit_reason)
-    if flag("NOTIFY_VIOLATIONS"):
-        await notify_panel(event_card("🚨 Нарушение", user, text=msg_text, reason=audit_reason))
+    if hidden:
+        # В журнал — обезличенно (без настоящего слова). Detail — только в спец-чат.
+        audit("авто-фильтр", action, uid, user.full_name, reason)
+        await notify_hidden(user, audit_reason, msg_text)
+    else:
+        audit("авто-фильтр", action, uid, user.full_name, audit_reason)
+        if flag("NOTIFY_VIOLATIONS"):
+            await notify_panel(event_card("🚨 Нарушение", user, text=msg_text, reason=audit_reason))
 
 
 # --------------------------------------------------- проверки сообщений
@@ -1164,7 +1185,8 @@ def antiflood_hit(chat_id: int, user_id: int) -> bool:
 
 
 # Команды, доступные ВСЕМ участникам (не считаются «чужой админ-командой»).
-PUBLIC_CMDS = {"rules", "report", "ping", "help", "vb", "start", "privacy"}
+PUBLIC_CMDS = {"rules", "report", "ping", "help", "vb", "start", "privacy",
+               "kubik", "dice", "game"}
 
 
 def _cmd_name(text: str) -> str | None:
@@ -1322,9 +1344,10 @@ class ModerationMiddleware(BaseMiddleware):
                                          max_distance=num("FUZZY_MAX_DISTANCE"))
             if sw:
                 if storage.is_hidden_word(sw):
-                    # Скрытое слово: в чате — обезличенная причина, в журнале — настоящее слово.
+                    # Скрытое слово: в чате — обезличенная причина; настоящее слово
+                    # не в журнал, а только в спец-чат (hidden=True).
                     await apply_punishment(msg, "нарушение правил", action_for("TEXT_ACTION"),
-                                           audit_reason=f"скрытое стоп-слово «{sw}»")
+                                           audit_reason=f"скрытое стоп-слово «{sw}»", hidden=True)
                 else:
                     await apply_punishment(msg, f"стоп-слово «{sw}»", action_for("TEXT_ACTION"))
                 return True
@@ -1823,11 +1846,15 @@ async def challenge(chat_id: int, user) -> None:
 
         # Стоп-слова/мат в имени вступающего.
         if flag("CHECK_JOIN_NAMES"):
-            public, why = name_check(f"{user.full_name or ''} {user.username or ''}")
+            public, why, hidden = name_check(f"{user.full_name or ''} {user.username or ''}")
             if public:
                 pending.pop(key, None)
                 await ban_user(chat_id, user.id)
-                audit("имена", why, user.id, user.full_name)
+                if hidden:
+                    audit("имена", "недопустимое имя", user.id, user.full_name)
+                    await notify_hidden(user, why)
+                else:
+                    audit("имена", why, user.id, user.full_name)
                 await report(chat_id, f"🚫 {mention(user)} забанен на входе: {esc(public)}.")
                 return
 
@@ -1923,9 +1950,13 @@ async def on_join_request(req: ChatJoinRequest):
     if not flag("AUTO_ACCEPT"):
         return  # оставляем заявку в очереди (pending_requests) — очистить: /clearrequests
     if flag("CHECK_JOIN_NAMES"):
-        public, why = name_check(f"{user.full_name or ''} {user.username or ''}")
+        public, why, hidden = name_check(f"{user.full_name or ''} {user.username or ''}")
         if public:
-            await _decline(f"отклонена по имени: {why}")
+            if hidden:
+                await _decline("отклонена по имени")   # без настоящего слова в журнале
+                await notify_hidden(user, why)
+            else:
+                await _decline(f"отклонена по имени: {why}")
             await report(chat_id, f"🚫 Заявка отклонена: {mention(user)} — {esc(public)}.")
             return
     try:
@@ -4026,7 +4057,7 @@ def _dice_board(game: dict) -> str:
     who = "\n".join("• " + id_mention(u, n) for u, n in ps.items()) or "<i>пока никто</i>"
     return ("🎲 <b>Игра в кубик</b>\n"
             "Игроков: <b>%d</b>\n%s\n\n"
-            "Жми «🎲 Играть», затем организатор — «▶️ Бросать». У кого больше — тот выиграл."
+            "Жми «🎲 Играть», затем любой игрок — «▶️ Бросать». У кого больше — тот выиграл."
             % (len(ps), who))
 
 
@@ -4048,6 +4079,7 @@ async def dice_start(message: Message):
     dice_games[chat_id] = game
     sent = await message.answer(_dice_board(game), reply_markup=_dice_kb())
     game["msg_id"] = sent.message_id
+    asyncio.create_task(_dice_expire(chat_id, game))
 
 
 @dp.callback_query(F.data.startswith("dg:"))
@@ -4070,19 +4102,16 @@ async def dice_cb(cb: CallbackQuery):
         except TelegramBadRequest:
             pass
     elif action == "cancel":
-        if uid != game["host"]:
-            await cb.answer("Отменить может только основатель игры.")
-            return
+        # Отменять может кто угодно — чтобы «зависшую» игру всегда можно закрыть.
         dice_games.pop(chat_id, None)
         await cb.answer("Отменено.")
         try:
             await cb.message.edit_text("🎲 Игра отменена.")
         except TelegramBadRequest:
             pass
+        asyncio.create_task(_dice_cleanup(chat_id, [game["msg_id"]]))
     elif action == "go":
-        if uid != game["host"]:
-            await cb.answer("Запускать бросок может только основатель игры.")
-            return
+        # Запустить бросок может любой игрок (не только основатель).
         if len(game["players"]) < 2:
             await cb.answer("Нужно минимум 2 игрока.", show_alert=True)
             return
@@ -4100,14 +4129,41 @@ async def dice_cb(cb: CallbackQuery):
         await cb.answer()
 
 
+async def _dice_cleanup(chat_id: int, msg_ids: list, delay: int = 300):
+    """Удалить сообщения игры через delay секунд после её конца (по умолч. 5 мин)."""
+    await asyncio.sleep(delay)
+    ids = [m for m in msg_ids if m]
+    for i in range(0, len(ids), 100):
+        try:
+            await bot.delete_messages(chat_id, ids[i:i + 100])
+        except TelegramBadRequest:
+            pass
+
+
+async def _dice_expire(chat_id: int, game: dict, delay: int = 600):
+    """Авто-снять зависшую игру: если за delay сек. так и не начали бросать —
+    убрать её, чтобы /kubik снова работал. Иначе игру уже не начать заново."""
+    await asyncio.sleep(delay)
+    if dice_games.get(chat_id) is game and not game["rolling"]:
+        dice_games.pop(chat_id, None)
+        try:
+            await bot.edit_message_text("🎲 Игра истекла — начните заново: /kubik",
+                                        chat_id, game["msg_id"])
+        except TelegramBadRequest:
+            pass
+        asyncio.create_task(_dice_cleanup(chat_id, [game["msg_id"]]))
+
+
 async def _dice_run(chat_id: int, game: dict):
     players = dict(game["players"])
     contenders = dict(players)
+    msgs = [game.get("msg_id")]
     try:
         while True:
             rolls = {}
             for u in list(contenders):
                 m = await bot.send_dice(chat_id)
+                msgs.append(m.message_id)
                 rolls[u] = m.dice.value
                 await asyncio.sleep(0.4)
             await asyncio.sleep(3.5)
@@ -4116,19 +4172,22 @@ async def _dice_run(chat_id: int, game: dict):
             leaders = _dice_leaders(rolls)
             if len(leaders) == 1:
                 win = leaders[0]
-                await bot.send_message(
+                r = await bot.send_message(
                     chat_id,
                     "🏆 Победитель: %s (выпало <b>%d</b>)\n%s"
                     % (id_mention(win, players[win]), rolls[win], summary))
+                msgs.append(r.message_id)
                 return
             tied = ", ".join(esc(contenders[u]) for u in leaders)
-            await bot.send_message(
+            r = await bot.send_message(
                 chat_id,
                 "🤝 Ничья на <b>%d</b>: %s — перебрасывают!\n%s"
                 % (max(rolls.values()), tied, summary))
+            msgs.append(r.message_id)
             contenders = {u: players[u] for u in leaders}
     finally:
         dice_games.pop(chat_id, None)
+        asyncio.create_task(_dice_cleanup(chat_id, msgs))
 
 
 @dp.message(F.text, F.chat.type.in_({"group", "supergroup"}))

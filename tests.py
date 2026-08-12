@@ -65,6 +65,16 @@ check("dice: ничья на максимуме", set(bot._dice_leaders({1: 6, 2
 check("dice: все равны", set(bot._dice_leaders({1: 2, 2: 2})) == {1, 2})
 check("dice: пусто", bot._dice_leaders({}) == [])
 
+# ---- кубик доступен обычным юзерам (не съедается фильтром команд) ----
+check("public cmds: кубик", {"kubik", "dice", "game"} <= bot.PUBLIC_CMDS)
+
+# ---- name_check: 3-кортеж и скрытость ----
+check("name_check: чистое -> (None,None,False)", bot.name_check("нормальное имя") == (None, None, False))
+storage.add_stopword("сикретслово", hidden=True)
+_p, _a, _h = bot.name_check("привет сикретслово друг")
+check("name_check: скрытое имя публично нейтрально", _p == "недопустимое имя" and _h is True and "сикретслово" in _a)
+storage.del_stopword("сикретслово")
+
 # ---- парсер длительности ----
 check("dur 3 дня", bot.parse_duration("3 дня") == 259200)
 check("dur 2 часа", bot.parse_duration("2 часа") == 7200)
