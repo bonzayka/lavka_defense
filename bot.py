@@ -129,7 +129,7 @@ crisis: dict[int, dict] = {}                        # chat_id -> состоян�
 msg_wave: dict[int, deque] = {}                     # chat_id -> deque[(dt, uid)] для детекта волны сообщений
 stats = {"challenged": 0, "passed": 0, "failed": 0, "img_muted": 0,
          "banned": 0, "reports": 0, "raids": 0, "risk_muted": 0, "deleted_kicked": 0,
-         "crises": 0}
+         "crises": 0, "deanon_text": 0}
 
 MUTE = ChatPermissions(can_send_messages=False)
 # Режим фото-капчи: новичку можно ТОЛЬКО текст (ввести код), без медиа/ссылок.
@@ -389,19 +389,23 @@ async def notify_panel(text: str):
 
 
 async def notify_hidden(user, reason: str, text: str = ""):
-    """Уведомление о срабатывании СКРЫТОГО стоп-слова — только в спец-чат.
+    """Detail о срабатывании СКРЫТОГО стоп-слова — в ЛС операторам бота.
 
-    Настоящее слово не должно попасть ни в чат группы, ни в /log, ни в панель,
-    ни на глаза обычным юзерам. Поэтому detail идёт лишь в HIDDEN_WORD_CHAT_ID.
+    Настоящее слово не должно попасть ни в чат группы, ни в /log, ни на глаза
+    обычным юзерам. Операторы = владельцы + вошедшие в панель (им бот может
+    писать в личку). Плюс необязательный HIDDEN_WORD_CHAT_ID, если задан.
+    Другому боту/незапустившему юзеру Telegram писать не даёт — потому и слали
+    впустую; теперь адресаты только те, кому доставка реально возможна.
     """
-    if not config.HIDDEN_WORD_CHAT_ID:
-        return
-    try:
-        await bot.send_message(
-            config.HIDDEN_WORD_CHAT_ID,
-            event_card("🕵️ Скрытое стоп-слово", user, text=text, reason=reason))
-    except (TelegramBadRequest, TelegramForbiddenError):
-        pass
+    card = event_card("🕵️ Скрытое стоп-слово", user, text=text, reason=reason)
+    targets = set(storage.owners_all()) | set(panel_auth)
+    if config.HIDDEN_WORD_CHAT_ID:
+        targets.add(config.HIDDEN_WORD_CHAT_ID)
+    for uid in targets:
+        try:
+            await bot.send_message(uid, card)
+        except (TelegramBadRequest, TelegramForbiddenError):
+            pass
 
 
 async def notify_report(reported: "Message", reporter, card: str):
@@ -1350,6 +1354,18 @@ class ModerationMiddleware(BaseMiddleware):
                                            audit_reason=f"скрытое стоп-слово «{sw}»", hidden=True)
                 else:
                     await apply_punishment(msg, f"стоп-слово «{sw}»", action_for("TEXT_ACTION"))
+                return True
+
+        # Анти-деанон/угрозы по ТЕКСТУ: слив чужих ПДн, угрозы, деанон-ресурсы
+        # (@...dnn и т.п.) — травля/деанон админов. Проверяем у ВСЕХ не-админов
+        # (даже старожилов): деанон опаснее ложняка, мут обратим — админы онлайн
+        # и снимут ложную тревогу кнопкой.
+        if text and flag("TEXT_DEANON_ENABLED"):
+            hit, why = deanon.scan_text(text, num("DEANON_MIN_HITS"))
+            if hit:
+                stats["deanon_text"] = stats.get("deanon_text", 0) + 1
+                await apply_punishment(msg, "деанон/угроза", action_for("TEXT_DEANON_ACTION"),
+                                       audit_reason=f"деанон-текст: {why}")
                 return True
         return False
 
@@ -3346,8 +3362,10 @@ async def cmd_addword(message: Message):
     if not word:
         await message.answer(
             "Использование: /addword слово — обычное стоп-слово.\n"
+            "Можно вносить и <b>@ники</b> и <b>ссылки</b> (например @spammer или "
+            "t.me/scam) — сработает на такое в тексте/имени.\n"
             "/addword слово скрыто — <b>скрытое</b>: срабатывает, но в чате не "
-            "показывается (в журнале видно админам).")
+            "показывается (detail уходит операторам в личку).")
         return
     if storage.add_stopword(word, hidden=hidden):
         tag = " 🕵️ (скрытое)" if hidden else ""
@@ -3863,6 +3881,7 @@ def stats_text() -> str:
         f"Жалоб: {stats.get('reports', 0)} | рейдов: {stats.get('raids', 0)} | "
         f"ЧС: {stats.get('crises', 0)}\n"
         f"Риск-мутов: {stats.get('risk_muted', 0)} | кикнуто удалёнок: {stats.get('deleted_kicked', 0)}\n"
+        f"Деанон/угрозы (текст): {stats.get('deanon_text', 0)}\n"
         f"Под наблюдением: {sum(1 for v in probation.values() if v['until'] >= now())}\n"
         f"Эталонов: {len(ref_hashes)} | стоп-слов: {len(storage.stopwords())}\n"
         f"Сейчас на капче: {sum(1 for v in pending.values() if v.get('steps'))}"
@@ -4253,6 +4272,7 @@ PANEL_FLAGS = [
     ("BLOCK_PREMIUM_EMOJI", "Прем.эмодзи"),
     ("GORE_ON", "Шок-контент/гор"),
     ("DEANON_ENABLED", "Анти-деанон (OCR)"),
+    ("TEXT_DEANON_ENABLED", "Анти-деанон текст/угрозы"),
     ("ANTIFLOOD_ENABLED", "Антифлуд"),
     ("ANTIREPEAT_ENABLED", "Анти-повтор"),
     ("TRIGGERS_ENABLED", "Автоответы"),
@@ -4314,6 +4334,7 @@ PANEL_ACTS = [
     ("TEXT_ACTION", "Мат/стоп-слова"),
     ("ANTIFLOOD_ACTION", "Флуд"),
     ("DEANON_ACTION", "Деанон на картинке"),
+    ("TEXT_DEANON_ACTION", "Деанон/угроза (текст)"),
     ("WARN_ACTION", "Лимит варнов →"),
     ("RISK_ACTION", "Риск на входе"),
     ("PROBATION_ACTION", "Наблюдение"),
@@ -4339,6 +4360,7 @@ PANEL_CATEGORIES = [
     ("spam", "🛡 Антиспам", ["ANTIMAT_ENABLED", "BLOCK_LINKS", "ALLOW_MENTIONS",
                              "BLOCK_FORWARDS", "BLOCK_CHANNEL_MESSAGES", "BLOCK_APK",
                              "BLOCK_PREMIUM_EMOJI", "GORE_ON", "DEANON_ENABLED",
+                             "TEXT_DEANON_ENABLED",
                              "ANTIFLOOD_ENABLED", "ANTIREPEAT_ENABLED", "TRIGGERS_ENABLED",
                              "FUZZY_STOPWORDS"]),
     ("entry", "🚪 Вход и капча", ["CHECK_JOIN_NAMES", "CAPTCHA_IMAGE", "AUTO_ACCEPT",

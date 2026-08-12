@@ -75,7 +75,10 @@ _INN = re.compile(r"(?<!\d)\d{12}(?!\d)")
 _ADDRESS = re.compile(
     r"(?:\bул(?:\.|ица)\b|\bпроспект\b|\bпр[\-\s]?т\b|\bпереул|\bбульвар\b|"
     r"\bшоссе\b|\bмкр\b|\bкв(?:\.|артира)\b|\bкорп(?:\.|ус)\b|\bдом\s+\d|"
-    r"\bд\.\s?\d+.{0,12}\bкв\.?\s?\d+|\bиндекс\b|\bг\.\s?[А-ЯЁ][а-яё]{2,})",
+    r"\bд\.\s?\d+.{0,12}\bкв\.?\s?\d+|\bиндекс\b|\bг\.\s?[А-ЯЁ][а-яё]{2,}|"
+    # dotless-варианты (частый деанон: «г Москва ул Ленина д5 кв10»)
+    r"\bг\s+[А-ЯЁ][а-яё]{2,}|\bул\s+[А-ЯЁ][а-яё]{2,}|"
+    r"\bкв\s?\d{1,4}\b|\bд\s?\d{1,4}\s*кв)",
     re.I)
 
 # Явные подписи «паспорт/карта/адрес проживания» усиливают уверенность.
@@ -175,6 +178,63 @@ def is_deanon(text: str, min_hits: int = 2) -> tuple[bool, list[str]]:
     data_types = [t for t in types if t != "label"]
     need = max(1, min_hits - 1) if has_label else min_hits
     return (len(data_types) >= need and len(data_types) >= 1), types
+
+
+# ---------------------------------------------------------------------------
+# Слой 1б: угрозы и деанон-ресурсы в ТЕКСТЕ (травля/деанон админов чата).
+# ---------------------------------------------------------------------------
+
+# Угрозы/запугивание/деанон-намерение (по нормализованному тексту, кириллица).
+_THREAT_PATTERNS = [
+    r"уб[ьъе]?ю\b", r"прир[еэ]жу", r"зар[еэ]жу", r"закопа", r"пришью тебя",
+    r"взорву", r"сожгу тебя", r"найду тебя", r"я тебя найду", r"приеду к тебе",
+    r"знаю где (?:ты )?жив[её]шь", r"вычисл\w* тебя", r"вычислю по",
+    r"пробь?ю по", r"проб[еи]в\b", r"деанон", r"сдеаноню", r"задеаноню",
+    r"сол[ьъе]ю (?:твои|его|е[её]|ваши)?\s*дан", r"слив дан", r"сливаю дан",
+    r"выложу (?:твой|его|её|ваш)\s*(?:адрес|номер|паспорт|данные)",
+    r"скину (?:твой|его|её)\s*(?:адрес|номер|паспорт)",
+    r"твой адрес\b", r"по ip\b", r"пробить по номеру",
+]
+_THREAT_RE = [re.compile(p, re.I) for p in _THREAT_PATTERNS]
+
+# Ники/ссылки деанон-ресурсов: @chudochatdnn, t.me/deanonbaza, пробив-боты.
+_DEANON_HANDLE_RE = re.compile(
+    r"(?:@|t\.me/|https?://[^\s@]*?/)\w*?(?:deanon|деанон|dnn|probiv|пробив|"
+    r"слив|dox|докс|leakb|leaked)\w*",
+    re.I)
+
+
+def find_threats(text: str) -> list[str]:
+    """Список сработавших маркеров угроз/запугивания в тексте ([] — чисто)."""
+    if not text:
+        return []
+    norm = textguard.normalize(text) if textguard else text.lower()
+    return [rx.pattern for rx in _THREAT_RE if rx.search(norm)]
+
+
+def find_deanon_handles(text: str) -> list[str]:
+    """Ники/ссылки деанон-ресурсов в тексте (@...dnn, t.me/deanon...)."""
+    if not text:
+        return []
+    raw = (text or "").lower()   # латиница как есть; normalize её сломал бы
+    return list(dict.fromkeys(m.group() for m in _DEANON_HANDLE_RE.finditer(raw)))
+
+
+def scan_text(text: str, min_hits: int = 2) -> tuple[bool, str]:
+    """Текстовый анти-деанон: угрозы + деанон-ресурсы + чужие ПДн в тексте.
+
+    Кейс — травля/деанон админов чата. Возвращает (сработало, причина-строка).
+    """
+    reasons = []
+    if find_threats(text):
+        reasons.append("угроза/запугивание")
+    h = find_deanon_handles(text)
+    if h:
+        reasons.append("деанон-ресурс (%s)" % ", ".join(h[:3]))
+    pii_hit, pii_types = is_deanon(text, min_hits)
+    if pii_hit:
+        reasons.append("чужие ПДн: " + describe(pii_types))
+    return (bool(reasons), "; ".join(reasons))
 
 
 # ---------------------------------------------------------------------------

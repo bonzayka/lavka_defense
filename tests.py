@@ -75,6 +75,11 @@ _p, _a, _h = bot.name_check("привет сикретслово друг")
 check("name_check: скрытое имя публично нейтрально", _p == "недопустимое имя" and _h is True and "сикретслово" in _a)
 storage.del_stopword("сикретслово")
 
+# ---- банворд ловит @ники и ссылки (латиница) ----
+check("stopword: латинский @ник", textguard.find_stopword("пиши сюда @BadGuy плз", ["@badguy"]) == "@badguy")
+check("stopword: ссылка t.me", textguard.find_stopword("вот https://t.me/ScamChat заходи", ["t.me/scamchat"]) == "t.me/scamchat")
+check("stopword: латиница без совпадения — None", textguard.find_stopword("обычный чистый текст", ["@badguy"]) is None)
+
 # ---- парсер длительности ----
 check("dur 3 дня", bot.parse_duration("3 дня") == 259200)
 check("dur 2 часа", bot.parse_duration("2 часа") == 7200)
@@ -731,6 +736,18 @@ check("deanon: available булев", isinstance(deanon.available(), bool))
 check("deanon: status строка", isinstance(deanon.status(), str))
 check("deanon: extract без движка -> ''", deanon.available() or deanon.extract_text(b"x") == "")
 check("deanon: describe читаемо", "телефон" in deanon.describe(["phone"]))
+
+# ---- текстовый анти-деанон: угрозы, деанон-ресурсы, ПДн в тексте ----
+check("deanon-текст: угроза 'найду тебя'", deanon.find_threats("я тебя найду и закопаю") != [])
+check("deanon-текст: деанон-намерение", deanon.find_threats("щас деаноню этого админа") != [])
+check("deanon-текст: @...dnn ресурс", deanon.find_deanon_handles("кидай в @chudochatdnn") != [])
+check("deanon-текст: t.me/deanon", deanon.find_deanon_handles("смотри t.me/deanonbaza тут всё") != [])
+check("deanon-текст: чистый текст без угроз", deanon.find_threats("привет как дела, отличная погода") == [])
+check("deanon-текст: обычный @ник не деанон-ресурс", deanon.find_deanon_handles("пиши @ivan_petrov") == [])
+check("deanon-текст: scan угроза срабатывает", deanon.scan_text("я тебя найду сволочь", 2)[0])
+check("deanon-текст: scan слив ПДн срабатывает",
+      deanon.scan_text("админ Иванов Иван, +7 999 123 45 67, г Москва ул Ленина д5 кв10", 2)[0])
+check("deanon-текст: scan чистое НЕ срабатывает", not deanon.scan_text("во сколько сегодня встреча?", 2)[0])
 
 
 # ---- ЧС-автопилот: детект волны сообщений ----

@@ -130,13 +130,17 @@ def find_stopword(text: str, stopwords, fuzzy: bool = False,
     if not stopwords:
         return None
     norm = normalize(text)
+    # raw — просто lower без гомоглифов: нужен, чтобы ловить латиницу как есть
+    # (@ник, t.me/ссылка). normalize переводит латиницу в кириллицу и такие
+    # стоп-слова иначе никогда не совпадут.
+    raw = _ZERO_WIDTH.sub("", (text or "").lower())
     collapsed = "".join(_words(norm))          # «с п а м» -> «спам» (снимает разделители)
     collapsed_sq = _squeeze(collapsed) if fuzzy else ""
     for sw in stopwords:
         s = sw.lower()
         if not s:
             continue
-        if s in norm or s in collapsed:        # быстрый точный путь (как раньше)
+        if s in norm or s in collapsed or s in raw:   # точный путь + латиница (ники/ссылки)
             return sw
         if fuzzy:
             s_sq = _squeeze(s)
