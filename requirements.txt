@@ -10,4 +10,4 @@ telethon>=1.36
 # Анти-деанон: OCR картинок на чужие персональные данные (модуль deanon.py).
 # Опционально — без него проверка тихо отключается, бот работает как раньше.
 # rapidocr на onnxruntime (уже в стеке), НЕ требует системного tesseract, rus+eng.
-rapidocr-onnxruntime>=1.3
+rapidocr-onnxruntime>=1.2

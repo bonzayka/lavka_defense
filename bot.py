@@ -1364,7 +1364,8 @@ class ModerationMiddleware(BaseMiddleware):
             hit, why = deanon.scan_text(text, num("DEANON_MIN_HITS"))
             if hit:
                 stats["deanon_text"] = stats.get("deanon_text", 0) + 1
-                await apply_punishment(msg, "деанон/угроза", action_for("TEXT_DEANON_ACTION"),
+                await apply_punishment(msg, "деанон/угроза (себя задеанонь)",
+                                       action_for("TEXT_DEANON_ACTION"),
                                        audit_reason=f"деанон-текст: {why}")
                 return True
         return False
@@ -2249,15 +2250,15 @@ async def on_media(message: Message):
             text = await asyncio.to_thread(
                 deanon.extract_text, data, storage.get_str("DEANON_OCR_LANG", config.DEANON_OCR_LANG))
             if text:
-                hit, types = deanon.is_deanon(text, num("DEANON_MIN_HITS"))
+                hit, why = deanon.scan_text(text, num("DEANON_MIN_HITS"))
                 if hit:
                     await apply_punishment(
-                        message, f"чужие персональные данные на картинке ({deanon.describe(types)})",
-                        action_for("DEANON_ACTION"))
+                        message, "деанон/угроза (себя задеанонь)",
+                        action_for("DEANON_ACTION"),
+                        audit_reason=f"на картинке — {why}")
                     if flag("NOTIFY_VIOLATIONS"):
-                        await notify_panel(event_card("🕵 Анти-деанон: данные на картинке",
-                                                      message.from_user,
-                                                      reason=deanon.describe(types)))
+                        await notify_panel(event_card("🕵 Анти-деанон: картинка",
+                                                      message.from_user, reason=why))
                     return
 
 
@@ -2632,6 +2633,36 @@ async def _staff_only(message: Message, perm: str | None = None) -> bool:
     return await is_staff_user(message.chat.id, uid)
 
 
+async def staff_reply(message: Message, text: str) -> None:
+    """Приватный ответ на служебную команду.
+
+    В группе: шлём вызвавшему в ЛС и удаляем саму команду из чата, чтобы данные
+    админов/траст/журнал не палились на весь чат. Если ЛС закрыта (юзер не
+    запускал бота) — обезличенная подсказка. В личке бота — обычный ответ.
+    """
+    if message.chat.type == "private":
+        await message.answer(text)
+        return
+    uid = message.from_user.id if message.from_user else None
+    delivered = False
+    if uid:
+        try:
+            await bot.send_message(uid, text)
+            delivered = True
+        except (TelegramBadRequest, TelegramForbiddenError):
+            delivered = False
+    try:
+        await message.delete()
+    except TelegramBadRequest:
+        pass
+    if not delivered:
+        try:
+            await message.answer(
+                "🔒 Напиши мне в ЛС <b>/start</b> — пришлю ответ туда, не в чат.")
+        except TelegramBadRequest:
+            pass
+
+
 def _mention_uid(message: Message):
     """id из entity text_mention (тап по юзеру без @ника) в тексте команды."""
     for e in (getattr(message, "entities", None) or []):
@@ -2921,14 +2952,14 @@ async def cmd_deanon(message: Message):
     if not await _staff_only(message, "manage"):
         return
     if not deanon.available():
-        await message.answer(f"Анти-деанон OCR: {esc(deanon.status())}.\n"
+        await staff_reply(message, f"Анти-деанон OCR: {esc(deanon.status())}.\n"
                              "Установи движок: <code>pip install rapidocr-onnxruntime</code>, "
                              "затем перезапусти бота.")
         return
     reply = message.reply_to_message
     file_obj = pick_image_file(reply) if reply else None
     if file_obj is None:
-        await message.answer("Ответь /deanon на сообщение с картинкой.")
+        await staff_reply(message, "Ответь /deanon на сообщение с картинкой.")
         return
     try:
         data = (await bot.download(file_obj)).read()
@@ -2941,7 +2972,7 @@ async def cmd_deanon(message: Message):
     mark = "🔴 деанон" if hit else "🟢 чисто"
     snippet = (text or "").strip()
     snippet = snippet[:500] + "…" if len(snippet) > 500 else snippet
-    await message.answer(
+    await staff_reply(message,
         "🕵 <b>Проверка на деанон</b>\n"
         f"OCR-движок: {esc(deanon.status())}\n"
         f"Найдено: {esc(deanon.describe(types)) or '—'}\n"
@@ -2985,7 +3016,7 @@ async def cmd_diag(message: Message):
         except TelegramBadRequest as e:
             rights = f"не смог проверить: {e}"
 
-    await message.answer(
+    await staff_reply(message,
         "🩺 <b>Диагностика</b>\n"
         f"<b>Картинки/ИИ:</b>\n"
         f"• {torch_line}\n• {tr_line}\n"
@@ -3177,18 +3208,68 @@ async def cmd_risk(message: Message):
         return
     target = message.reply_to_message.from_user if message.reply_to_message else None
     if target is None or target.is_bot:
-        await message.answer("Ответь /risk на сообщение пользователя.")
+        await staff_reply(message, "Ответь /risk на сообщение пользователя.")
         return
     score, reasons, dc = await risk_evaluate(target)
     v = riskscore.verdict(score, num("RISK_WATCH_THRESHOLD"), num("RISK_BAN_THRESHOLD"))
     label = {"hard": "🔴 жёсткое действие", "watch": "🟡 под наблюдение",
              "clear": "🟢 чисто"}[v]
     body = "\n".join(f"• {esc(r)}" for r in reasons) or "• сигналов нет"
-    await message.answer(
+    await staff_reply(message,
         f"🎯 <b>Риск-профиль</b> {mention(target)}\n"
         f"Скор: <b>{score}</b> — {label}\n"
         f"Пороги: наблюдение {num('RISK_WATCH_THRESHOLD')}, "
         f"жёстко {num('RISK_BAN_THRESHOLD')} · DC{dc if dc else '—'}\n\n"
+        f"Сигналы:\n{body}")
+
+
+@dp.message(Command("checkin"))
+async def cmd_checkin(message: Message):
+    """Проверка траста: на сколько % профиль/сообщение несёт угрозу. Ответ — в ЛС.
+
+    /checkin ответом на сообщение (учтёт и текст на деанон/угрозу) или /checkin id|@ник.
+    Видят только персонал/владелец; обычные участники — нет (см. _staff_only).
+    """
+    if not await _staff_only(message):
+        return
+    reply = message.reply_to_message
+    target = reply.from_user if reply else None
+    if target is None:
+        uid = _target_id(message)
+        if uid is not None:
+            try:
+                m = await bot.get_chat_member(message.chat.id, uid)
+                target = m.user
+                uname_cache_add(m.user)
+            except TelegramBadRequest:
+                pass
+    if target is None or target.is_bot:
+        await staff_reply(message,
+            "Ответь /checkin на сообщение пользователя или укажи id/@ник.")
+        return
+
+    score, reasons, dc = await risk_evaluate(target)
+    ban_thr = num("RISK_BAN_THRESHOLD") or 85
+    threat = max(0, min(100, round(score * 100 / ban_thr)))
+
+    # /checkin ответом — текст на деанон/угрозу поднимает угрозу до 100%.
+    deanon_line = ""
+    text = (reply.text or reply.caption or "") if reply else ""
+    if text:
+        hit, why = deanon.scan_text(text, num("DEANON_MIN_HITS"))
+        if hit:
+            threat = 100
+            deanon_line = f"\n🚫 Деанон/угроза в тексте: {esc(why)}"
+
+    trust = 100 - threat
+    mark = ("🔴 высокая угроза" if threat >= 80 else
+            "🟡 подозрительно" if threat >= 40 else "🟢 чисто")
+    body = "\n".join(f"• {esc(r)}" for r in reasons) or "• сигналов нет"
+    await staff_reply(message,
+        f"🛡 <b>Проверка траста</b> {mention(target)}\n"
+        f"Угроза: <b>{threat}%</b> · траст: <b>{trust}%</b> — {mark}\n"
+        f"Риск-скор: {score} (жёстко от {ban_thr}) · DC{dc if dc else '—'}"
+        f"{deanon_line}\n\n"
         f"Сигналы:\n{body}")
 
 
@@ -3426,7 +3507,7 @@ async def cmd_words(message: Message):
         return
     words = storage.stopwords()
     if not words:
-        await message.answer("Список стоп-слов пуст.")
+        await staff_reply(message, "Список стоп-слов пуст.")
         return
     shown = [esc(w) for w in words if not storage.is_hidden_word(w)]
     hidden = [esc(w) for w in words if storage.is_hidden_word(w)]
@@ -3435,7 +3516,7 @@ async def cmd_words(message: Message):
         out.append("📋 <b>Открытые</b> (причина видна в чате):\n" + ", ".join(shown))
     if hidden:
         out.append("🕵️ <b>Скрытые</b> (в чате не называются):\n" + ", ".join(hidden))
-    await message.answer("\n\n".join(out))
+    await staff_reply(message, "\n\n".join(out))
 
 
 @dp.message(Command("trust"))
@@ -3914,8 +3995,7 @@ async def cmd_stats(message: Message):
 async def cmd_log(message: Message):
     if not await _staff_only(message):
         return
-    public_anon = (message.chat.type in ("group", "supergroup") and flag("ANON_ADMIN"))
-    await message.answer(audit_text(20, include_actor=not public_anon))
+    await staff_reply(message, audit_text(20, include_actor=True))
 
 
 @dp.message(Command("info"))
