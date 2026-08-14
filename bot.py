@@ -3835,6 +3835,16 @@ _WORD_PERM = {"мут": "mute", "mute": "mute", "размут": "mute", "unmute"
 # «+реп», «-реп», «+rep», «-rep», «+респект» и т.п. в начале строки.
 REP_PATTERN = r"(?i)^\s*([+\-])\s*(?:реп|rep|rp|респект|репутаци\w*|respect)\b"
 
+
+def _msk_day() -> str:
+    """Текущая дата в поясе REP_TZ (МСК) в виде 'YYYY-MM-DD'.
+
+    Служит ключом суточной квоты: как только по МСК наступает новый день
+    (00:00), ключ меняется и квота выдач автоматически обнуляется.
+    """
+    tz = timezone(timedelta(hours=num("REP_TZ")))
+    return now().astimezone(tz).strftime("%Y-%m-%d")
+
 # Ранги по очкам: (порог_минимум, эмодзи, название). Берём последний подходящий.
 REP_TIERS = [
     (-10 ** 9, "☠️", "Изгой"),
@@ -3907,21 +3917,28 @@ async def on_rep(message: Message):
     if target.is_bot:
         await _rep_notice(message, "🤖 Ботам репутация не начисляется.")
         return
-    # Кулдаун: одному человеку — раз в REP_COOLDOWN_HOURS.
-    cd = num("REP_COOLDOWN_HOURS") * 3600
-    last_dt = _parse_ts(storage.rep_last_given(chat_id, giver.id, target.id))
-    if cd > 0 and last_dt:
-        elapsed = (now() - last_dt).total_seconds()
-        if elapsed < cd:
-            left = int(cd - elapsed)
-            await _rep_notice(
-                message,
-                f"⏳ Ты уже оценивал(а) этого участника. "
-                f"Повторно можно через {human_duration(left)}.")
-            return
+    # Суточная квота: сброс в 00:00 МСК (ключ — МСК-день).
+    day = _msk_day()
+    limit = num("REP_DAILY_LIMIT")
+    q = storage.rep_quota(chat_id, giver.id, day)
+    # Одному и тому же участнику — не больше раза за сутки.
+    if target.id in q["targets"]:
+        await _rep_notice(
+            message,
+            "⏳ Ты уже менял(а) репутацию этого участника сегодня. "
+            "Обновление в 00:00 МСК.")
+        return
+    # Исчерпан суточный лимит выдач.
+    if limit > 0 and q["count"] >= limit:
+        await _rep_notice(
+            message,
+            f"⛔ На сегодня лимит репутации исчерпан ({q['count']}/{limit}). "
+            f"Новые выдачи — после 00:00 МСК.")
+        return
     uname_cache_add(target)
     uname_cache_add(giver)
-    rec = storage.add_rep(chat_id, giver.id, target.id, delta, now().isoformat())
+    rec = storage.add_rep(chat_id, target.id, delta)
+    q = storage.rep_quota_add(chat_id, giver.id, target.id, day)
     if flag("REP_ANNOUNCE"):
         verb = "повысил репутацию" if delta > 0 else "понизил репутацию"
         sign = "➕" if delta > 0 else "➖"

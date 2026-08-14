@@ -38,7 +38,7 @@ _DEFAULT = {
     "pending_verify": {},     # str(user_id) -> {"chat","notice","ts"} — ждут подтверждения номера в ЛС
     "activity": {},           # "chat:user" -> {"msgs","first_seen","last_seen"} — активность (старожилы + бэкап)
     "reputation": {},         # "chat:user" -> {"score","plus","minus"} — репутация (+реп/-реп)
-    "rep_log": {},            # "chat:giver:target" -> ISO-время последней выдачи (кулдаун раз в сутки)
+    "rep_quota": {},          # "chat:giver" -> {"day":"YYYY-MM-DD","count":N,"targets":[...]} — суточная квота выдач (сброс в 00:00 МСК)
 }
 
 AUDIT_LIMIT = 200
@@ -538,13 +538,8 @@ def get_rep(chat_id: int, user_id: int) -> dict:
             "minus": int(rec.get("minus", 0))}
 
 
-def rep_last_given(chat_id: int, giver_id: int, target_id: int) -> str:
-    """ISO-время последней выдачи репутации от giver к target (или "")."""
-    return _data.setdefault("rep_log", {}).get(f"{chat_id}:{giver_id}:{target_id}", "")
-
-
-def add_rep(chat_id: int, giver_id: int, target_id: int, delta: int, ts_iso: str) -> dict:
-    """Начислить +1/-1 получателю и запомнить время выдачи. Возвращает новый счётчик."""
+def add_rep(chat_id: int, target_id: int, delta: int) -> dict:
+    """Начислить +1/-1 получателю. Возвращает новый счётчик."""
     k = _key(chat_id, target_id)
     rec = _rep_all().setdefault(k, {"score": 0, "plus": 0, "minus": 0})
     rec["score"] = int(rec.get("score", 0)) + (1 if delta > 0 else -1)
@@ -552,9 +547,37 @@ def add_rep(chat_id: int, giver_id: int, target_id: int, delta: int, ts_iso: str
         rec["plus"] = int(rec.get("plus", 0)) + 1
     else:
         rec["minus"] = int(rec.get("minus", 0)) + 1
-    _data.setdefault("rep_log", {})[f"{chat_id}:{giver_id}:{target_id}"] = ts_iso
     save()
     return {"score": rec["score"], "plus": rec["plus"], "minus": rec["minus"]}
+
+
+# --- суточная квота выдач репутации (сброс в 00:00 МСК, день считает bot.py) ---
+
+def rep_quota(chat_id: int, giver_id: int, day: str) -> dict:
+    """Сколько выдач сделал giver за указанный день и кому: {"count", "targets"}.
+
+    Если сохранённый день не совпадает с текущим (day) — считаем квоту нулевой
+    (наступили новые сутки, старый счётчик уже неактуален).
+    """
+    rec = _data.setdefault("rep_quota", {}).get(_key(chat_id, giver_id))
+    if not rec or rec.get("day") != day:
+        return {"count": 0, "targets": []}
+    return {"count": int(rec.get("count", 0)), "targets": list(rec.get("targets", []))}
+
+
+def rep_quota_add(chat_id: int, giver_id: int, target_id: int, day: str) -> dict:
+    """Учесть выдачу в суточной квоте giver'а. Возвращает {"count", "targets"}."""
+    rq = _data.setdefault("rep_quota", {})
+    k = _key(chat_id, giver_id)
+    rec = rq.get(k)
+    if not rec or rec.get("day") != day:      # новые сутки -> обнуляем
+        rec = {"day": day, "count": 0, "targets": []}
+    rec["count"] = int(rec.get("count", 0)) + 1
+    if target_id not in rec["targets"]:
+        rec["targets"].append(target_id)
+    rq[k] = rec
+    save()
+    return {"count": rec["count"], "targets": list(rec["targets"])}
 
 
 def rep_top(chat_id: int, n: int = 10) -> list:
