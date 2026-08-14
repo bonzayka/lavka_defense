@@ -4623,10 +4623,9 @@ def _holdem_turn_kb(chat_id: int, uid: int, opts: dict) -> InlineKeyboardMarkup:
         row.append(InlineKeyboardButton(text="🚨 All-in", callback_data=f"thm:{chat_id}:{uid}:allin"))
     rows.append(row)
     raises = opts.get("raise_to", []) or []
-    if raises:
+    for amt in raises:
         rows.append([InlineKeyboardButton(text=f"📈 Raise до {amt}",
-                                          callback_data=f"thm:{chat_id}:{uid}:raise:{amt}")]
-                    for amt in raises)
+                                          callback_data=f"thm:{chat_id}:{uid}:raise:{amt}")])
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
@@ -4642,11 +4641,12 @@ async def _holdem_refresh(chat_id: int):
     game = holdem_games.get(chat_id)
     if not game:
         return
+    text = _holdem_board_text(game)
+    kb = _holdem_lobby_kb() if game["table"].get("phase") == "lobby" else None
     try:
-        await bot.edit_message_text(_holdem_board_text(game), chat_id, game["msg_id"],
-                                    reply_markup=_holdem_lobby_kb() if game["table"].get("phase") == "lobby" else None)
-    except TelegramBadRequest:
-        pass
+        await bot.edit_message_text(text, chat_id, game["msg_id"], reply_markup=kb)
+    except TelegramBadRequest as e:
+        log.warning("holdem refresh failed chat=%s: %s", chat_id, e)
 
 
 async def _holdem_cancel_timer(chat_id: int):
