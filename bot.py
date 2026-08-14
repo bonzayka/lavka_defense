@@ -58,6 +58,7 @@ import dcguard
 import deanon
 import deleted
 import gore
+import holdem
 import mafia
 import manager
 import nsfwvit
@@ -104,6 +105,7 @@ pending_requests: dict[int, set] = {}              # chat_id -> {user_id} вис
 votes: dict[int, dict] = {}                        # vote_id -> состояние голосования /vb
 vote_seq = 0                                        # счётчик id голосований
 night_notice: dict[int, datetime] = {}             # троттлинг уведомления ночного режима
+mafia_chat_notice: dict[int, datetime] = {}        # троттлинг уведомления о блокировке чата в Мафии
 newcomer: dict[tuple[int, int], datetime] = {}     # когда юзер вошёл (ограничение новичков)
 raid_joins: dict[int, deque] = {}                  # тайминги входов (антирейд)
 raid_until: dict[int, datetime] = {}               # до какого времени активен локдаун
@@ -118,9 +120,13 @@ panel_newbot: dict[int, dict] = {}                 # черновик созда
 ub_login: dict[int, dict] = {}                     # состояние скрытого логина юзербота (uid -> telethon state)
 msgcount: dict[tuple[int, int], int] = {}          # счётчик сообщений юзеров (с момента старта)
 dice_games: dict[int, dict] = {}                   # chat_id -> game state
+holdem_games: dict[int, dict] = {}                 # chat_id -> состояние игры Texas Hold'em
+holdem_player_chat: dict[int, int] = {}            # uid -> chat_id активного стола холдема
+holdem_turn_tasks: dict[int, asyncio.Task] = {}    # chat_id -> активный таймер хода
 mafia_games: dict[int, dict] = {}                  # chat_id -> состояние игры «Мафия»
 mafia_player_chat: dict[int, int] = {}             # uid -> chat_id активной игры (для ночных ЛС-кнопок)
 uname_cache: dict[str, int] = {}                   # "@username" (lower, без @) -> user_id (для таргета по нику)
+uid_name_cache: dict[int, str] = {}                # user_id -> @username (lower, без @) для быстрого обратного поиска
 bot_self_id: int | None = None                     # id самого бота (для защиты цели), ставится в main()
 bot_username: str | None = None                    # @username бота (для deep-link верификации), ставится в main()
 verify_wait: dict[int, dict] = {}                  # user_id -> {chat_id, notice_id, joined, name, task} — ждут номер в ЛС
@@ -211,10 +217,8 @@ def id_mention(uid: int, name: str = "пользователь") -> str:
 
 def cached_name(uid: int) -> str:
     """Быстрое имя без запросов к API: @ник из кэша либо 'id<num>'. Для клавиатур."""
-    for uname, cached in uname_cache.items():
-        if cached == uid:
-            return f"@{uname}"
-    return f"id{uid}"
+    uname = uid_name_cache.get(uid)
+    return f"@{uname}" if uname else f"id{uid}"
 
 
 async def display_name(chat_id: int, uid: int) -> str:
@@ -702,7 +706,7 @@ def known_members(chat_id: int) -> set[int]:
     """Id пользователей, которых бот видел в этом чате (трекинг/капча/новички)."""
     ids: set[int] = set()
     for store in (recent, msgcount, newcomer):
-        for (cid, uid) in list(store.keys()):
+        for cid, uid in store.keys():
             if cid == chat_id:
                 ids.add(uid)
     return ids
@@ -1193,13 +1197,28 @@ def antiflood_hit(chat_id: int, user_id: int) -> bool:
 
 # Команды, доступные ВСЕМ участникам (не считаются «чужой админ-командой»).
 PUBLIC_CMDS = {"rules", "report", "ping", "help", "vb", "start", "privacy",
-               "kubik", "dice", "game", "mafia", "мафия"}
+               "kubik", "dice", "game", "mafia", "мафия", "holdem", "poker",
+               "holdemhelp", "pokerhelp"}
 
 
 def _cmd_name(text: str) -> str | None:
     """Имя команды из текста ('/Ban@bot x' -> 'ban'); None, если это не команда."""
     m = re.match(r"^/([A-Za-z0-9_]+)", text or "")
     return m.group(1).split("@")[0].lower() if m else None
+
+
+def _mafia_chat_locked(msg: Message) -> bool:
+    """Игроку нельзя писать в общий чат вне дневного голосования."""
+    user = msg.from_user
+    if not user:
+        return False
+    game = mafia_games.get(msg.chat.id)
+    if not game:
+        return False
+    player = game.get("players", {}).get(user.id)
+    if not player or not player.get("alive"):
+        return False
+    return game.get("phase") != "day"
 
 
 class ModerationMiddleware(BaseMiddleware):
@@ -1289,6 +1308,18 @@ class ModerationMiddleware(BaseMiddleware):
                 await report(chat_id, "🌙 Ночной режим: сейчас писать могут только админы.")
             return True
 
+        # «Мафия»: живые игроки могут писать в общий чат только днём, во время голосования.
+        if _mafia_chat_locked(msg):
+            try:
+                await msg.delete()
+            except TelegramBadRequest:
+                pass
+            last = mafia_chat_notice.get(chat_id)
+            if not last or (now() - last).total_seconds() > 20:
+                mafia_chat_notice[chat_id] = now()
+                await report(chat_id, "🎭 Во время игры «Мафия» живые игроки могут писать в общий чат только во время дневного голосования.")
+            return True
+
         # Ограничение новичков: первые N часов нельзя ссылки/медиа.
         hrs = num("RESTRICT_NEWCOMERS_HOURS")
         if hrs > 0:
@@ -1346,7 +1377,8 @@ class ModerationMiddleware(BaseMiddleware):
             if flag("ANTIMAT_ENABLED") and textguard.has_profanity(text):
                 await apply_punishment(msg, "мат", action_for("TEXT_ACTION"))
                 return True
-            sw = textguard.find_stopword(text, storage.stopwords(),
+            stopwords = storage.stopwords()
+            sw = textguard.find_stopword(text, stopwords,
                                          fuzzy=flag("FUZZY_STOPWORDS"),
                                          max_distance=num("FUZZY_MAX_DISTANCE"))
             if sw:
@@ -2683,8 +2715,14 @@ def _mention_uid(message: Message):
 
 def uname_cache_add(user) -> None:
     """Запомнить @ник -> id (для последующего таргета по нику)."""
-    if getattr(user, "username", None):
-        uname_cache[user.username.lower()] = user.id
+    username = getattr(user, "username", None)
+    if username:
+        uname = username.lower()
+        old = uid_name_cache.get(user.id)
+        if old and old != uname:
+            uname_cache.pop(old, None)
+        uname_cache[uname] = user.id
+        uid_name_cache[user.id] = uname
 
 
 def _resolve_username(token: str):
@@ -4271,6 +4309,7 @@ async def cmd_help(message: Message):
             "/rep (ответом или свою) | /toprep — топ чата\n"
             "🎭 <b>Мафия:</b> /start (или /mafia) — собрать игру. Роли — в ЛС бота "
             "(сначала нажми Старт в личке), ночь — тайные действия, днём — голосование\n"
+            "🂡 <b>Texas Hold'em:</b> /holdem (или /poker) — стол в группе, карты в ЛС, общий стол — в чате\n"
             "/ping — проверить, что бот жив"
         )
         return
@@ -4325,6 +4364,47 @@ async def cmd_ping(message: Message):
     await message.answer("pong ✅ бот живой")
 
 
+@dp.message(Command("holdemhelp", "pokerhelp"))
+async def cmd_holdem_help(message: Message):
+    await message.answer(
+        "🂡 <b>Texas Hold'em — инструкция для новичков</b>\n\n"
+        "<b>Как проходит игра</b>\n"
+        "1. Каждый игрок получает по <b>2 закрытые карты</b> в личку.\n"
+        "2. В общий стол по ходу раздачи открываются <b>5 общих карт</b>.\n"
+        "3. Ты собираешь <b>лучшую комбинацию из 5 карт</b> из своих 2 карт и 5 общих.\n"
+        "4. Побеждает сильнейшая комбинация, либо все остальные игроки сдаются.\n\n"
+        "<b>Что означают кнопки</b>\n"
+        "• <b>Check</b> — пропустить ход без ставки, если ничего не нужно уравнивать.\n"
+        "• <b>Call</b> — уравнять текущую ставку.\n"
+        "• <b>Raise</b> — повысить ставку.\n"
+        "• <b>Fold</b> — сбросить карты и выйти из текущей раздачи.\n"
+        "• <b>All-in</b> — поставить все свои фишки.\n\n"
+        "<b>Если ты совсем новичок</b>\n"
+        "• Видишь <b>Check</b> — это самый безопасный вариант.\n"
+        "• Если карты плохие и уже нужно много докладывать — часто лучше <b>Fold</b>.\n"
+        "• Если у тебя пара, две пары, сет или сильное совпадение со столом — можно думать про <b>Call</b> или <b>Raise</b>.\n\n"
+        "<b>Комбинации от слабой к сильной</b>\n"
+        "1. <b>Старшая карта</b> — ничего не совпало.\n"
+        "2. <b>Пара</b> — две одинаковые карты.\n"
+        "3. <b>Две пары</b> — две отдельные пары.\n"
+        "4. <b>Сет</b> — три одинаковые карты.\n"
+        "5. <b>Стрит</b> — пять карт подряд.\n"
+        "6. <b>Флеш</b> — пять карт одной масти.\n"
+        "7. <b>Фулл-хаус</b> — сет и пара.\n"
+        "8. <b>Каре</b> — четыре одинаковые карты.\n"
+        "9. <b>Стрит-флеш</b> — пять подряд одной масти.\n\n"
+        "<b>Правила у этого стола</b>\n"
+        f"• Стартовый стек: <b>{holdem.STARTING_STACK}</b> фишек.\n"
+        f"• На решение даётся <b>{holdem.TURN_TIMEOUT_SEC} секунд</b>.\n"
+        "• Первый пропуск — автоход.\n"
+        "• Второй пропуск — дисквалификация до новой игры.\n\n"
+        "<b>Как начать</b>\n"
+        "• В группе: <code>/holdem</code> или <code>/poker</code>\n"
+        "• Для справки: <code>/holdemhelp</code>\n"
+        "• Перед игрой открой бота в личке и нажми <b>Старт</b>, чтобы я мог присылать карты."
+    )
+
+
 # ------------------------------------------------------------- игра «кубик»
 def _dice_leaders(rolls: dict) -> list:
     """uid с максимальным броском: один — победитель, несколько — переброс."""
@@ -4356,6 +4436,9 @@ async def dice_start(message: Message):
     chat_id = message.chat.id
     if chat_id in dice_games:
         await message.reply("🎲 Игра уже идёт — жми кнопки под сообщением игры.")
+        return
+    if chat_id in holdem_games or chat_id in mafia_games:
+        await message.reply("Сейчас в чате уже идёт другая игра. Сначала заверши её.")
         return
     game = {"players": {}, "host": message.from_user.id, "rolling": False, "msg_id": 0}
     dice_games[chat_id] = game
@@ -4470,6 +4553,332 @@ async def _dice_run(chat_id: int, game: dict):
     finally:
         dice_games.pop(chat_id, None)
         asyncio.create_task(_dice_cleanup(chat_id, msgs))
+
+
+# ============================ Texas Hold'em =================================
+
+
+def _holdem_board_text(game: dict) -> str:
+    table = game["table"]
+    players = table["players"]
+    seats = table["seats"]
+    lines = ["🂡 <b>Texas Hold'em</b>"]
+    phase = table.get("phase")
+    if phase == "lobby":
+        roster = []
+        for uid in seats:
+            p = players[uid]
+            roster.append(f"• {id_mention(uid, p['name'])} — <b>{p['stack']}</b> фишек")
+        who = "\n".join(roster) or "<i>пока никто</i>"
+        lines.append(f"Игроков: <b>{len(seats)}</b> (мин. {holdem.MIN_PLAYERS})")
+        lines.append(who)
+        lines.append("")
+        lines.append("У каждого стартовый стек 35 000. Карты придут в ЛС. Жми «Войти».")
+        return "\n".join(lines)
+
+    lines.append(f"Раздача: <b>#{table.get('hand_no', 0)}</b> · улица: <b>{esc(holdem.street_name(table.get('street')))}</b>")
+    lines.append(f"Банк: <b>{table.get('pot', 0)}</b>")
+    lines.append(f"Стол: {esc(holdem.format_cards(table.get('board', [])))}")
+    lines.append("")
+    for uid in seats:
+        p = players[uid]
+        if not p.get("in_table") and p.get("stack", 0) <= 0:
+            status = "вылетел"
+        elif p.get("folded"):
+            status = "fold"
+        elif p.get("all_in"):
+            status = f"all-in {p['street_bet']}"
+        elif table.get("current_turn") == uid:
+            status = f"ход · to call {holdem.player_to_call(table, uid)}"
+        else:
+            status = p.get("last_action") or f"в игре · {p['street_bet']}"
+        marker = "👉 " if table.get("current_turn") == uid else "• "
+        lines.append(f"{marker}{id_mention(uid, p['name'])} — {p['stack']} фишек · {esc(status)}")
+    if table.get("last_event"):
+        lines.append("")
+        lines.append(esc(table["last_event"]).replace("\n", "\n"))
+    return "\n".join(lines)
+
+
+def _holdem_lobby_kb() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(inline_keyboard=[[ 
+        InlineKeyboardButton(text="🪑 Войти", callback_data="th:join"),
+        InlineKeyboardButton(text="▶️ Начать", callback_data="th:start"),
+        InlineKeyboardButton(text="❌ Отмена", callback_data="th:cancel"),
+    ]])
+
+
+def _holdem_turn_kb(chat_id: int, uid: int, opts: dict) -> InlineKeyboardMarkup:
+    rows = []
+    row = []
+    if opts.get("check"):
+        row.append(InlineKeyboardButton(text="✅ Check", callback_data=f"thm:{chat_id}:{uid}:check"))
+    if opts.get("call"):
+        row.append(InlineKeyboardButton(text=f"💰 Call {opts.get('call_amount', 0)}",
+                                        callback_data=f"thm:{chat_id}:{uid}:call"))
+    if row:
+        rows.append(row)
+    row = [InlineKeyboardButton(text="↩️ Fold", callback_data=f"thm:{chat_id}:{uid}:fold")]
+    if opts.get("all_in"):
+        row.append(InlineKeyboardButton(text="🚨 All-in", callback_data=f"thm:{chat_id}:{uid}:allin"))
+    rows.append(row)
+    raises = opts.get("raise_to", []) or []
+    if raises:
+        rows.append([InlineKeyboardButton(text=f"📈 Raise до {amt}",
+                                          callback_data=f"thm:{chat_id}:{uid}:raise:{amt}")]
+                    for amt in raises)
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+async def _holdem_dm(uid: int, text: str, kb: InlineKeyboardMarkup | None = None) -> bool:
+    try:
+        await bot.send_message(uid, text, reply_markup=kb)
+        return True
+    except (TelegramForbiddenError, TelegramBadRequest):
+        return False
+
+
+async def _holdem_refresh(chat_id: int):
+    game = holdem_games.get(chat_id)
+    if not game:
+        return
+    try:
+        await bot.edit_message_text(_holdem_board_text(game), chat_id, game["msg_id"],
+                                    reply_markup=_holdem_lobby_kb() if game["table"].get("phase") == "lobby" else None)
+    except TelegramBadRequest:
+        pass
+
+
+async def _holdem_cancel_timer(chat_id: int):
+    task = holdem_turn_tasks.pop(chat_id, None)
+    if task and not task.done():
+        task.cancel()
+
+
+async def _holdem_send_turn_prompt(chat_id: int):
+    game = holdem_games.get(chat_id)
+    if not game:
+        return
+    table = game["table"]
+    uid = table.get("current_turn")
+    if not uid or table.get("phase") != "playing":
+        return
+    opts = holdem.allowed_actions(table, uid)
+    if not opts:
+        return
+    p = table["players"][uid]
+    owe = holdem.player_to_call(table, uid)
+    text = (f"🂠 Твой ход за столом <code>{chat_id}</code>.\n"
+            f"Стол: {holdem.format_cards(table.get('board', []))}\n"
+            f"Твои карты: {holdem.format_cards(p.get('hole', []))}\n"
+            f"Банк: {table.get('pot', 0)} · Нужно доставить: {owe}\n"
+            f"У тебя {holdem.TURN_TIMEOUT_SEC} сек на решение.")
+    await _holdem_dm(uid, text, _holdem_turn_kb(chat_id, uid, opts))
+    await _holdem_cancel_timer(chat_id)
+    table["turn_token"] = table.get("turn_token", 0) + 1
+    holdem_turn_tasks[chat_id] = asyncio.create_task(_holdem_turn_timer(chat_id, table["turn_token"], uid))
+
+
+async def _holdem_announce_hole_cards(chat_id: int):
+    game = holdem_games.get(chat_id)
+    if not game:
+        return
+    table = game["table"]
+    for uid in holdem.active_table_players(table):
+        p = table["players"][uid]
+        holdem_player_chat[uid] = chat_id
+        await _holdem_dm(uid,
+            f"🂠 Раздача #{table['hand_no']}\nТвои карты: {holdem.format_cards(p.get('hole', []))}\n"
+            f"Стек: {p['stack']} фишек")
+
+
+async def _holdem_after_action(chat_id: int):
+    game = holdem_games.get(chat_id)
+    if not game:
+        return
+    table = game["table"]
+    await _holdem_refresh(chat_id)
+    if table.get("phase") == "between_hands":
+        if len(holdem.active_table_players(table)) < 2 or table.get("phase") == "finished":
+            return await _holdem_finish_if_needed(chat_id)
+        await asyncio.sleep(4)
+        holdem.begin_hand(table)
+        await _holdem_announce_hole_cards(chat_id)
+        await _holdem_refresh(chat_id)
+        await _holdem_send_turn_prompt(chat_id)
+    elif table.get("phase") == "finished":
+        await _holdem_finish_if_needed(chat_id)
+    else:
+        await _holdem_send_turn_prompt(chat_id)
+
+
+async def _holdem_timeout_apply(chat_id: int, uid: int):
+    game = holdem_games.get(chat_id)
+    if not game:
+        return
+    table = game["table"]
+    if table.get("current_turn") != uid or table.get("phase") != "playing":
+        return
+    p = table["players"].get(uid)
+    if not p:
+        return
+    p["misses"] = p.get("misses", 0) + 1
+    if p["misses"] >= holdem.MAX_TIMEOUTS:
+        holdem.disqualify_player(table, uid)
+        table["last_event"] = f"⛔ {p['name']} дисквалифицирован за повторный пропуск хода."
+    else:
+        opts = holdem.allowed_actions(table, uid)
+        if opts.get("check"):
+            holdem.apply_action(table, uid, "check")
+            table["last_event"] = f"⏭ {p['name']} не ответил — авто-check."
+        elif opts.get("call") and opts.get("call_amount", 0) == 0:
+            holdem.apply_action(table, uid, "call")
+            table["last_event"] = f"⏭ {p['name']} не ответил — авто-check."
+        else:
+            holdem.apply_action(table, uid, "fold")
+            table["last_event"] = f"⏭ {p['name']} не ответил — авто-fold."
+    await _holdem_after_action(chat_id)
+
+
+async def _holdem_turn_timer(chat_id: int, token: int, uid: int):
+    try:
+        await asyncio.sleep(holdem.TURN_TIMEOUT_SEC)
+        game = holdem_games.get(chat_id)
+        if not game:
+            return
+        table = game["table"]
+        if table.get("turn_token") != token:
+            return
+        await _holdem_timeout_apply(chat_id, uid)
+    except asyncio.CancelledError:
+        return
+
+
+async def _holdem_finish_if_needed(chat_id: int):
+    game = holdem_games.get(chat_id)
+    if not game:
+        return
+    table = game["table"]
+    if table.get("phase") != "finished":
+        return
+    await _holdem_cancel_timer(chat_id)
+    await _holdem_refresh(chat_id)
+    holdem_games.pop(chat_id, None)
+    for uid in list(holdem_player_chat):
+        if holdem_player_chat.get(uid) == chat_id:
+            holdem_player_chat.pop(uid, None)
+
+
+@dp.message(Command("holdem", "poker"), F.chat.type.in_({"group", "supergroup"}))
+async def holdem_open(message: Message):
+    chat_id = message.chat.id
+    if chat_id in holdem_games:
+        await message.reply("🂡 Холдем уже идёт — используй кнопки под сообщением стола.")
+        return
+    if chat_id in mafia_games or chat_id in dice_games:
+        await message.reply("Сейчас в чате уже идёт другая игра. Сначала заверши её.")
+        return
+    game = {"table": holdem.new_table(message.from_user.id), "msg_id": 0}
+    holdem_games[chat_id] = game
+    sent = await message.answer(_holdem_board_text(game), reply_markup=_holdem_lobby_kb())
+    game["msg_id"] = sent.message_id
+
+
+@dp.callback_query(F.data.startswith("th:"))
+async def holdem_lobby_cb(cb: CallbackQuery):
+    chat_id = cb.message.chat.id
+    game = holdem_games.get(chat_id)
+    if not game:
+        await cb.answer("Стол уже закрыт.")
+        return
+    table = game["table"]
+    action = cb.data.split(":", 1)[1]
+    uid = cb.from_user.id
+    if action == "join":
+        if table.get("phase") != "lobby":
+            await cb.answer("Игра уже началась.")
+            return
+        ok = await _holdem_dm(uid, "✅ Ты сел за стол Texas Hold'em. С началом раздачи пришлю карты сюда.")
+        if not ok:
+            await cb.answer("Сначала открой бота в ЛС и нажми Старт, потом возвращайся.", show_alert=True)
+            return
+        if not holdem.add_player(table, uid, cb.from_user.full_name):
+            await cb.answer("Стол заполнен или уже закрыт.", show_alert=True)
+            return
+        holdem_player_chat[uid] = chat_id
+        uname_cache_add(cb.from_user)
+        await cb.answer("Ты за столом! 🂡")
+        await _holdem_refresh(chat_id)
+    elif action == "cancel":
+        await _holdem_cancel_timer(chat_id)
+        holdem_games.pop(chat_id, None)
+        for uid2 in list(holdem_player_chat):
+            if holdem_player_chat.get(uid2) == chat_id:
+                holdem_player_chat.pop(uid2, None)
+        await cb.answer("Стол закрыт.")
+        try:
+            await cb.message.edit_text("🂡 Стол Texas Hold'em закрыт.")
+        except TelegramBadRequest:
+            pass
+    elif action == "start":
+        res = holdem.start_tournament(table)
+        if not res.get("ok"):
+            await cb.answer("Нужно минимум 2 игрока.", show_alert=True)
+            return
+        await cb.answer("Поехали! 🂡")
+        await _holdem_announce_hole_cards(chat_id)
+        await _holdem_refresh(chat_id)
+        await _holdem_send_turn_prompt(chat_id)
+    else:
+        await cb.answer()
+
+
+@dp.callback_query(F.data.startswith("thm:"))
+async def holdem_move_cb(cb: CallbackQuery):
+    parts = cb.data.split(":")
+    if len(parts) < 4:
+        await cb.answer()
+        return
+    chat_id = int(parts[1])
+    uid = int(parts[2])
+    action = parts[3]
+    amount = int(parts[4]) if len(parts) > 4 and parts[4].lstrip("-").isdigit() else None
+    game = holdem_games.get(chat_id)
+    if not game:
+        await cb.answer("Стол уже закрыт.")
+        return
+    table = game["table"]
+    if cb.from_user.id != uid:
+        await cb.answer("Это не твой ход.", show_alert=True)
+        return
+    if table.get("current_turn") != uid:
+        await cb.answer("Сейчас ход другого игрока.", show_alert=True)
+        return
+    await _holdem_cancel_timer(chat_id)
+    mapped = {"check": "check", "call": "call", "fold": "fold", "allin": "allin", "raise": "raise"}
+    res = holdem.apply_action(table, uid, mapped.get(action, action), amount)
+    if not res.get("ok"):
+        await cb.answer("Ход не принят.", show_alert=True)
+        await _holdem_send_turn_prompt(chat_id)
+        return
+    await cb.answer("Ход принят.")
+    await _holdem_after_action(chat_id)
+
+
+@dp.message(Command("stopholdem", "stoppoker"), F.chat.type.in_({"group", "supergroup"}))
+async def holdem_stop_cmd(message: Message):
+    chat_id = message.chat.id
+    if chat_id not in holdem_games:
+        await message.reply("Сейчас Texas Hold'em не идёт.")
+        return
+    if not await _staff_only(message):
+        return
+    await _holdem_cancel_timer(chat_id)
+    holdem_games.pop(chat_id, None)
+    for uid in list(holdem_player_chat):
+        if holdem_player_chat.get(uid) == chat_id:
+            holdem_player_chat.pop(uid, None)
+    await message.reply("🛑 Стол Texas Hold'em остановлен админом.")
 
 
 # ============================== Игра «Мафия» ================================
@@ -4589,7 +4998,7 @@ async def mafia_open(message: Message):
     if chat_id in mafia_games:
         await message.reply("🎭 «Мафия» уже идёт — используй кнопки под её сообщением.")
         return
-    if chat_id in dice_games:
+    if chat_id in dice_games or chat_id in holdem_games:
         await message.reply("Сейчас идёт другая игра. Заверши её, потом запускай «Мафию».")
         return
     game = {"phase": "lobby", "players": {}, "host": message.from_user.id,
@@ -5600,9 +6009,10 @@ async def panel_entry(message: Message):
     # это нужно, чтобы бот мог прислать роль в игре «Мафия».
     if _cmd_name(message.text or "") == "start":
         await message.answer(
-            "👋 Привет! Я бот-модератор и ведущий игры «Мафия».\n\n"
-            "🎭 Теперь я могу писать тебе в личку. Зайди в чат, где идёт набор "
-            "в «Мафию», и жми «🎮 Присоединиться» — роль пришлю сюда.\n\n")
+            "👋 Привет! Я бот-модератор и ведущий игр.\n\n"
+            "🎭 Для «Мафии» я пришлю сюда роль и ночные действия.\n"
+            "🂡 Для Texas Hold'em я пришлю сюда твои закрытые карты и кнопки хода.\n\n"
+            "Если ты новичок в покере, используй команду <code>/holdemhelp</code> — там есть простая инструкция и все комбинации.\n\n")
         return
     panel_state[uid] = "await_pass"
     await message.answer("🔒 Введи пароль для доступа к панели управления:")
