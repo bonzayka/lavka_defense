@@ -12,7 +12,7 @@ import itertools
 import random
 from collections import Counter
 
-STARTING_STACK = 35_000
+STARTING_STACK = 50_000
 SMALL_BLIND = 500
 BIG_BLIND = 1_000
 TURN_TIMEOUT_SEC = 60

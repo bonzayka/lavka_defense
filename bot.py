@@ -4395,8 +4395,9 @@ async def cmd_holdem_help(message: Message):
         "9. <b>Стрит-флеш</b> — пять подряд одной масти.\n\n"
         "<b>Правила у этого стола</b>\n"
         f"• Стартовый стек: <b>{holdem.STARTING_STACK}</b> фишек.\n"
+        f"• Блайнды: <b>{holdem.SMALL_BLIND}</b> / <b>{holdem.BIG_BLIND}</b> (малый / большой).\n"
         f"• На решение даётся <b>{holdem.TURN_TIMEOUT_SEC} секунд</b>.\n"
-        "• Первый пропуск — автоход.\n"
+        "• Первый пропуск — авто-check, а если нужно уравнивать ставку — auto-fold.\n"
         "• Второй пропуск — дисквалификация до новой игры.\n\n"
         "<b>Как начать</b>\n"
         "• В группе: <code>/holdem</code> или <code>/poker</code>\n"
@@ -4573,7 +4574,7 @@ def _holdem_board_text(game: dict) -> str:
         lines.append(f"Игроков: <b>{len(seats)}</b> (мин. {holdem.MIN_PLAYERS})")
         lines.append(who)
         lines.append("")
-        lines.append("У каждого стартовый стек 35 000. Карты придут в ЛС. Жми «Войти».")
+        lines.append("У каждого стартовый стек 50 000. Блайнды: SB 500 / BB 1000. Карты придут в ЛС. Жми «Войти».")
         return "\n".join(lines)
 
     lines.append(f"Раздача: <b>#{table.get('hand_no', 0)}</b> · улица: <b>{esc(holdem.street_name(table.get('street')))}</b>")
@@ -4644,7 +4645,7 @@ async def _holdem_refresh(chat_id: int):
     text = _holdem_board_text(game)
     kb = _holdem_lobby_kb() if game["table"].get("phase") == "lobby" else None
     try:
-        await bot.edit_message_text(text, chat_id, game["msg_id"], reply_markup=kb)
+        await bot.edit_message_text(text=text, chat_id=chat_id, message_id=game["msg_id"], reply_markup=kb)
     except TelegramBadRequest as e:
         log.warning("holdem refresh failed chat=%s: %s", chat_id, e)
 
