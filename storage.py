@@ -37,6 +37,8 @@ _DEFAULT = {
     "verified_phones": {},    # str(user_id) -> {"prefix","tail","ts"} — прошли верификацию по номеру (глобально)
     "pending_verify": {},     # str(user_id) -> {"chat","notice","ts"} — ждут подтверждения номера в ЛС
     "activity": {},           # "chat:user" -> {"msgs","first_seen","last_seen"} — активность (старожилы + бэкап)
+    "reputation": {},         # "chat:user" -> {"score","plus","minus"} — репутация (+реп/-реп)
+    "rep_log": {},            # "chat:giver:target" -> ISO-время последней выдачи (кулдаун раз в сутки)
 }
 
 AUDIT_LIMIT = 200
@@ -520,3 +522,54 @@ def set_activity_msgs(chat_id: int, user_id: int, msgs: int, ts_iso: str) -> Non
     rec["msgs"] = msgs
     rec["last_seen"] = ts_iso
     rec.setdefault("first_seen", ts_iso)
+
+
+# --- репутация (+реп / -реп), пер-чат ---
+
+def _rep_all() -> dict:
+    return _data.setdefault("reputation", {})
+
+
+def get_rep(chat_id: int, user_id: int) -> dict:
+    """Счётчик репутации юзера в чате: {"score", "plus", "minus"}."""
+    rec = _rep_all().get(_key(chat_id, user_id)) or {}
+    return {"score": int(rec.get("score", 0)),
+            "plus": int(rec.get("plus", 0)),
+            "minus": int(rec.get("minus", 0))}
+
+
+def rep_last_given(chat_id: int, giver_id: int, target_id: int) -> str:
+    """ISO-время последней выдачи репутации от giver к target (или "")."""
+    return _data.setdefault("rep_log", {}).get(f"{chat_id}:{giver_id}:{target_id}", "")
+
+
+def add_rep(chat_id: int, giver_id: int, target_id: int, delta: int, ts_iso: str) -> dict:
+    """Начислить +1/-1 получателю и запомнить время выдачи. Возвращает новый счётчик."""
+    k = _key(chat_id, target_id)
+    rec = _rep_all().setdefault(k, {"score": 0, "plus": 0, "minus": 0})
+    rec["score"] = int(rec.get("score", 0)) + (1 if delta > 0 else -1)
+    if delta > 0:
+        rec["plus"] = int(rec.get("plus", 0)) + 1
+    else:
+        rec["minus"] = int(rec.get("minus", 0)) + 1
+    _data.setdefault("rep_log", {})[f"{chat_id}:{giver_id}:{target_id}"] = ts_iso
+    save()
+    return {"score": rec["score"], "plus": rec["plus"], "minus": rec["minus"]}
+
+
+def rep_top(chat_id: int, n: int = 10) -> list:
+    """Топ по репутации в чате: [(user_id, rec), ...] по убыванию score."""
+    prefix = f"{chat_id}:"
+    items = []
+    for k, rec in _rep_all().items():
+        if not k.startswith(prefix):
+            continue
+        try:
+            uid = int(k.split(":", 1)[1])
+        except (ValueError, IndexError):
+            continue
+        items.append((uid, {"score": int(rec.get("score", 0)),
+                            "plus": int(rec.get("plus", 0)),
+                            "minus": int(rec.get("minus", 0))}))
+    items.sort(key=lambda x: x[1]["score"], reverse=True)
+    return items[:n]

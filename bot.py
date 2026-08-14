@@ -2014,7 +2014,13 @@ async def on_member_joined(event: ChatMemberUpdated):
 
 @dp.message(F.new_chat_members)
 async def on_new_members(message: Message):
-    if config.DELETE_JOIN_MESSAGE or flag("DELETE_SERVICE_MESSAGES"):
+    chat_id = message.chat.id
+    # Во время рейда/локдауна/ЧС не показываем в чате служебные «X вошёл» —
+    # чистим их принудительно, даже если удаление входов в настройках выключено.
+    raid_now = (flag("LOCKDOWN")
+                or (raid_until.get(chat_id) is not None and raid_until[chat_id] > now())
+                or crisis_active(chat_id))
+    if config.DELETE_JOIN_MESSAGE or flag("DELETE_SERVICE_MESSAGES") or raid_now:
         try:
             await message.delete()
         except TelegramBadRequest:
@@ -3821,6 +3827,159 @@ _WORD_PERM = {"мут": "mute", "mute": "mute", "размут": "mute", "unmute"
               "варн": "warn", "warn": "warn", "кик": "kick", "kick": "kick"}
 
 
+# ======================= Система репутации (+реп / -реп) ====================
+# Участники в ответ на сообщение пишут «+реп»/«-реп» (или /rep) и меняют
+# репутацию автора на ±1. На одного получателя — не чаще раза в REP_COOLDOWN_HOURS
+# (по умолчанию сутки). Себе и ботам нельзя. Визуал: ранг-бейдж, шкала 👍/👎, /toprep.
+
+# «+реп», «-реп», «+rep», «-rep», «+респект» и т.п. в начале строки.
+REP_PATTERN = r"(?i)^\s*([+\-])\s*(?:реп|rep|rp|респект|репутаци\w*|respect)\b"
+
+# Ранги по очкам: (порог_минимум, эмодзи, название). Берём последний подходящий.
+REP_TIERS = [
+    (-10 ** 9, "☠️", "Изгой"),
+    (-4,       "⚠️", "Подозрительный"),
+    (0,        "🌱", "Новичок"),
+    (10,       "🙂", "Участник"),
+    (25,       "⭐", "Уважаемый"),
+    (50,       "🏅", "Ветеран"),
+    (100,      "💎", "Авторитет"),
+    (250,      "👑", "Легенда"),
+]
+
+
+def rep_badge(score: int) -> tuple[str, str]:
+    """(эмодзи, название ранга) по числу очков репутации."""
+    badge, title = "🌱", "Новичок"
+    for threshold, emoji, name in REP_TIERS:
+        if score >= threshold:
+            badge, title = emoji, name
+    return badge, title
+
+
+def rep_bar(rec: dict, width: int = 10) -> str:
+    """Визуальная шкала 👍/👎 из зелёных/красных квадратов."""
+    plus, minus = rec.get("plus", 0), rec.get("minus", 0)
+    total = plus + minus
+    if not total:
+        return "▫️" * width
+    filled = round(plus / total * width)
+    filled = max(0, min(width, filled))
+    return "🟩" * filled + "🟥" * (width - filled)
+
+
+def rep_card(name: str, rec: dict) -> str:
+    """Карточка репутации пользователя (для /rep и начисления)."""
+    badge, title = rep_badge(rec["score"])
+    return (f"{badge} <b>Репутация</b> — {esc(name)}\n"
+            f"Ранг: <b>{title}</b>\n"
+            f"Очки: <b>{rec['score']:+d}</b>\n"
+            f"{rep_bar(rec)}\n"
+            f"👍 {rec['plus']}   👎 {rec['minus']}")
+
+
+async def _rep_notice(message: Message, text: str, ttl: int = 12) -> None:
+    """Короткое уведомление, которое само удалится (чтобы не сорить в чате)."""
+    try:
+        m = await message.reply(text, disable_web_page_preview=True)
+        asyncio.create_task(_autodelete(message.chat.id, m.message_id, ttl))
+    except TelegramBadRequest:
+        pass
+
+
+@dp.message(F.reply_to_message, F.text.regexp(REP_PATTERN),
+            F.chat.type.in_({"group", "supergroup"}))
+async def on_rep(message: Message):
+    if not flag("REP_ENABLED"):
+        return
+    giver = message.from_user
+    target = message.reply_to_message.from_user
+    if not giver or not target:
+        return
+    chat_id = message.chat.id
+    m = re.match(REP_PATTERN, message.text or "")
+    if not m:
+        return
+    delta = 1 if m.group(1) == "+" else -1
+    if target.id == giver.id:
+        await _rep_notice(message, "🚫 Нельзя менять репутацию самому себе.")
+        return
+    if target.is_bot:
+        await _rep_notice(message, "🤖 Ботам репутация не начисляется.")
+        return
+    # Кулдаун: одному человеку — раз в REP_COOLDOWN_HOURS.
+    cd = num("REP_COOLDOWN_HOURS") * 3600
+    last_dt = _parse_ts(storage.rep_last_given(chat_id, giver.id, target.id))
+    if cd > 0 and last_dt:
+        elapsed = (now() - last_dt).total_seconds()
+        if elapsed < cd:
+            left = int(cd - elapsed)
+            await _rep_notice(
+                message,
+                f"⏳ Ты уже оценивал(а) этого участника. "
+                f"Повторно можно через {human_duration(left)}.")
+            return
+    uname_cache_add(target)
+    uname_cache_add(giver)
+    rec = storage.add_rep(chat_id, giver.id, target.id, delta, now().isoformat())
+    if flag("REP_ANNOUNCE"):
+        verb = "повысил репутацию" if delta > 0 else "понизил репутацию"
+        sign = "➕" if delta > 0 else "➖"
+        try:
+            await message.reply(
+                f"{sign} {mention(giver)} {verb} → {mention(target)}\n\n"
+                f"{rep_card(target.full_name, rec)}",
+                disable_web_page_preview=True)
+        except TelegramBadRequest:
+            pass
+    else:
+        badge, _ = rep_badge(rec["score"])
+        await _rep_notice(
+            message,
+            f"{'➕' if delta > 0 else '➖'} Репутация {mention(target)}: "
+            f"<b>{rec['score']:+d}</b> {badge}", ttl=8)
+
+
+@dp.message(Command("rep", "reputation", "myrep"),
+            F.chat.type.in_({"group", "supergroup"}))
+async def cmd_rep(message: Message):
+    """Показать карточку репутации (ответом на юзера, по id/@нику или свою)."""
+    if not flag("REP_ENABLED"):
+        return
+    chat_id = message.chat.id
+    uid = _target_id(message)
+    if not uid:
+        uid = message.from_user.id if message.from_user else None
+    if not uid:
+        await message.answer("Ответь /rep на пользователя или напиши /rep для своей репутации.")
+        return
+    name = await display_name(chat_id, uid)
+    await message.answer(rep_card(name, storage.get_rep(chat_id, uid)),
+                         disable_web_page_preview=True)
+
+
+@dp.message(Command("toprep", "reptop", "topreputation"),
+            F.chat.type.in_({"group", "supergroup"}))
+async def cmd_toprep(message: Message):
+    """Топ участников по репутации в этом чате."""
+    if not flag("REP_ENABLED"):
+        return
+    chat_id = message.chat.id
+    top = storage.rep_top(chat_id, 10)
+    if not top:
+        await message.answer("📊 Репутаций пока нет. Отвечай «+реп» / «-реп» на сообщения участников.")
+        return
+    medals = ["🥇", "🥈", "🥉"]
+    lines = ["🏆 <b>Топ по репутации</b>"]
+    for i, (uid, rec) in enumerate(top):
+        badge, _ = rep_badge(rec["score"])
+        pos = medals[i] if i < 3 else f"{i + 1}."
+        name = await display_name(chat_id, uid)
+        lines.append(f"{pos} {badge} {esc(name)} — <b>{rec['score']:+d}</b> "
+                     f"(👍{rec['plus']}/👎{rec['minus']})")
+    await message.answer("\n".join(lines))
+
+
 @dp.message(F.reply_to_message, F.text.regexp(NL_PATTERN))
 async def nl_command(message: Message):
     if not message.from_user:
@@ -4088,6 +4247,8 @@ async def cmd_help(message: Message):
             "/rules — правила чата\n"
             "/report (ответом на сообщение) — пожаловаться модераторам\n"
             "/vb (ответом) — предложить голосование за заглушение\n"
+            "⭐ <b>Репутация:</b> ответь «+реп» / «-реп» на сообщение (раз в сутки)\n"
+            "/rep (ответом или свою) | /toprep — топ чата\n"
             "/ping — проверить, что бот жив"
         )
         return
