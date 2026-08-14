@@ -58,6 +58,7 @@ import dcguard
 import deanon
 import deleted
 import gore
+import mafia
 import manager
 import nsfwvit
 import riskscore
@@ -117,6 +118,8 @@ panel_newbot: dict[int, dict] = {}                 # черновик созда
 ub_login: dict[int, dict] = {}                     # состояние скрытого логина юзербота (uid -> telethon state)
 msgcount: dict[tuple[int, int], int] = {}          # счётчик сообщений юзеров (с момента старта)
 dice_games: dict[int, dict] = {}                   # chat_id -> game state
+mafia_games: dict[int, dict] = {}                  # chat_id -> состояние игры «Мафия»
+mafia_player_chat: dict[int, int] = {}             # uid -> chat_id активной игры (для ночных ЛС-кнопок)
 uname_cache: dict[str, int] = {}                   # "@username" (lower, без @) -> user_id (для таргета по нику)
 bot_self_id: int | None = None                     # id самого бота (для защиты цели), ставится в main()
 bot_username: str | None = None                    # @username бота (для deep-link верификации), ставится в main()
@@ -1190,7 +1193,7 @@ def antiflood_hit(chat_id: int, user_id: int) -> bool:
 
 # Команды, доступные ВСЕМ участникам (не считаются «чужой админ-командой»).
 PUBLIC_CMDS = {"rules", "report", "ping", "help", "vb", "start", "privacy",
-               "kubik", "dice", "game"}
+               "kubik", "dice", "game", "mafia", "мафия"}
 
 
 def _cmd_name(text: str) -> str | None:
@@ -4266,6 +4269,8 @@ async def cmd_help(message: Message):
             "/vb (ответом) — предложить голосование за заглушение\n"
             "⭐ <b>Репутация:</b> ответь «+реп» / «-реп» на сообщение (раз в сутки)\n"
             "/rep (ответом или свою) | /toprep — топ чата\n"
+            "🎭 <b>Мафия:</b> /start (или /mafia) — собрать игру. Роли — в ЛС бота "
+            "(сначала нажми Старт в личке), ночь — тайные действия, днём — голосование\n"
             "/ping — проверить, что бот жив"
         )
         return
@@ -4465,6 +4470,462 @@ async def _dice_run(chat_id: int, game: dict):
     finally:
         dice_games.pop(chat_id, None)
         asyncio.create_task(_dice_cleanup(chat_id, msgs))
+
+
+# ============================== Игра «Мафия» ================================
+# Лобби в группе (кнопка «Присоединиться»), роли — в ЛС, ночь — тайные действия
+# в ЛС (мафия/комиссар/доктор), день — голосование кнопками в группе. Активация:
+# /start (или /mafia) в группе. Игрок ДОЛЖЕН нажать /start в ЛС бота, иначе бот
+# не сможет прислать ему роль — при «Присоединиться» это проверяется.
+
+MAFIA_NIGHT_SEC = 60      # сколько ждём ночные действия
+MAFIA_DAY_SEC = 90        # сколько идёт дневное голосование
+MAFIA_LOBBY_SEC = 300     # через сколько распускается несостоявшееся лобби
+
+
+def _maf_players(game: dict) -> dict:
+    return game["players"]
+
+
+def _maf_lobby_text(game: dict) -> str:
+    ps = game["players"]
+    who = "\n".join("• " + id_mention(u, p["name"]) for u, p in ps.items()) or "<i>пока никто</i>"
+    return ("🎭 <b>Мафия</b> — сбор игроков\n"
+            f"Записалось: <b>{len(ps)}</b> (нужно минимум {mafia.MIN_PLAYERS})\n{who}\n\n"
+            "Жми «🎮 Присоединиться». Чтобы участвовать, бот должен уметь писать тебе "
+            "в ЛС — если войти не удаётся, открой бота и нажми <b>Старт</b>, потом "
+            "вернись и жми «Присоединиться». Когда все в сборе — «▶️ Начать».")
+
+
+def _maf_lobby_kb() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(inline_keyboard=[[
+        InlineKeyboardButton(text="🎮 Присоединиться", callback_data="maf:join"),
+        InlineKeyboardButton(text="▶️ Начать", callback_data="maf:start"),
+        InlineKeyboardButton(text="❌ Отмена", callback_data="maf:cancel"),
+    ]])
+
+
+def _maf_pick_kb(action: str, chat_id: int, targets: list, players: dict) -> InlineKeyboardMarkup:
+    """Клавиатура выбора цели (ночное действие в ЛС): mn:<action>:<chat_id>:<uid>."""
+    rows = [[InlineKeyboardButton(text=players[u]["name"],
+                                  callback_data=f"mn:{action}:{chat_id}:{u}")]
+            for u in targets]
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def _maf_vote_kb(chat_id: int, targets: list, players: dict) -> InlineKeyboardMarkup:
+    """Клавиатура дневного голосования: md:<chat_id>:<uid|skip>."""
+    rows = [[InlineKeyboardButton(text=players[u]["name"],
+                                  callback_data=f"md:{chat_id}:{u}")]
+            for u in targets]
+    rows.append([InlineKeyboardButton(text="🤐 Пропустить", callback_data=f"md:{chat_id}:skip")])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def _maf_day_text(game: dict) -> str:
+    players = game["players"]
+    alive = mafia.alive_ids(players)
+    roster = "\n".join("• " + id_mention(u, players[u]["name"]) for u in alive)
+    return ("🗳 <b>День {r}. Голосование</b>\n"
+            "Обсуждайте события ночи и голосуйте, кого казнить. "
+            "Живых: <b>{n}</b>, проголосовало: <b>{v}</b>.\n\n{roster}\n\n"
+            "⏳ Голосование ~{sec} сек."
+            ).format(r=game.get("round", 1), n=len(alive),
+                     v=len(game.get("votes", {})), roster=roster, sec=MAFIA_DAY_SEC)
+
+
+async def _maf_dm(uid: int, chat_id: int, text: str,
+                  kb: InlineKeyboardMarkup | None = None) -> bool:
+    """Написать игроку в ЛС. False — если бот не может (юзер не нажал Старт)."""
+    try:
+        await bot.send_message(uid, text, reply_markup=kb)
+        return True
+    except (TelegramForbiddenError, TelegramBadRequest):
+        return False
+
+
+def _maf_night_ready(game: dict) -> bool:
+    """Все, кому есть что делать ночью (мафия/доктор/комиссар), уже сходили?"""
+    players = game["players"]
+    nt = game["night"]
+    for u in mafia.alive_by_role(players, mafia.ROLE_MAFIA):
+        if u not in nt["mafia_votes"]:
+            return False
+    if mafia.alive_by_role(players, mafia.ROLE_DOCTOR) and not nt["doctor_acted"]:
+        return False
+    if mafia.alive_by_role(players, mafia.ROLE_COMMISSAR) and not nt["commissar_acted"]:
+        return False
+    return True
+
+
+async def _maf_timer(chat_id: int, token: int, phase: str, delay: int):
+    """Форс-резолв фазы по таймауту (если фаза не сменилась раньше)."""
+    await asyncio.sleep(delay)
+    game = mafia_games.get(chat_id)
+    if not game or game.get("token") != token or game.get("phase") != phase:
+        return
+    if phase == "night":
+        await mafia_resolve_night(chat_id)
+    elif phase == "day":
+        await mafia_resolve_day(chat_id)
+
+
+async def _maf_lobby_expire(chat_id: int, game: dict):
+    await asyncio.sleep(MAFIA_LOBBY_SEC)
+    cur = mafia_games.get(chat_id)
+    if cur is game and game.get("phase") == "lobby":
+        mafia_games.pop(chat_id, None)
+        for u in list(game["players"]):
+            mafia_player_chat.pop(u, None)
+        try:
+            await bot.edit_message_text("🎭 Сбор на «Мафию» истёк — начните заново: /start",
+                                        chat_id, game["msg_id"])
+        except TelegramBadRequest:
+            pass
+
+
+async def mafia_open(message: Message):
+    chat_id = message.chat.id
+    if chat_id in mafia_games:
+        await message.reply("🎭 «Мафия» уже идёт — используй кнопки под её сообщением.")
+        return
+    if chat_id in dice_games:
+        await message.reply("Сейчас идёт другая игра. Заверши её, потом запускай «Мафию».")
+        return
+    game = {"phase": "lobby", "players": {}, "host": message.from_user.id,
+            "msg_id": 0, "votes": {}, "round": 0, "token": 0, "night": {}}
+    mafia_games[chat_id] = game
+    sent = await message.answer(_maf_lobby_text(game), reply_markup=_maf_lobby_kb())
+    game["msg_id"] = sent.message_id
+    asyncio.create_task(_maf_lobby_expire(chat_id, game))
+
+
+@dp.message(Command("mafia"), F.chat.type.in_({"group", "supergroup"}))
+async def mafia_cmd(message: Message):
+    await mafia_open(message)
+
+
+@dp.message(Command("start"), F.chat.type.in_({"group", "supergroup"}))
+async def mafia_start_cmd(message: Message):
+    """Активация «Мафии» прямо из группы командой /start."""
+    await mafia_open(message)
+
+
+@dp.callback_query(F.data.startswith("maf:"))
+async def mafia_lobby_cb(cb: CallbackQuery):
+    chat_id = cb.message.chat.id
+    game = mafia_games.get(chat_id)
+    if not game or game["phase"] != "lobby":
+        await cb.answer("Сбор уже завершён.")
+        return
+    action = cb.data.split(":", 1)[1]
+    uid = cb.from_user.id
+    if action == "join":
+        if uid in game["players"]:
+            await cb.answer("Ты уже в игре.")
+            return
+        if len(game["players"]) >= mafia.MAX_PLAYERS:
+            await cb.answer("Мест больше нет.", show_alert=True)
+            return
+        ok = await _maf_dm(uid, chat_id,
+                           "✅ Ты в игре «Мафия»! С началом партии пришлю твою роль сюда.")
+        if not ok:
+            await cb.answer("Сначала открой бота в ЛС и нажми Старт — иначе я не смогу "
+                            "прислать роль. Потом вернись и жми «Присоединиться».",
+                            show_alert=True)
+            return
+        game["players"][uid] = {"name": cb.from_user.full_name, "role": None, "alive": True}
+        mafia_player_chat[uid] = chat_id
+        uname_cache_add(cb.from_user)
+        await cb.answer("Ты в игре! 🎭")
+        try:
+            await cb.message.edit_text(_maf_lobby_text(game), reply_markup=_maf_lobby_kb())
+        except TelegramBadRequest:
+            pass
+    elif action == "cancel":
+        mafia_games.pop(chat_id, None)
+        for u in list(game["players"]):
+            mafia_player_chat.pop(u, None)
+        await cb.answer("Отменено.")
+        try:
+            await cb.message.edit_text("🎭 Игра «Мафия» отменена.")
+        except TelegramBadRequest:
+            pass
+    elif action == "start":
+        if len(game["players"]) < mafia.MIN_PLAYERS:
+            await cb.answer(f"Нужно минимум {mafia.MIN_PLAYERS} игрока.", show_alert=True)
+            return
+        game["phase"] = "starting"
+        await cb.answer("Поехали! 🎭")
+        try:
+            await cb.message.edit_reply_markup(reply_markup=None)
+        except TelegramBadRequest:
+            pass
+        await mafia_begin(chat_id)
+    else:
+        await cb.answer()
+
+
+async def mafia_begin(chat_id: int):
+    """Раздать роли (в ЛС) и начать первую ночь."""
+    game = mafia_games.get(chat_id)
+    if not game:
+        return
+    players = game["players"]
+    roles = mafia.assign_roles(list(players.keys()))
+    for uid, role in roles.items():
+        players[uid]["role"] = role
+        players[uid]["alive"] = True
+        emoji, title, desc = mafia.ROLE_INFO[role]
+        extra = ""
+        if role == mafia.ROLE_MAFIA:
+            team = [players[u]["name"] for u, r in roles.items()
+                    if r == mafia.ROLE_MAFIA and u != uid]
+            extra = ("\n\n👥 Твои подельники: " + ", ".join(esc(t) for t in team)) if team \
+                else "\n\nТы действуешь в одиночку."
+        await _maf_dm(uid, chat_id, f"Твоя роль: {emoji} <b>{title}</b>\n{desc}{extra}")
+    rl = list(roles.values())
+    await bot.send_message(
+        chat_id,
+        "🎭 <b>Игра началась!</b> Роли разосланы в личку.\n"
+        f"🔫 Мафия: {rl.count(mafia.ROLE_MAFIA)} · 🕵️ Комиссар: {rl.count(mafia.ROLE_COMMISSAR)} · "
+        f"💉 Доктор: {rl.count(mafia.ROLE_DOCTOR)} · 👤 Мирные: {rl.count(mafia.ROLE_CIVILIAN)}\n"
+        f"Всего игроков: {len(players)}.")
+    await mafia_start_night(chat_id)
+
+
+async def mafia_start_night(chat_id: int):
+    game = mafia_games.get(chat_id)
+    if not game:
+        return
+    game["phase"] = "night"
+    game["round"] = game.get("round", 0) + 1
+    game["night"] = {"mafia_votes": {}, "doctor_target": None,
+                     "doctor_acted": False, "commissar_acted": False}
+    game["token"] = game.get("token", 0) + 1
+    players = game["players"]
+    await bot.send_message(
+        chat_id,
+        f"🌙 <b>Ночь {game['round']}.</b> Город засыпает… Мафия выходит на охоту.\n"
+        "Тайные роли — проверьте личку бота и сделайте ход.")
+    mafiosi = mafia.alive_by_role(players, mafia.ROLE_MAFIA)
+    victims = [u for u in mafia.alive_ids(players) if players[u]["role"] != mafia.ROLE_MAFIA]
+    team = ", ".join(players[u]["name"] for u in mafiosi)
+    for u in mafiosi:
+        await _maf_dm(u, chat_id,
+                      f"🔫 <b>Ночь {game['round']}.</b> Банда: {esc(team)}.\nВыбери жертву:",
+                      _maf_pick_kb("kill", chat_id, victims, players))
+    for u in mafia.alive_by_role(players, mafia.ROLE_DOCTOR):
+        await _maf_dm(u, chat_id,
+                      f"💉 <b>Ночь {game['round']}.</b> Кого лечишь этой ночью?",
+                      _maf_pick_kb("heal", chat_id, mafia.alive_ids(players), players))
+    for u in mafia.alive_by_role(players, mafia.ROLE_COMMISSAR):
+        others = [x for x in mafia.alive_ids(players) if x != u]
+        await _maf_dm(u, chat_id,
+                      f"🕵️ <b>Ночь {game['round']}.</b> Кого проверить?",
+                      _maf_pick_kb("check", chat_id, others, players))
+    asyncio.create_task(_maf_timer(chat_id, game["token"], "night", MAFIA_NIGHT_SEC))
+
+
+@dp.callback_query(F.data.startswith("mn:"))
+async def mafia_night_cb(cb: CallbackQuery):
+    parts = cb.data.split(":")            # mn:<action>:<chat_id>:<target>
+    if len(parts) != 4:
+        await cb.answer()
+        return
+    action, chat_id, target = parts[1], int(parts[2]), int(parts[3])
+    game = mafia_games.get(chat_id)
+    if not game or game["phase"] != "night":
+        await cb.answer("Ночь уже прошла.")
+        return
+    players = game["players"]
+    uid = cb.from_user.id
+    me = players.get(uid)
+    if not me or not me["alive"]:
+        await cb.answer("Ты не в игре или выбыл.")
+        return
+    tgt = players.get(target)
+    if action == "kill":
+        if me["role"] != mafia.ROLE_MAFIA:
+            await cb.answer("Это не твоё действие.")
+            return
+        if not tgt or not tgt["alive"] or tgt["role"] == mafia.ROLE_MAFIA:
+            await cb.answer("Так нельзя.")
+            return
+        game["night"]["mafia_votes"][uid] = target
+        await cb.answer(f"Цель: {tgt['name']}")
+        try:
+            await cb.message.edit_text(f"🔫 Ты выбрал жертву: <b>{esc(tgt['name'])}</b>.\n"
+                                       "Ждём остальных…")
+        except TelegramBadRequest:
+            pass
+    elif action == "heal":
+        if me["role"] != mafia.ROLE_DOCTOR:
+            await cb.answer("Это не твоё действие.")
+            return
+        if not tgt or not tgt["alive"]:
+            await cb.answer("Так нельзя.")
+            return
+        game["night"]["doctor_target"] = target
+        game["night"]["doctor_acted"] = True
+        await cb.answer("Лечим!")
+        try:
+            await cb.message.edit_text(f"💉 Ты лечишь: <b>{esc(tgt['name'])}</b>.\nЖдём остальных…")
+        except TelegramBadRequest:
+            pass
+    elif action == "check":
+        if me["role"] != mafia.ROLE_COMMISSAR:
+            await cb.answer("Это не твоё действие.")
+            return
+        if not tgt or not tgt["alive"] or target == uid:
+            await cb.answer("Так нельзя.")
+            return
+        game["night"]["commissar_acted"] = True
+        verdict = "🔴 МАФИЯ" if tgt["role"] == mafia.ROLE_MAFIA else "🟢 не мафия"
+        await cb.answer()
+        try:
+            await cb.message.edit_text(f"🕵️ Проверка: <b>{esc(tgt['name'])}</b> — {verdict}.")
+        except TelegramBadRequest:
+            pass
+    else:
+        await cb.answer()
+        return
+    if _maf_night_ready(game):
+        await mafia_resolve_night(chat_id)
+
+
+async def mafia_resolve_night(chat_id: int):
+    game = mafia_games.get(chat_id)
+    if not game or game["phase"] != "night":
+        return
+    game["phase"] = "resolving"        # защита от повторного входа
+    players = game["players"]
+    nt = game["night"]
+    target = mafia.pick_mafia_target(nt["mafia_votes"])
+    killed = mafia.resolve_night(players, target, nt.get("doctor_target"))
+    lines = [f"☀️ <b>Утро {game['round']}.</b> Город просыпается."]
+    if killed:
+        players[killed]["alive"] = False
+        emoji, title, _ = mafia.ROLE_INFO[players[killed]["role"]]
+        lines.append(f"💀 Ночью погиб {id_mention(killed, players[killed]['name'])} — "
+                     f"это был {emoji} <b>{title}</b>.")
+        mafia_player_chat.pop(killed, None)
+    else:
+        lines.append("🌅 Этой ночью все выжили.")
+    await bot.send_message(chat_id, "\n".join(lines))
+    winner = mafia.check_win(players)
+    if winner:
+        await mafia_end(chat_id, winner)
+        return
+    await mafia_start_day(chat_id)
+
+
+async def mafia_start_day(chat_id: int):
+    game = mafia_games.get(chat_id)
+    if not game:
+        return
+    game["phase"] = "day"
+    game["votes"] = {}
+    game["token"] = game.get("token", 0) + 1
+    players = game["players"]
+    sent = await bot.send_message(chat_id, _maf_day_text(game),
+                                  reply_markup=_maf_vote_kb(chat_id, mafia.alive_ids(players), players))
+    game["vote_msg"] = sent.message_id
+    asyncio.create_task(_maf_timer(chat_id, game["token"], "day", MAFIA_DAY_SEC))
+
+
+@dp.callback_query(F.data.startswith("md:"))
+async def mafia_day_cb(cb: CallbackQuery):
+    parts = cb.data.split(":")            # md:<chat_id>:<uid|skip>
+    if len(parts) != 3:
+        await cb.answer()
+        return
+    chat_id, target = int(parts[1]), parts[2]
+    game = mafia_games.get(chat_id)
+    if not game or game["phase"] != "day":
+        await cb.answer("Голосование закрыто.")
+        return
+    players = game["players"]
+    uid = cb.from_user.id
+    me = players.get(uid)
+    if not me or not me["alive"]:
+        await cb.answer("Голосовать могут только живые игроки.", show_alert=True)
+        return
+    if target == "skip":
+        game["votes"][uid] = "skip"
+        await cb.answer("Воздержался.")
+    else:
+        t = int(target)
+        if not players.get(t) or not players[t]["alive"]:
+            await cb.answer("Игрок недоступен.")
+            return
+        game["votes"][uid] = t
+        await cb.answer(f"Голос за {players[t]['name']}")
+    try:
+        await cb.message.edit_text(_maf_day_text(game),
+                                   reply_markup=_maf_vote_kb(chat_id, mafia.alive_ids(players), players))
+    except TelegramBadRequest:
+        pass
+    if len(game["votes"]) >= len(mafia.alive_ids(players)):
+        await mafia_resolve_day(chat_id)
+
+
+async def mafia_resolve_day(chat_id: int):
+    game = mafia_games.get(chat_id)
+    if not game or game["phase"] != "day":
+        return
+    game["phase"] = "resolving"
+    players = game["players"]
+    lynched, _counts = mafia.tally_votes(game.get("votes", {}))
+    if lynched and players.get(lynched) and players[lynched]["alive"]:
+        players[lynched]["alive"] = False
+        emoji, title, _ = mafia.ROLE_INFO[players[lynched]["role"]]
+        await bot.send_message(
+            chat_id,
+            f"⚖️ По итогам голосования казнён {id_mention(lynched, players[lynched]['name'])} — "
+            f"это был {emoji} <b>{title}</b>.")
+        mafia_player_chat.pop(lynched, None)
+    else:
+        await bot.send_message(chat_id, "🤷 Город не смог договориться — сегодня никого не казнили.")
+    winner = mafia.check_win(players)
+    if winner:
+        await mafia_end(chat_id, winner)
+        return
+    await mafia_start_night(chat_id)
+
+
+async def mafia_end(chat_id: int, winner: str):
+    game = mafia_games.pop(chat_id, None)
+    if not game:
+        return
+    for u in list(game["players"]):
+        mafia_player_chat.pop(u, None)
+    players = game["players"]
+    headline = ("🕵️ <b>Мирные жители победили!</b> Вся мафия обезврежена."
+                if winner == "peace" else
+                "🔫 <b>Мафия победила!</b> Город захвачен.")
+    reveal = "\n".join(
+        f"{mafia.ROLE_INFO[p['role']][0]} {esc(p['name'])} — "
+        f"{mafia.ROLE_INFO[p['role']][1]} ({'жив' if p['alive'] else 'выбыл'})"
+        for p in players.values())
+    await bot.send_message(chat_id, f"🏁 <b>Игра окончена.</b>\n{headline}\n\n"
+                                    f"<b>Все роли:</b>\n{reveal}\n\nНовая партия: /start")
+
+
+@dp.message(Command("stopmafia", "stopgame"), F.chat.type.in_({"group", "supergroup"}))
+async def mafia_stop_cmd(message: Message):
+    """Принудительно завершить «Мафию» (для админов/персонала)."""
+    chat_id = message.chat.id
+    if chat_id not in mafia_games:
+        await message.reply("Сейчас «Мафия» не идёт.")
+        return
+    if not await _staff_only(message):
+        return
+    game = mafia_games.pop(chat_id, None)
+    if game:
+        for u in list(game["players"]):
+            mafia_player_chat.pop(u, None)
+    await message.reply("🛑 Игра «Мафия» остановлена админом.")
 
 
 @dp.message(F.text, F.chat.type.in_({"group", "supergroup"}))
@@ -5109,7 +5570,9 @@ class PrivacyGate(BaseMiddleware):
         text = (getattr(msg, "text", None) or "").strip()
         if text == config.PANEL_PASSWORD:
             return await handler(event, data)
-        if text.startswith("/start") and "verify" in text:
+        if text.startswith("/start"):
+            # Обычный /start пускаем: игрокам «Мафии» нужно открыть ЛС, чтобы
+            # бот мог прислать роль. Панель это НЕ раскрывает (см. panel_entry).
             return await handler(event, data)
         # Новичок реально в процессе верификации по номеру — пропускаем.
         if (flag("PHONE_VERIFY_ENABLED") and not storage.is_phone_verified(uid)
@@ -5132,9 +5595,18 @@ async def panel_entry(message: Message):
         return
     if uid in panel_auth:
         await open_panel(message.chat.id)
-    else:
-        panel_state[uid] = "await_pass"
-        await message.answer("🔒 Введи пароль для доступа к панели управления:")
+        return
+    # Обычный /start (не /admin): приветствие. Заодно так открывается ЛС —
+    # это нужно, чтобы бот мог прислать роль в игре «Мафия».
+    if _cmd_name(message.text or "") == "start":
+        await message.answer(
+            "👋 Привет! Я бот-модератор и ведущий игры «Мафия».\n\n"
+            "🎭 Теперь я могу писать тебе в личку. Зайди в чат, где идёт набор "
+            "в «Мафию», и жми «🎮 Присоединиться» — роль пришлю сюда.\n\n"
+            "Если ты администратор группы — вход в панель: /admin")
+        return
+    panel_state[uid] = "await_pass"
+    await message.answer("🔒 Введи пароль для доступа к панели управления:")
 
 
 @dp.message(F.chat.type == "private")

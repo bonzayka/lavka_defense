@@ -833,6 +833,72 @@ async def run_crisis_escalate():
 asyncio.run(run_crisis_escalate())
 
 
+# ---- игра «Мафия» (движок mafia.py) ----
+import mafia  # noqa: E402
+
+# Раздача ролей: ровно один комиссар/доктор, мафии ~четверть, остальные мирные.
+_ids = list(range(1, 9))            # 8 игроков
+_roles = mafia.assign_roles(_ids, seed=1)
+_rvals = list(_roles.values())
+check("mafia: роли розданы всем", len(_roles) == 8)
+check("mafia: мафии ~25%", _rvals.count(mafia.ROLE_MAFIA) == 2)
+check("mafia: один комиссар", _rvals.count(mafia.ROLE_COMMISSAR) == 1)
+check("mafia: один доктор", _rvals.count(mafia.ROLE_DOCTOR) == 1)
+check("mafia: остальные мирные", _rvals.count(mafia.ROLE_CIVILIAN) == 4)
+
+# Минимум игроков: 4 -> 1 мафия.
+check("mafia: мин.состав 4 -> 1 мафия",
+      list(mafia.assign_roles(list(range(4)), seed=2).values()).count(mafia.ROLE_MAFIA) == 1)
+
+
+def _mk(role, alive=True):
+    return {"role": role, "alive": alive, "name": "x"}
+
+
+# Победа мирных — вся мафия мертва.
+_p = {1: _mk(mafia.ROLE_MAFIA, alive=False), 2: _mk(mafia.ROLE_CIVILIAN),
+      3: _mk(mafia.ROLE_DOCTOR)}
+check("mafia: победа мирных", mafia.check_win(_p) == "peace")
+
+# Победа мафии — мафии >= остальных.
+_p = {1: _mk(mafia.ROLE_MAFIA), 2: _mk(mafia.ROLE_CIVILIAN)}
+check("mafia: победа мафии (1 vs 1)", mafia.check_win(_p) == "mafia")
+
+# Игра продолжается — мафия в меньшинстве.
+_p = {1: _mk(mafia.ROLE_MAFIA), 2: _mk(mafia.ROLE_CIVILIAN), 3: _mk(mafia.ROLE_DOCTOR)}
+check("mafia: игра идёт (1 vs 2)", mafia.check_win(_p) is None)
+
+# Резолв ночи: без доктора жертва гибнет.
+_p = {1: _mk(mafia.ROLE_MAFIA), 2: _mk(mafia.ROLE_CIVILIAN), 3: _mk(mafia.ROLE_CIVILIAN)}
+check("mafia: жертва гибнет", mafia.resolve_night(_p, 2, None) == 2)
+# Доктор вылечил ту же цель — жертвы нет.
+check("mafia: доктор спас", mafia.resolve_night(_p, 2, 2) is None)
+# Мафия не выбрала цель — никто не гибнет.
+check("mafia: нет цели -> нет жертвы", mafia.resolve_night(_p, None, None) is None)
+
+# Выбор жертвы мафией по голосам (большинство).
+check("mafia: большинство голосов", mafia.pick_mafia_target({10: 2, 11: 2, 12: 3}, seed=1) == 2)
+check("mafia: нет голосов -> None", mafia.pick_mafia_target({}) is None)
+
+# Дневное голосование: явный лидер казнён, ничья -> никого.
+_lynched, _ = mafia.tally_votes({1: 5, 2: 5, 3: 6})
+check("mafia: казнён лидер голосования", _lynched == 5)
+_lynched, _ = mafia.tally_votes({1: 5, 2: 6})
+check("mafia: ничья -> никого", _lynched is None)
+_lynched, _ = mafia.tally_votes({1: "skip", 2: "skip"})
+check("mafia: все воздержались -> никого", _lynched is None)
+
+# Полная мини-партия: 1 мафия против 2 мирных -> мафия убивает одного -> победа мафии.
+_p = {1: _mk(mafia.ROLE_MAFIA), 2: _mk(mafia.ROLE_CIVILIAN), 3: _mk(mafia.ROLE_CIVILIAN)}
+_victim = mafia.resolve_night(_p, 2, None)
+_p[_victim]["alive"] = False
+check("mafia: сценарий -> победа мафии", mafia.check_win(_p) == "mafia")
+
+# «start»/«mafia» доступны обычным участникам (не режутся модерацией).
+check("mafia: команды в публичном списке",
+      "mafia" in bot.PUBLIC_CMDS and "start" in bot.PUBLIC_CMDS)
+
+
 print(f"\nИтог: {PASS} ок, {FAIL} провалов.")
 # Importing the application creates an aiogram HTTP session. Some async tests
 # open it, so close it explicitly before the interpreter exits.
