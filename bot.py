@@ -6830,7 +6830,70 @@ async def panel_cb(cb: CallbackQuery):
 
 # ----------------------------------------------------------------- запуск
 
+_instance_lock_handle = None  # держим дескриптор лока открытым всё время жизни процесса
+
+
+def acquire_single_instance_lock() -> None:
+    """Не дать запуститься ВТОРОМУ процессу с тем же токеном бота.
+
+    Берём эксклюзивный файловый лок на файл, имя которого привязано к токену
+    (у родителя и у каждого дочернего бота — свой лок; разные токены друг другу
+    не мешают). Если лок уже занят — значит этот бот где-то уже работает: выходим,
+    чтобы не ловить TelegramConflictError (у одного токена getUpdates может делать
+    только один процесс). Лок держит открытый дескриптор и снимается сам, когда
+    процесс завершается/падает, — «залипших» локов не остаётся.
+
+    ВНИМАНИЕ: лок работает в пределах ОДНОЙ файловой системы/хоста. Два процесса в
+    РАЗНЫХ Docker-контейнерах его НЕ делят — там всё равно оставляй один контейнер.
+    """
+    global _instance_lock_handle
+    import hashlib
+    import sys
+    import tempfile
+
+    token = (config.BOT_TOKEN or "").strip()
+    tag = hashlib.sha1(token.encode("utf-8")).hexdigest()[:16]
+    lock_path = os.path.join(tempfile.gettempdir(), f"defense-bot-{tag}.lock")
+    try:
+        fh = open(lock_path, "a+")
+    except OSError as e:
+        log.warning("Не смог открыть lock-файл %s: %s — пропускаю single-instance проверку.",
+                    lock_path, e)
+        return
+    try:
+        if os.name == "nt":
+            import msvcrt
+            msvcrt.locking(fh.fileno(), msvcrt.LK_NBLCK, 1)
+        else:
+            import fcntl
+            fcntl.flock(fh.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError:
+        other = ""
+        try:
+            fh.seek(0)
+            other = fh.read().strip()
+        except Exception:
+            pass
+        log.error(
+            "Уже запущен другой экземпляр бота (lock %s занят%s). "
+            "Второй процесс с тем же токеном ронял бы getUpdates в Conflict — выхожу.",
+            lock_path, f", pid={other}" if other else "")
+        fh.close()
+        sys.exit(1)
+    # Лок наш: пишем свой PID (для диагностики) и НЕ закрываем дескриптор.
+    try:
+        fh.seek(0)
+        fh.truncate()
+        fh.write(str(os.getpid()))
+        fh.flush()
+    except Exception:
+        pass
+    _instance_lock_handle = fh
+    log.info("Single-instance lock захвачен: %s (pid=%s).", lock_path, os.getpid())
+
+
 async def main():
+    acquire_single_instance_lock()  # ровно один процесс на токен -> нет TelegramConflictError
     storage.load()
     stats.update(storage.load_stats())  # восстановить счётчики
     load_reference_hashes()
