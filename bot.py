@@ -145,6 +145,12 @@ stats = {"challenged": 0, "passed": 0, "failed": 0, "img_muted": 0,
          "banned": 0, "reports": 0, "raids": 0, "risk_muted": 0, "deleted_kicked": 0,
          "crises": 0, "deanon_text": 0}
 
+# Ограничитель тяжёлого CV/OCR-анализа картинок: не больше ОДНОГО инференса
+# одновременно на весь процесс. Иначе несколько картинок разом занимают все ядра
+# CPU, event loop «залипает» — и лагают игры (покер/мафия), кнопки и команды.
+# Картинки при этом не теряются, а обрабатываются по очереди.
+_cv_sema = asyncio.Semaphore(1)
+
 MUTE = ChatPermissions(can_send_messages=False)
 # Режим фото-капчи: новичку можно ТОЛЬКО текст (ввести код), без медиа/ссылок.
 TEXT_ONLY = ChatPermissions(
@@ -2275,7 +2281,8 @@ async def on_media(message: Message):
         return
 
     tag = f"{message.chat.id}_{message.message_id}"
-    hit = await nsfw_check(data, tag)
+    async with _cv_sema:
+        hit = await nsfw_check(data, tag)
     if hit:
         cls, score = hit
         await handle_violation(message, f"18+ контент ({cls}, {score:.0%})")
@@ -2283,7 +2290,8 @@ async def on_media(message: Message):
 
     # 3) Шок-контент / гор (CLIP, если установлен и включён).
     if gore.available() and flag("GORE_ON"):
-        g = await asyncio.to_thread(gore.detect, data, num("GORE_THRESHOLD_PCT") / 100)
+        async with _cv_sema:
+            g = await asyncio.to_thread(gore.detect, data, num("GORE_THRESHOLD_PCT") / 100)
         if g:
             label, score = g
             await handle_violation(message, f"шок-контент/гор ({score:.0%})")
@@ -2293,8 +2301,9 @@ async def on_media(message: Message):
     #    телефоном/паспортом/адресом жертвы). По умолчанию — только у новичков.
     if flag("DEANON_ENABLED") and deanon.available():
         if not flag("DEANON_NEWCOMERS_ONLY") or _is_newcomer(message.chat.id, message.from_user.id):
-            text = await asyncio.to_thread(
-                deanon.extract_text, data, storage.get_str("DEANON_OCR_LANG", config.DEANON_OCR_LANG))
+            async with _cv_sema:
+                text = await asyncio.to_thread(
+                    deanon.extract_text, data, storage.get_str("DEANON_OCR_LANG", config.DEANON_OCR_LANG))
             if text:
                 hit, why = deanon.scan_text(text, num("DEANON_MIN_HITS"))
                 if hit:
