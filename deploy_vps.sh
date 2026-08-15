@@ -5,7 +5,7 @@ set -e
 
 echo ">>> Ставлю системные пакеты (python, venv, либы для opencv/onnxruntime)..."
 sudo apt-get update
-sudo apt-get install -y python3 python3-venv python3-pip libgl1 libglib2.0-0
+sudo apt-get install -y python3 python3-venv python3-pip libgl1 libglib2.0-0 libgomp1
 
 echo ">>> Создаю venv и ставлю зависимости (это тяжёлый ИИ-стек, пару минут)..."
 python3 -m venv venv

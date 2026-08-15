@@ -6855,20 +6855,39 @@ async def main():
         if n:
             log.info("Запущено дочерних ботов: %d", n)
         asyncio.create_task(watchdog())  # следить за дочерними
-    me = await bot.get_me()
     global bot_self_id, bot_username
-    bot_self_id = me.id
-    bot_username = me.username
-    role = "дочерний" if IS_CHILD else "родительский"
-    updates = list(dp.resolve_used_update_types())
-    for u in ("chat_join_request", "chat_member"):  # подстраховка: точно подписаны
-        if u not in updates:
-            updates.append(u)
-    log.info("Запущен как @%s (%s). Подписка на апдейты: %s", me.username, role, updates)
-    log.info("Гор-детектор: %s", gore.status())
     try:
+        # Старт устойчив к сетевым сбоям: сразу после деплоя (или на флейки-сети,
+        # где уже ловили ServerDisconnectedError/timeout) Telegram может быть
+        # недоступен несколько секунд. Раньше один таймаут get_me() ронял весь
+        # процесс ещё до polling — теперь повторяем с нарастающей паузой.
+        me = None
+        for attempt in range(1, 11):
+            try:
+                me = await bot.get_me()
+                break
+            except Exception as e:  # noqa: BLE001
+                delay = min(5 * attempt, 30)
+                log.warning("get_me() не удался (попытка %d/10): %s — повтор через %d с",
+                            attempt, e, delay)
+                await asyncio.sleep(delay)
+        if me is None:
+            log.error("Не удалось связаться с Telegram API при старте (10 попыток). "
+                      "Проверь сеть/PROXY в config.py. Выхожу.")
+            return
+        bot_self_id = me.id
+        bot_username = me.username
+        role = "дочерний" if IS_CHILD else "родительский"
+        updates = list(dp.resolve_used_update_types())
+        for u in ("chat_join_request", "chat_member"):  # подстраховка: точно подписаны
+            if u not in updates:
+                updates.append(u)
+        log.info("Запущен как @%s (%s). Подписка на апдейты: %s", me.username, role, updates)
+        log.info("Гор-детектор: %s", gore.status())
         await dp.start_polling(bot, allowed_updates=updates)
     finally:
+        # Выполняется при любом исходе (в т.ч. если get_me так и не прошёл) —
+        # чтобы не оставлять «Unclosed client session».
         if not IS_CHILD:
             manager.stop_all()
         storage.save_stats(stats)
