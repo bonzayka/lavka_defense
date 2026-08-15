@@ -27,5 +27,8 @@ RUN python -c "from transformers import CLIPModel, CLIPProcessor; \
 # Затем код и эталоны.
 COPY . .
 
-# Телеграм-бот на long polling — порт не нужен.
+# Бот на long polling. Если включён Mini App (WEBAPP_ENABLED=1), тот же процесс
+# поднимает веб-сервер покера на WEBAPP_PORT (по умолчанию 8080) — публикуй его
+# наружу через reverse-proxy с TLS (Telegram открывает Mini App только по HTTPS).
+EXPOSE 8080
 CMD ["python", "bot.py"]

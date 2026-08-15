@@ -123,8 +123,11 @@ def _participants(table: dict) -> list[int]:
 
 
 def _in_hand(table: dict) -> list[int]:
+    # «В руке» = сдали карты в этой раздаче и игрок не покинул стол.
+    # ВАЖНО: не фильтруем по stack > 0 — иначе all-in игрок (stack == 0)
+    # выпадает из раздачи, ломает вскрытие и подвешивает ход.
     players = table["players"]
-    return [u for u in _participants(table) if players[u].get("hole")]
+    return [u for u in table["seats"] if players[u].get("in_table") and players[u].get("hole")]
 
 
 def _not_folded(table: dict) -> list[int]:
@@ -520,13 +523,14 @@ def _finish_tournament(table: dict) -> None:
     left = _participants(table)
     table["current_turn"] = None
     table["phase"] = "finished"
+    prev = table.get("last_event", "")
     if left:
         winner = table["players"][left[0]]
-        table["last_event"] = (
-            f"👑 Турнир окончен. Победитель: {winner['name']} — {winner['stack']} фишек."
-        )
+        msg = f"👑 Турнир окончен. Победитель: {winner['name']} — {winner['stack']} фишек."
     else:
-        table["last_event"] = "👑 Турнир окончен. За столом не осталось игроков."
+        msg = "👑 Турнир окончен. За столом не осталось игроков."
+    # Не затираем итог последней раздачи (вскрытие/забрал банк), а дописываем.
+    table["last_event"] = f"{prev}\n\n{msg}" if prev else msg
 
 
 def disqualify_player(table: dict, uid: int) -> bool:

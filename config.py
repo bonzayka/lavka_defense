@@ -420,3 +420,23 @@ USERBOT_API_HASH = _secret("TG_API_HASH", "")
 USERBOT_SESSION = _secret("TG_SESSION", "") or "userbot.session"
 # Юзербот включается автоматически, если есть api_id/hash (иначе смысла нет).
 USERBOT_ENABLED = bool(USERBOT_API_ID and USERBOT_API_HASH)
+
+# ===================== Telegram Mini App (веб-покер) ========================
+# Мини-апп с веб-столом Texas Hold'em (см. папку webapp/). Логика — та же
+# holdem.py. Открывается кнопкой в ЛС бота (/pokerapp) или из меню вложений.
+#
+# Как включить:
+#   1) Подними веб-сервер по HTTPS (на VPS — reverse-proxy nginx/caddy на порт
+#      WEBAPP_PORT) и укажи публичный адрес в WEBAPP_URL, напр. https://poker.example.com
+#   2) Пропиши тот же URL у @BotFather: /setmenubutton (или через настройки домена),
+#      чтобы Telegram доверял домену Mini App.
+#   3) Выстави WEBAPP_ENABLED=1 — тогда bot.py сам поднимет сервер в своём процессе.
+#      (Либо запускай отдельно: uvicorn webapp.server:app --host 0.0.0.0 --port 8080)
+WEBAPP_ENABLED = os.environ.get("WEBAPP_ENABLED", "0") not in ("0", "false", "False", "")
+WEBAPP_HOST = os.environ.get("WEBAPP_HOST", "0.0.0.0")
+WEBAPP_PORT = int(os.environ.get("WEBAPP_PORT", "8080"))
+# Публичный HTTPS-адрес Mini App (обязателен для кнопки запуска в Telegram).
+# Пустая строка -> кнопка Web App не показывается (только групповой /holdem).
+WEBAPP_URL = os.environ.get("WEBAPP_URL", "")
+# Разрешить вход в веб-стол без Telegram (локальная отладка в браузере). На проде 0!
+WEBAPP_DEV = os.environ.get("WEBAPP_DEV", "0") not in ("0", "false", "False", "")

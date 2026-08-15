@@ -11,3 +11,7 @@ telethon>=1.36
 # Опционально — без него проверка тихо отключается, бот работает как раньше.
 # rapidocr на onnxruntime (уже в стеке), НЕ требует системного tesseract, rus+eng.
 rapidocr-onnxruntime>=1.2
+# Telegram Mini App (веб-покер, папка webapp/): FastAPI + uvicorn + WebSocket.
+# uvicorn[standard] тянет websockets/httptools. Нужны, только если WEBAPP_ENABLED=1.
+fastapi>=0.110
+uvicorn[standard]>=0.29

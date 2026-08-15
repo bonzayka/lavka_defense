@@ -1,0 +1,217 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no" />
+  <title>Texas Hold'em</title>
+  <script src="https://telegram.org/js/telegram-web-app.js"></script>
+  <style>
+    :root {
+      --bg: var(--tg-theme-bg-color, #0e1621);
+      --card: var(--tg-theme-secondary-bg-color, #17212b);
+      --text: var(--tg-theme-text-color, #ffffff);
+      --hint: var(--tg-theme-hint-color, #7d8b99);
+      --btn: var(--tg-theme-button-color, #2ea6ff);
+      --btn-text: var(--tg-theme-button-text-color, #ffffff);
+      --felt: #17663f;
+      --accent: #ffd166;
+    }
+    * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
+    body {
+      margin: 0; padding: 12px; background: var(--bg); color: var(--text);
+      font-family: -apple-system, "Segoe UI", Roboto, sans-serif; font-size: 15px;
+    }
+    h1 { font-size: 18px; margin: 0 0 4px; }
+    .muted { color: var(--hint); font-size: 13px; }
+    .felt {
+      background: radial-gradient(ellipse at center, #1e7a4b, var(--felt));
+      border-radius: 18px; padding: 16px 12px; margin: 10px 0;
+      box-shadow: inset 0 0 40px rgba(0,0,0,.4);
+    }
+    .board { display: flex; gap: 6px; justify-content: center; min-height: 54px; align-items: center; }
+    .pot { text-align: center; font-weight: 600; margin-top: 8px; color: var(--accent); }
+    .pcard, .board .pcard {
+      display: inline-flex; align-items: center; justify-content: center;
+      min-width: 34px; height: 48px; padding: 0 4px; border-radius: 6px;
+      background: #fff; color: #111; font-size: 20px; font-weight: 700;
+      box-shadow: 0 2px 4px rgba(0,0,0,.3);
+    }
+    .pcard.red { color: #d23; }
+    .pcard.back { background: linear-gradient(135deg,#3a6ea5,#204060); color:#cfe0f5; }
+    .seat {
+      display: flex; align-items: center; gap: 10px; padding: 8px 10px; margin: 6px 0;
+      background: var(--card); border-radius: 12px; border: 1px solid transparent;
+    }
+    .seat.turn { border-color: var(--accent); box-shadow: 0 0 0 1px var(--accent); }
+    .seat.me { background: #1d2b38; }
+    .seat.folded { opacity: .45; }
+    .seat .info { flex: 1; min-width: 0; }
+    .seat .nm { font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+    .seat .sub { font-size: 12px; color: var(--hint); }
+    .seat .mini { display: flex; gap: 3px; }
+    .seat .mini .pcard { min-width: 22px; height: 30px; font-size: 13px; }
+    .chip { font-size: 11px; padding: 2px 6px; border-radius: 8px; background: #0b2a1c; color: var(--accent); }
+    .event { margin: 8px 0; padding: 8px 10px; background: var(--card); border-radius: 10px;
+             font-size: 13px; white-space: pre-wrap; min-height: 18px; }
+    .actions { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 10px; }
+    button.act {
+      flex: 1 1 40%; padding: 14px 10px; border: none; border-radius: 12px;
+      font-size: 15px; font-weight: 700; color: var(--btn-text); background: var(--btn);
+      cursor: pointer;
+    }
+    button.act:disabled { opacity: .4; }
+    button.danger { background: #e5484d; }
+    button.warn { background: #f2a900; color:#111; }
+    button.ghost { background: #33465a; }
+    #status { text-align:center; font-size:12px; color:var(--hint); margin-top:6px; }
+  </style>
+</head>
+<body>
+  <h1>🂡 Texas Hold'em</h1>
+  <div class="muted" id="sub">Подключение…</div>
+
+  <div class="felt">
+    <div class="board" id="board"></div>
+    <div class="pot" id="pot"></div>
+  </div>
+
+  <div id="seats"></div>
+  <div class="event" id="event"></div>
+  <div class="actions" id="actions"></div>
+  <div id="status"></div>
+
+<script>
+(function () {
+  "use strict";
+  const tg = window.Telegram && window.Telegram.WebApp;
+  if (tg) { tg.ready(); tg.expand(); }
+
+  // room берём из start_param (?startapp=CODE) или ?room=CODE, иначе "main".
+  const params = new URLSearchParams(location.search);
+  const startParam = (tg && tg.initDataUnsafe && tg.initDataUnsafe.start_param) || "";
+  const room = (params.get("room") || startParam || "main").slice(0, 32);
+  const initData = (tg && tg.initData) || "";
+
+  const $ = (id) => document.getElementById(id);
+  const RED = new Set(["♦", "♥"]);
+  let ws, state = null, myUid = null, reconnectTimer = null;
+
+  function cardEl(txt, cls) {
+    const d = document.createElement("div");
+    d.className = "pcard" + (cls ? " " + cls : "");
+    if (txt === "🂠") { d.className += " back"; d.textContent = "🂠"; }
+    else {
+      d.textContent = txt;
+      if ([...txt].some((ch) => RED.has(ch))) d.className += " red";
+    }
+    return d;
+  }
+
+  function render() {
+    if (!state) return;
+    myUid = state.you.uid;
+    $("sub").textContent = state.phase === "lobby"
+      ? `Комната «${room}» · лобби · игроков нужно ${state.min_players}+`
+      : `Комната «${room}» · раздача #${state.hand_no} · ${state.street} · банк ${state.pot}`;
+
+    const board = $("board"); board.innerHTML = "";
+    if (state.board.length) state.board.forEach((c) => board.appendChild(cardEl(c)));
+    else board.appendChild(Object.assign(document.createElement("span"),
+      { className: "muted", textContent: state.phase === "lobby" ? "Ждём игроков…" : "—" }));
+    $("pot").textContent = state.pot ? "Банк: " + state.pot : "";
+
+    const seats = $("seats"); seats.innerHTML = "";
+    state.seats.forEach((s) => {
+      const row = document.createElement("div");
+      row.className = "seat" + (s.is_turn ? " turn" : "") + (s.is_me ? " me" : "") + (s.folded ? " folded" : "");
+      const mini = document.createElement("div"); mini.className = "mini";
+      (s.cards || []).forEach((c) => mini.appendChild(cardEl(c)));
+      const info = document.createElement("div"); info.className = "info";
+      let sub = [];
+      if (!s.in_table && s.stack <= 0) sub.push("вылетел");
+      else if (s.folded) sub.push("fold");
+      else if (s.all_in) sub.push("all-in");
+      if (s.showdown) sub.push(s.showdown);
+      else if (s.last_action) sub.push(s.last_action);
+      if (s.bet) sub.push("ставка " + s.bet);
+      info.innerHTML = `<div class="nm">${s.is_turn ? "👉 " : ""}${escapeHtml(s.name)}${s.is_me ? " (ты)" : ""}</div>`
+        + `<div class="sub">${escapeHtml(sub.join(" · ") || "в игре")}</div>`;
+      const chip = document.createElement("div"); chip.className = "chip"; chip.textContent = s.stack;
+      row.appendChild(mini); row.appendChild(info); row.appendChild(chip);
+      seats.appendChild(row);
+    });
+
+    $("event").textContent = state.last_event || "";
+    renderActions();
+  }
+
+  function renderActions() {
+    const box = $("actions"); box.innerHTML = "";
+    const phase = state.phase, you = state.you;
+
+    if (phase === "lobby") {
+      addBtn(box, you.seated ? "✅ Ты за столом" : "🪑 Войти", "act", () => send("join"), you.seated);
+      addBtn(box, "▶️ Начать", "act warn", () => send("start"), state.seats.length < state.min_players);
+      return;
+    }
+    if (phase === "finished") {
+      addBtn(box, "🔄 Новый стол", "act ghost", () => location.reload(), false);
+      return;
+    }
+    // playing / between_hands
+    const isMyTurn = state.current_turn === myUid && Object.keys(you.options || {}).length > 0;
+    const o = you.options || {};
+    if (!isMyTurn) {
+      const info = document.createElement("div");
+      info.className = "muted"; info.style.textAlign = "center"; info.style.width = "100%";
+      info.textContent = phase === "between_hands" ? "Раздача завершена, следующая скоро…" : "Ход другого игрока…";
+      box.appendChild(info); return;
+    }
+    if (o.check) addBtn(box, "✅ Check", "act", () => send("action", { action: "check" }));
+    if (o.call) addBtn(box, `💰 Call ${o.call_amount || ""}`.trim(), "act", () => send("action", { action: "call" }));
+    (o.raise_to || []).forEach((amt) =>
+      addBtn(box, `📈 Raise до ${amt}`, "act", () => send("action", { action: "raise", amount: amt })));
+    addBtn(box, "↩️ Fold", "act danger", () => send("action", { action: "fold" }), !o.fold && !o.check);
+    if (o.all_in) addBtn(box, `🚨 All-in ${o.all_in_to || ""}`.trim(), "act warn", () => send("action", { action: "allin" }));
+  }
+
+  function addBtn(box, label, cls, fn, disabled) {
+    const b = document.createElement("button");
+    b.className = cls; b.textContent = label; b.disabled = !!disabled;
+    b.onclick = () => { if (tg && tg.HapticFeedback) tg.HapticFeedback.impactOccurred("light"); fn(); };
+    box.appendChild(b);
+  }
+
+  function escapeHtml(s) {
+    return String(s).replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
+  }
+
+  function send(type, extra) {
+    if (ws && ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify(Object.assign({ type }, extra || {})));
+  }
+
+  function connect() {
+    const proto = location.protocol === "https:" ? "wss" : "ws";
+    ws = new WebSocket(`${proto}://${location.host}/ws`);
+    ws.onopen = () => {
+      $("status").textContent = "🟢 онлайн";
+      ws.send(JSON.stringify({ type: "auth", initData, room }));
+    };
+    ws.onmessage = (ev) => {
+      const msg = JSON.parse(ev.data);
+      if (msg.type === "state") { state = msg; render(); }
+      else if (msg.type === "error") { $("status").textContent = "⚠️ " + msg.error; }
+    };
+    ws.onclose = () => {
+      $("status").textContent = "🔴 переподключение…";
+      clearTimeout(reconnectTimer);
+      reconnectTimer = setTimeout(connect, 1500);
+    };
+    ws.onerror = () => { try { ws.close(); } catch (e) {} };
+  }
+
+  connect();
+})();
+</script>
+</body>
+</html>

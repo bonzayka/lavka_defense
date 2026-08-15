@@ -49,6 +49,7 @@ from aiogram.types import (
     KeyboardButton,
     ReplyKeyboardMarkup,
     ReplyKeyboardRemove,
+    WebAppInfo,
 )
 from aiogram.exceptions import TelegramBadRequest, TelegramRetryAfter, TelegramForbiddenError
 
@@ -4406,6 +4407,43 @@ async def cmd_holdem_help(message: Message):
     )
 
 
+@dp.message(Command("pokerapp", "webpoker"))
+async def cmd_poker_webapp(message: Message):
+    """Кнопка запуска веб-версии покера (Telegram Mini App).
+
+    Работает в ЛС бота: Telegram открывает Mini App только по HTTPS-URL,
+    заданному в config.WEBAPP_URL. Параметр ?room= позволяет играть за общим
+    столом (по коду комнаты); по умолчанию — комната «main».
+    """
+    if not getattr(config, "WEBAPP_URL", ""):
+        await message.answer(
+            "🌐 Веб-версия покера пока не настроена.\n"
+            "Админу: подними <code>webapp/server.py</code> по HTTPS и укажи адрес в "
+            "<code>config.WEBAPP_URL</code> (см. комментарии в config.py)."
+        )
+        return
+    if message.chat.type != "private":
+        # web_app-кнопки надёжнее всего открываются из личного чата.
+        me = bot_username or (await bot.get_me()).username
+        await message.reply(
+            "🂡 Открой веб-стол в личке бота: "
+            f'<a href="https://t.me/{me}?start=poker">открыть бота</a> и нажми /pokerapp.'
+        )
+        return
+    # Код комнаты — из аргумента команды (напр. «/pokerapp lobby7»), иначе main.
+    parts = (message.text or "").split(maxsplit=1)
+    room = re.sub(r"[^a-zA-Z0-9_-]", "", parts[1])[:32] if len(parts) > 1 else "main"
+    url = config.WEBAPP_URL + (f"?room={room}" if room else "")
+    kb = InlineKeyboardMarkup(inline_keyboard=[[
+        InlineKeyboardButton(text="🂡 Открыть покер-стол", web_app=WebAppInfo(url=url)),
+    ]])
+    await message.answer(
+        f"🂡 <b>Texas Hold'em — веб-стол</b>\nКомната: <code>{esc(room)}</code>\n"
+        "Нажми кнопку ниже, чтобы открыть игровой стол прямо в Telegram.",
+        reply_markup=kb,
+    )
+
+
 # ------------------------------------------------------------- игра «кубик»
 def _dice_leaders(rolls: dict) -> list:
     """uid с максимальным броском: один — победитель, несколько — переброс."""
@@ -6804,6 +6842,14 @@ async def main():
     dp.edited_message.outer_middleware(ModerationMiddleware())
     asyncio.create_task(janitor())
     asyncio.create_task(crisis_monitor())
+    if getattr(config, "WEBAPP_ENABLED", False) and not IS_CHILD:
+        try:
+            from webapp import server as webapp_server
+            asyncio.create_task(webapp_server.run_in_background(config.WEBAPP_HOST, config.WEBAPP_PORT))
+            log.info("Mini App (веб-покер) поднят на %s:%s (публичный URL: %s)",
+                     config.WEBAPP_HOST, config.WEBAPP_PORT, config.WEBAPP_URL or "— не задан")
+        except Exception as e:  # noqa: BLE001
+            log.warning("Не удалось поднять Mini App: %s (проверь fastapi/uvicorn в requirements)", e)
     if not IS_CHILD:
         n = manager.start_all()  # поднять дочерних ботов
         if n:
