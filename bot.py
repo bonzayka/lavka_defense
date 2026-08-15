@@ -84,7 +84,11 @@ except Exception:
 logging.basicConfig(level=logging.INFO, format=_LOG_FMT, handlers=_handlers)
 log = logging.getLogger("antispam")
 
-session = AiohttpSession(proxy=config.PROXY) if config.PROXY else None
+# Явный таймаут сессии: висящее соединение к api.telegram.org (напр. когда хост
+# фильтрует Telegram) отваливается за 20 с, а не за дефолтные 60, — быстрее уходим
+# в ретрай get_me()/polling. proxy подхватывается из config.PROXY (env PROXY).
+session = AiohttpSession(proxy=config.PROXY, timeout=20) if config.PROXY \
+    else AiohttpSession(timeout=20)
 bot = Bot(
     token=config.BOT_TOKEN,
     default=DefaultBotProperties(parse_mode=ParseMode.HTML),
