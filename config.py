@@ -87,7 +87,7 @@ DEANON_ENABLED = os.environ.get("DEANON_ENABLED", "1") not in ("0", "false", "Fa
 DEANON_ACTION = "mute"        # что делать при находке: delete | warn | mute | ban
 # Проверять картинки ТОЛЬКО у новичков (первые NEWCOMER_MEDIA_HOURS после входа) —
 # именно они кидают деанон-скрины; старожилов не гоняем (экономия CPU, меньше ложных).
-DEANON_NEWCOMERS_ONLY = True
+DEANON_NEWCOMERS_ONLY = False
 # Сколько РАЗНЫХ типов данных на картинке нужно для срабатывания (антиложняк).
 # 1 «тяжёлый» тип (паспорт/карта/СНИЛС/ИНН) срабатывает всегда, независимо от этого.
 DEANON_MIN_HITS = 2
