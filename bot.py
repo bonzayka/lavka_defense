@@ -6872,7 +6872,14 @@ def acquire_single_instance_lock() -> None:
     try:
         if os.name == "nt":
             import msvcrt
+            # msvcrt.locking лочит байт от ТЕКУЩЕЙ позиции. Первый процесс стартует
+            # на пустом файле (позиция 0) и лочит байт [0]; но потом пишет туда PID,
+            # и второй процесс открывает "a+" уже с позицией в конце файла — залочил
+            # бы ДРУГОЙ байт, и лок проходил бы у обоих (двойной запуск, Conflict).
+            # Поэтому лочим ФИКСИРОВАННЫЙ байт далеко за областью PID.
+            fh.seek(1 << 20)
             msvcrt.locking(fh.fileno(), msvcrt.LK_NBLCK, 1)
+            fh.seek(0)
         else:
             import fcntl
             fcntl.flock(fh.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
