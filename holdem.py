@@ -271,6 +271,12 @@ def allowed_actions(table: dict, uid: int) -> dict:
     if stack <= owe:
         return opts
 
+    # Игрок уже действовал на этой улице и оказался на ходу снова только из-за
+    # НЕПОЛНОГО all-in соперника (докол меньше min_raise). Такой докол торги не
+    # переоткрывает — рейзить нельзя, доступны лишь call/fold.
+    if p.get("acted"):
+        return opts
+
     min_to = table["current_bet"] + max(table.get("min_raise", BIG_BLIND), BIG_BLIND)
     if table["current_bet"] == 0:
         min_to = max(BIG_BLIND, min_to)
@@ -316,6 +322,8 @@ def apply_action(table: dict, uid: int, action: str, amount: int | None = None) 
     elif action == "raise":
         if amount is None:
             return {"ok": False, "reason": "amount_required"}
+        if p.get("acted"):  # неполный all-in не переоткрыл торги — ре-рейз запрещён
+            return {"ok": False, "reason": "raise_not_reopened"}
         to_amount = int(amount)
         max_to = p["street_bet"] + p["stack"]
         min_to = table["current_bet"] + max(table.get("min_raise", BIG_BLIND), BIG_BLIND)
@@ -335,12 +343,17 @@ def apply_action(table: dict, uid: int, action: str, amount: int | None = None) 
         if to_amount <= p["street_bet"]:
             return {"ok": False, "reason": "no_chips"}
         old_bet = table["current_bet"]
+        prev_min_raise = max(table.get("min_raise", BIG_BLIND), BIG_BLIND)
         _post(table, uid, p["stack"])
         if to_amount > old_bet:
             raise_size = to_amount - old_bet
             table["current_bet"] = to_amount
-            table["min_raise"] = max(raise_size, table.get("min_raise", BIG_BLIND), BIG_BLIND)
-            _reopen_action(table, uid)
+            # Полное повышение (>= min_raise) переоткрывает торги. НЕПОЛНЫЙ all-in
+            # (короткий стек доставил меньше min_raise) — только докол: уже
+            # походившие игроки НЕ получают права ре-рейза, лишь call/fold.
+            if raise_size >= prev_min_raise:
+                table["min_raise"] = raise_size
+                _reopen_action(table, uid)
         p["acted"] = True
         p["last_action"] = "all-in"
         table["last_event"] = f"🚨 {name} пошёл all-in на {to_amount}."
@@ -383,12 +396,15 @@ def _advance_state(table: dict, acted_uid: int) -> None:
         _award_uncontested(table, contenders[0])
         return
 
-    if len(_actionable(table)) <= 1 and len(contenders) > 1:
-        _runout_and_showdown(table)
-        return
-
+    # Торги закрыты? Только тогда решаем, что дальше. Проверять это ДО раннаута
+    # критично: если кто-то в all-in, оставшийся игрок ещё должен ответить
+    # (call/fold) — раунд НЕ закрыт, и раннаут украл бы у него ход (в heads-up
+    # это лишало соперника all-in любого решения).
     if _betting_round_complete(table):
-        if table.get("street") == "river":
+        # Больше ставить некому (все кроме одного в all-in) — докручиваем борд.
+        if len(_actionable(table)) <= 1 and len(contenders) > 1:
+            _runout_and_showdown(table)
+        elif table.get("street") == "river":
             _showdown(table)
         else:
             _next_street(table)
