@@ -7,7 +7,7 @@ import os
 # Можно задать через переменную окружения BOT_TOKEN (тогда не светится в коде/гите):
 #   Linux:   export BOT_TOKEN="123:abc"
 # Иначе берётся значение ниже.
-BOT_TOKEN = os.environ.get("BOT_TOKEN") or "8957038013:AAFaWzhKhYKiutj0ZfJMFqdNa4RFUWRqFUk"
+BOT_TOKEN = os.environ.get("BOT_TOKEN") or "8957038013:AAH007m7pN34yMOTH7O-s2KEz0XzBdtXf9U"
 
 # Сколько секунд даётся новичку на прохождение капчи.
 # Не успел -> бан навсегда.
