@@ -2745,9 +2745,20 @@ def _resolve_username(token: str):
     return uname_cache.get(name)
 
 
+_MIN_TG_ID = 10000  # меньше — это срок («мут 3 часа»), а не user_id
+
+
 def _is_target_token(token: str) -> bool:
-    """Похоже ли слово на указание цели: числовой id или @ник."""
-    return token.startswith("@") or token.lstrip("-").isdigit()
+    """Похоже ли слово на указание цели: @ник или правдоподобный числовой id.
+
+    Малые числа (1, 3, 30…) — срок, НЕ id: без порога команда без reply/ника
+    съедала «3» как user_id и мутила несуществующего юзера навсегда с причиной
+    «часа бесит».
+    """
+    if token.startswith("@"):
+        return True
+    body = token.lstrip("-")
+    return body.isdigit() and int(body) >= _MIN_TG_ID
 
 
 def _resolve_target_token(token: str):

@@ -486,6 +486,7 @@ async def run_target():
                                      from_user=types.SimpleNamespace(id=1, full_name="A", username=None))
 
     check("target: по числовому id", bot._target_id(m("/mute 12345")) == 12345)
+    check("target: «3» без reply/ника не берётся за id (цель не распознана)", bot._target_dur_reason(m("/mute 3 часа бесит")) == (None, None, ""))
     check("target: по известному @нику", bot._target_id(m("/mute @ivan")) == 7001)
     check("target: неизвестный @ник -> 0", bot._target_id(m("/mute @nobody")) == 0)
     check("target: без цели -> None", bot._target_id(m("/mute")) is None)
