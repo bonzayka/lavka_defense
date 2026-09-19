@@ -6,7 +6,7 @@ set "PYTHON=python"
 if exist "venv\Scripts\python.exe" set "PYTHON=venv\Scripts\python.exe"
 
 echo === py_compile ===
-"%PYTHON%" -m py_compile bot.py config.py tests.py channel_scan.py storage.py
+"%PYTHON%" -m py_compile bot.py config.py aiguard.py tests.py channel_scan.py storage.py
 if errorlevel 1 (
     echo.
     echo COMPILE FAILED

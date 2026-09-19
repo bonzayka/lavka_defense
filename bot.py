@@ -53,6 +53,7 @@ from aiogram.types import (
 )
 from aiogram.exceptions import TelegramBadRequest, TelegramRetryAfter, TelegramForbiddenError
 
+import aiguard
 import config
 import channel_scan
 import dcguard
@@ -1147,6 +1148,16 @@ async def apply_punishment(message: Message, reason: str, action: str,
             await notify_panel(event_card("🚨 Нарушение", user, text=msg_text, reason=audit_reason))
 
 
+async def ai_violation(message: Message, reason: str) -> None:
+    """Наказание по вердикту AI-модерации (aiguard.py).
+
+    Вердикт приходит с задержкой 2-5 с — сообщение уже в чате, поэтому
+    apply_punishment удаляет его ЗАДНИМ ЧИСЛОМ по message_id.
+    """
+    await apply_punishment(message, "угроза/деанон (ИИ)",
+                           action_for("AI_ACTION"), audit_reason=f"ИИ: {reason}")
+
+
 # --------------------------------------------------- проверки сообщений
 
 def is_night() -> bool:
@@ -1414,6 +1425,13 @@ class ModerationMiddleware(BaseMiddleware):
                                        action_for("TEXT_DEANON_ACTION"),
                                        audit_reason=f"деанон-текст: {why}")
                 return True
+
+        # AI-модерация (aiguard.py): вердикт LLM приходит АСИНХРОННО, поэтому тут
+        # только ставим сообщение в очередь — ждать ответ модели 2-5 с прямо в
+        # middleware нельзя, встанет весь polling. Наказание — задним числом.
+        # Носителей ролей не проверяем: персонал сам обсуждает угрозы и деанон.
+        if text and aiguard.available() and not storage.get_role(user.id):
+            aiguard.enqueue(msg)
         return False
 
 
@@ -3096,6 +3114,7 @@ async def cmd_diag(message: Message):
         f"• Детектор 18+ (ViT {config.NSFW_MODEL}): {esc(nsfwvit.status())} "
         f"(порог {config.NSFW_THRESHOLD:.0%}) | NSFW_ENABLED={config.NSFW_ENABLED}\n"
         f"• Анти-деанон OCR: {esc(deanon.status())} | DEANON_ENABLED={config.DEANON_ENABLED}\n"
+        f"• AI-модерация: {esc(aiguard.status())}\n"
         f"• Эталонов в базе: {len(ref_hashes)}\n\n"
         f"<b>Заявки/апдейты:</b>\n"
         f"• Автоприём (AUTO_ACCEPT): {'вкл' if flag('AUTO_ACCEPT') else 'выкл'}\n"
@@ -6929,6 +6948,7 @@ async def main():
         gore.load(config.GORE_MODEL)
     if config.DEANON_ENABLED:
         deanon.load(config.DEANON_OCR_LANG)
+    aiguard.start(ai_violation)   # AI-модерация текста (молчит, если выключена)
     dp.message.outer_middleware(PrivacyGate())  # глушит посторонних в личке
     dp.message.outer_middleware(CommandCleanupMiddleware())  # самый внешний: удаляет команду после обработки
     dp.message.outer_middleware(TrackMiddleware())
@@ -6984,6 +7004,7 @@ async def main():
         # чтобы не оставлять «Unclosed client session».
         if not IS_CHILD:
             manager.stop_all()
+        await aiguard.stop()
         storage.save_stats(stats)
         await bot.session.close()
 

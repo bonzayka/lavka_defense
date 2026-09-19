@@ -5,6 +5,7 @@
 """
 
 import asyncio
+import json
 import os
 import re
 import sys
@@ -20,6 +21,8 @@ for f in (os.environ["DATA_FILE"], os.environ["DATA_FILE"] + ".tmp"):
     except OSError:
         pass
 
+import config     # noqa: E402
+import aiguard    # noqa: E402
 import textguard  # noqa: E402
 import storage    # noqa: E402
 import manager    # noqa: E402
@@ -899,6 +902,103 @@ check("mafia: сценарий -> победа мафии", mafia.check_win(_p) 
 check("mafia: команды в публичном списке",
       "mafia" in bot.PUBLIC_CMDS and "start" in bot.PUBLIC_CMDS)
 
+
+
+
+
+# ---- AI-модерация (aiguard): чистые функции ----
+
+# Есть ли что анализировать (пустое/смайлы в LLM не гоняем).
+check("aiguard: пустая строка не проверяется", not aiguard.worth_checking(""))
+check("aiguard: смайлы не проверяются", not aiguard.worth_checking("🙂🙂"))
+check("aiguard: одни точки не проверяются", not aiguard.worth_checking("..."))
+check("aiguard: огрызок короче порога", not aiguard.worth_checking("ок"))
+check("aiguard: обычный текст проверяется", aiguard.worth_checking("привет, как дела?"))
+check("aiguard: угроза проверяется", aiguard.worth_checking("я тебя найду"))
+
+# Разбор ответа модели. Главное правило: непонятный ответ = НЕ нарушение.
+check("aiguard: угроза из JSON",
+      aiguard.parse_verdict('{"threat":true,"deanon":false,"reason":"угроза"}') == (True, "угроза"))
+check("aiguard: деанон тоже нарушение",
+      aiguard.parse_verdict('{"threat":false,"deanon":true,"reason":"адрес"}') == (True, "адрес"))
+check("aiguard: чисто -> нет нарушения",
+      aiguard.parse_verdict('{"threat":false,"deanon":false,"reason":"норм"}') == (False, "норм"))
+FENCED = """Проба:
+```json
+{"threat":true,"reason":"x"}
+```"""
+check("aiguard: JSON в обёртке разбирается", aiguard.parse_verdict(FENCED)[0])
+check("aiguard: болтовня вокруг JSON",
+      aiguard.parse_verdict('Ответ: {"threat": true, "reason": "y"} — всё') == (True, "y"))
+check("aiguard: строка-мусор -> НЕ нарушение", aiguard.parse_verdict("не могу ответить") == (False, ""))
+check("aiguard: пустой ответ -> НЕ нарушение", aiguard.parse_verdict("") == (False, ""))
+check("aiguard: None -> НЕ нарушение", aiguard.parse_verdict(None) == (False, ""))
+check("aiguard: JSON-массив -> НЕ нарушение", aiguard.parse_verdict("[1,2,3]") == (False, ""))
+check("aiguard: «да» вместо true", aiguard.parse_verdict('{"threat":"да"}')[0])
+
+# Тело запроса: модель из конфига, температура 0, строгий JSON, текст обёрнут.
+_p = aiguard.build_payload("привет")
+check("aiguard: модель из конфига", _p["model"] == config.AI_MODEL)
+check("aiguard: температура 0", _p["temperature"] == 0)
+check("aiguard: просим json_object", _p["response_format"] == {"type": "json_object"})
+check("aiguard: системный промпт первым", _p["messages"][0]["role"] == "system"
+      and "threat" in _p["messages"][0]["content"])
+check("aiguard: текст юзера обёрнут тегом",
+      "<сообщение>" in _p["messages"][1]["content"]
+      and "привет" in _p["messages"][1]["content"])
+check("aiguard: простыня режется",
+      len(aiguard.build_payload("я" * 99999)["messages"][1]["content"]) < config.AI_MAX_LEN + 100)
+
+
+# ---- AI-модерация: очередь -> воркер -> наказание (сеть замокана) ----
+
+def _ai_msg(text, uid):
+    m = types.SimpleNamespace()
+    m.text, m.caption = text, None
+    m.chat = types.SimpleNamespace(id=-500)
+    m.from_user = types.SimpleNamespace(id=uid, full_name="T")
+    return m
+
+
+async def _ai_flow():
+    calls, hits = [], []
+
+    async def fake_post(payload):
+        body = payload["messages"][1]["content"]
+        calls.append(body)
+        bad = "закопаю" in body
+        return {"choices": [{"message": {"content": json.dumps(
+            {"threat": bad, "deanon": False, "reason": "тест"})}}]}
+
+    async def on_hit(message, reason):
+        hits.append((message.from_user.id, reason))
+
+    aiguard._post = fake_post
+    aiguard._stats.update({"checked": 0, "hits": 0, "cached": 0, "errors": 0, "dropped": 0})
+    aiguard._cache.clear()
+    aiguard._punished.clear()
+    config.AI_MODERATION_ENABLED = True
+    config.AI_CONCURRENCY = 1          # один воркер — порядок обработки предсказуем
+    aiguard.start(on_hit)
+    try:
+        aiguard.enqueue(_ai_msg("я тебя закопаю", 1))       # угроза -> наказание
+        aiguard.enqueue(_ai_msg("привет, как дела?", 2))    # чисто -> тишина
+        aiguard.enqueue(_ai_msg("...", 3))                  # нечего анализировать
+        aiguard.enqueue(_ai_msg("я тебя закопаю", 1))       # повтор юзера -> дебаунс
+        aiguard.enqueue(_ai_msg("я тебя закопаю", 4))       # другой юзер -> вердикт из кэша
+        await asyncio.wait_for(aiguard._queue.join(), timeout=10)
+        return calls, hits
+    finally:
+        await aiguard.stop()
+        config.AI_MODERATION_ENABLED = False
+
+
+_calls, _hits = asyncio.run(_ai_flow())
+check("aiguard: в API ушло 2 запроса (точки отсеяны, повтор из кэша)", len(_calls) == 2)
+check("aiguard: наказаний 2 (дебаунс не дал третьего)", len(_hits) == 2)
+check("aiguard: наказан именно нарушитель", [u for u, _ in _hits] == [1, 4])
+check("aiguard: чистое сообщение никого не наказало", 2 not in [u for u, _ in _hits])
+check("aiguard: повтор взялся из кэша, а не из сети", aiguard._stats["cached"] >= 1)
 
 print(f"\nИтог: {PASS} ок, {FAIL} провалов.")
 # Importing the application creates an aiogram HTTP session. Some async tests
