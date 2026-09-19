@@ -9,6 +9,9 @@
 import json
 import os
 import threading
+from datetime import datetime
+
+import config
 
 _LOCK = threading.Lock()
 # Путь к данным можно задать через env DATA_FILE (для дочерних ботов — свой файл).
@@ -39,6 +42,7 @@ _DEFAULT = {
     "activity": {},           # "chat:user" -> {"msgs","first_seen","last_seen"} — активность (старожилы + бэкап)
     "reputation": {},         # "chat:user" -> {"score","plus","minus"} — репутация (+реп/-реп)
     "rep_quota": {},          # "chat:giver" -> {"day":"YYYY-MM-DD","count":N,"targets":[...]} — суточная квота выдач (сброс в 00:00 МСК)
+    "awards": {},             # str(user_id) -> [{"text","by","ts"}] — награды (/наградить), текст свободный
 }
 
 AUDIT_LIMIT = 200
@@ -347,32 +351,80 @@ def role_titles_all() -> dict:
 
 # --- владельцы (только они выдают роли/должности) ---
 
+def root_owners() -> set:
+    """Главные владельцы из config.OWNER_IDS — их не снять и не переопределить."""
+    return {int(u) for u in getattr(config, "OWNER_IDS", ())}
+
+
+def is_root_owner(user_id: int) -> bool:
+    """Главный владелец бота (жёстко прописан в config) — неприкосновенен."""
+    return int(user_id) in root_owners()
+
+
 def owners_all() -> list:
-    return _data.setdefault("owners", [])
+    """Владельцы: главные (из config) + добавленные через панель."""
+    o = _data.setdefault("owners", [])
+    return sorted(root_owners() | set(o))
 
 
 def is_owner(user_id: int) -> bool:
-    return int(user_id) in _data.setdefault("owners", [])
+    uid = int(user_id)
+    return uid in root_owners() or uid in _data.setdefault("owners", [])
 
 
 def add_owner(user_id: int) -> bool:
     """True — добавили, False — уже был владельцем."""
+    uid = int(user_id)
     o = _data.setdefault("owners", [])
-    if int(user_id) in o:
+    if uid in root_owners() or uid in o:
         return False
-    o.append(int(user_id))
+    o.append(uid)
     save()
     return True
 
 
 def remove_owner(user_id: int) -> bool:
-    """True — сняли, False — не был владельцем."""
+    """True — сняли, False — не был владельцем (главного владельца снять нельзя)."""
+    uid = int(user_id)
+    if uid in root_owners():
+        return False
     o = _data.setdefault("owners", [])
-    if int(user_id) in o:
-        o.remove(int(user_id))
+    if uid in o:
+        o.remove(uid)
         save()
         return True
     return False
+
+
+# --- награды (/наградить): свободный текст, по желанию с награждающим и датой ---
+
+def awards_of(user_id: int) -> list:
+    """Список наград юзера (свежие в конце)."""
+    return _data.setdefault("awards", {}).get(str(int(user_id)), [])
+
+
+def is_awarded(user_id: int) -> bool:
+    """True — у юзера есть хотя бы одна награда («награждён»)."""
+    return bool(awards_of(user_id))
+
+
+def add_award(user_id: int, text: str, by_id: int = 0, by_name: str = "") -> dict:
+    """Выдать награду. Текст сохраняется как есть — с пробелами и любыми символами."""
+    rec = {"text": (text or "").strip(), "by": int(by_id or 0), "by_name": by_name or "",
+           "ts": datetime.now().strftime("%d.%m.%Y %H:%M")}
+    _data.setdefault("awards", {}).setdefault(str(int(user_id)), []).append(rec)
+    save()
+    return rec
+
+
+def del_award(user_id: int, index: int) -> dict | None:
+    """Убрать награду по номеру в списке (1-based). None — если такой нет."""
+    a = _data.setdefault("awards", {}).get(str(int(user_id)), [])
+    if not (1 <= index <= len(a)):
+        return None
+    rec = a.pop(index - 1)
+    save()
+    return rec
 
 
 # --- белый список стикерпаков (не проверять на 18+) ---

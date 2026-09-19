@@ -450,6 +450,174 @@ async def run_deny():
 asyncio.run(run_deny())
 
 
+# ---- главный владелец: неприкосновенен, команды «в его сторону» не проходят ----
+ROOT = sorted(config.OWNER_IDS)[0]
+check("root-owner: всегда владелец (даже без data.json)", storage.is_owner(ROOT))
+check("root-owner: в owners_all", ROOT in storage.owners_all())
+check("root-owner: снять нельзя", storage.remove_owner(ROOT) is False and storage.is_owner(ROOT))
+check("root-owner: add_owner не дублирует", storage.add_owner(ROOT) is False)
+
+
+def _usr(uid):
+    return types.SimpleNamespace(id=uid, username=None, full_name=f"U{uid}")
+
+
+def _rep(uid):
+    """Сообщение-цель (ответ): важно, что у него есть .from_user."""
+    return types.SimpleNamespace(from_user=_usr(uid), message_id=7)
+
+
+async def _noop(*a, **k):
+    return None
+
+
+def _fmsg(actor=None, text="", reply=None):
+    return types.SimpleNamespace(
+        text=text, reply_to_message=reply, from_user=_usr(actor),
+        chat=types.SimpleNamespace(id=-9, type="supergroup"), entities=[],
+        answer=_noop, message_id=1, delete=_noop)
+
+
+async def run_owner_guard():
+    real_admin, real_bot = bot.is_admin, bot.bot
+
+    async def fake_admin(c, u):
+        return u == 900                       # 900 = TG-админ чата
+
+    calls = []
+
+    class FakeBot:
+        async def restrict_chat_member(self, *a, **k):
+            calls.append(a)
+
+        async def unban_chat_member(self, *a, **k):
+            calls.append(a)
+
+        async def delete_message(self, *a, **k):
+            calls.append(a)
+
+    bot.is_admin, bot.bot = fake_admin, FakeBot()
+    try:
+        # 1) владельца не трогает никто: ни TG-админ, ни другой владелец
+        check("owner-guard: TG-админ владельца не накажет",
+              await bot._deny_target(-1, 900, ROOT) is not None)
+        storage.add_owner(8001)
+        check("owner-guard: другой владелец владельца не накажет",
+              await bot._deny_target(-1, 8001, ROOT) is not None)
+        storage.remove_owner(8001)
+        check("owner-guard: обычный юзер — можно", await bot._deny_target(-1, 902, 903) is None)
+
+        # 2) команда «в сторону» владельца распознаётся (её удаляет мидлварь)
+        check("owner-guard: ответом на владельца",
+              bot._owner_targeted(_fmsg(902, "/ban", reply=_rep(ROOT))))
+        check("owner-guard: по id",
+              bot._owner_targeted(_fmsg(902, f"/mute {ROOT} 3 дня")))
+        check("owner-guard: чужой юзер — не владелец",
+              not bot._owner_targeted(_fmsg(902, "/ban", reply=_rep(7000001))))
+        check("owner-guard: срок «3» не путается с id",
+              not bot._owner_targeted(_fmsg(902, "/mute 3 часа", reply=_rep(7000001))))
+
+        # 3) модуль-мидлварь: команда против владельца удаляется и не идёт дальше
+        reached = []
+
+        async def handler(event, data):
+            reached.append(event)
+            return "прошло"
+
+        mw = bot.CommandCleanupMiddleware()
+        await mw(handler, _fmsg(902, "/ban", reply=_rep(ROOT)), {})
+        check("owner-guard: команда против владельца съедена", reached == [] and calls)
+        calls.clear()
+        reached.clear()
+        await mw(handler, _fmsg(902, "/ban", reply=_rep(7000001)), {})
+        check("owner-guard: на обычного юзера команда идёт дальше", len(reached) == 1)
+
+        # 4) снять наказание (размут/разбан/варн) можно только у младшего по рангу
+        storage.set_role(7000005, "модератор")
+        storage.set_role(7000006, "старший")
+        await bot.cmd_unmute(_fmsg(7000005, "/unmute", reply=_rep(7000006)))
+        check("unpunish: модератор НЕ размутит старшего", calls == [])
+        await bot.cmd_unmute(_fmsg(7000006, "/unmute", reply=_rep(7000005)))
+        check("unpunish: старший размутит модератора", len(calls) == 1)
+        calls.clear()
+        storage.add_warn(-9, 7000006)
+        storage.add_warn(-9, 7000005)
+        await bot.cmd_unwarn(_fmsg(7000005, "/unwarn", reply=_rep(7000006)))
+        check("unpunish: модератор НЕ снял варн старшему",
+              storage.get_warns(-9, 7000006) == 1)
+        await bot.cmd_unwarn(_fmsg(7000006, "/unwarn", reply=_rep(7000005)))
+        check("unpunish: старший снял варн модератору",
+              storage.get_warns(-9, 7000005) == 0)
+        for u in (7000005, 7000006):
+            storage.set_role(u, None)
+    finally:
+        bot.is_admin, bot.bot = real_admin, real_bot
+
+
+asyncio.run(run_owner_guard())
+
+
+# ---- /info: особая отметка владельца и награды ----
+async def run_info():
+    real_admin, real_bot = bot.is_admin, bot.bot
+    sent = []
+
+    async def fake_admin(c, u):
+        return False
+
+    async def answer(text, **k):
+        sent.append(text)
+
+    class FakeBot:
+        async def get_chat_member(self, chat_id, uid):
+            return types.SimpleNamespace(user=_usr(uid), status="member")
+
+    bot.is_admin, bot.bot = fake_admin, FakeBot()
+    try:
+        m = _fmsg(ROOT, "/info", reply=_rep(ROOT))
+        m.answer = answer
+        await bot.cmd_info(m)
+        check("info: главный владелец помечен особо",
+              "ГЛАВНЫЙ ВЛАДЕЛЕЦ" in sent[-1] and config.OWNER_TAG in sent[-1])
+        storage.add_award(7000007, "За отвагу и стойкость!", 900, "Админ")
+        m2 = _fmsg(ROOT, "/info", reply=_rep(7000007))
+        m2.answer = answer
+        await bot.cmd_info(m2)
+        check("info: награды видны",
+              "Награждён" in sent[-1] and "За отвагу и стойкость!" in sent[-1])
+        check("info: обычный юзер без особой отметки",
+              "ГЛАВНЫЙ ВЛАДЕЛЕЦ" not in sent[-1])
+        storage.del_award(7000007, 1)
+    finally:
+        bot.is_admin, bot.bot = real_admin, real_bot
+
+
+asyncio.run(run_info())
+
+
+# ---- /наградить: свободный текст (пробелы, кавычки, символы) ----
+check("award: ответом — хвост как есть",
+      bot._target_rest(_fmsg(902, "/наградить За отвагу  и честь!", reply=_rep(7000002)))[1]
+      == "За отвагу  и честь!")
+check("award: по id — символы целы",
+      bot._target_rest(_fmsg(902, "/наградить 7000003 «Ёлка» & <тег>!"))[1] == "«Ёлка» & <тег>!")
+check("award: команда с @ботом срезается",
+      bot._target_rest(_fmsg(902, "/наградить@mybot 7000003 5 из 5"))[1] == "5 из 5")
+check("award: без цели — None",
+      bot._target_rest(_fmsg(902, "/наградить просто текст"))[0] is None)
+
+_award_text = "За отвагу: 3 дня в окопе! «Ёлка» & <тег>"
+storage.add_award(7000004, _award_text, 900, "Админ")
+check("award: текст сохранён как есть", storage.awards_of(7000004)[0]["text"] == _award_text)
+check("award: юзер награждён", storage.is_awarded(7000004))
+check("award: двойные пробелы целы",
+      storage.add_award(7000004, "а  б")["text"] == "а  б")
+check("award: снятие по номеру", storage.del_award(7000004, 1)["text"] == _award_text)
+check("award: кривой номер не снимает", storage.del_award(7000004, 99) is None)
+storage.del_award(7000004, 1)
+check("award: после снятия пусто", not storage.is_awarded(7000004))
+
+
 # ---- редактирование прав ролей (оверрайд поверх config) ----
 storage.set_role_perms("модератор", ["mute", "warn"])
 check("roleperm: старт с mute", "mute" in bot.role_perms("модератор"))

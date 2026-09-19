@@ -586,12 +586,33 @@ async def _can(message, perm: str) -> bool:
     return bool(message.from_user and await can(message.chat.id, message.from_user.id, perm))
 
 
+def _is_root_owner(user_id) -> bool:
+    """Главный владелец бота (config.OWNER_IDS) — неприкосновенен."""
+    return storage.is_root_owner(user_id or 0)
+
+
+def _owner_targeted(msg) -> bool:
+    """Команда направлена «в сторону» главного владельца: ответом, по id или @нику."""
+    roots = storage.root_owners()
+    if not roots:
+        return False
+    r = getattr(msg, "reply_to_message", None)
+    if r is not None and r.from_user and r.from_user.id in roots:
+        return True
+    if _mention_uid(msg) in roots or _target_id(msg) in roots:
+        return True
+    text = msg.text or ""
+    return any(re.search(rf"(?<!\d){uid}(?!\d)", text) for uid in roots)
+
+
 async def _deny_target(chat_id: int, actor_id: int, target_id: int) -> str | None:
     """Причина, по которой actor НЕ вправе наказать target (иначе None).
 
     Защищает от само-наказания и трогания администрации с учётом ИЕРАРХИИ ролей:
       • себя — никому нельзя (тот самый «сам себя замутил»);
       • самого бота — нельзя;
+      • главного владельца (config.OWNER_IDS) — нельзя вообще никому: ни наказать,
+        ни снять с него наказание, ни разжаловать;
       • TG-админа чата — нельзя вообще (Telegram и так не даст, но скажем прямо);
       • владельца бота — только другой владелец или TG-админ;
       • носителя внутренней роли — TG-админ/владелец могут всегда; другой персонал —
@@ -602,6 +623,8 @@ async def _deny_target(chat_id: int, actor_id: int, target_id: int) -> str | Non
         return "🙅 Нельзя применить это к самому себе."
     if bot_self_id and target_id == bot_self_id:
         return "🤖 Это я — меня трогать нельзя."
+    if _is_root_owner(target_id):
+        return "🛡 Это главный владелец бота — его не трогают."
     if await is_admin(chat_id, target_id):
         return "🛡 Нельзя наказать администратора чата."
 
@@ -1280,7 +1303,7 @@ class ModerationMiddleware(BaseMiddleware):
 
         user = msg.from_user
         if (not user or user.is_bot or await is_admin(chat_id, user.id)
-                or storage.is_trusted(chat_id, user.id)):
+                or storage.is_owner(user.id) or storage.is_trusted(chat_id, user.id)):
             return False
 
         regular = is_regular(chat_id, user.id)
@@ -2361,7 +2384,7 @@ async def on_moderation(cb: CallbackQuery):
         await cb.answer("Нет прав на это действие.", show_alert=True)
         return
 
-    if action in ("ban", "mute", "banwipe"):
+    if action in ("ban", "mute", "banwipe", "unmute", "unban", "warn", "kick"):
         reason = await _deny_target(gid, cb.from_user.id, uid)
         if reason:
             await cb.answer(reason, show_alert=True)
@@ -2801,6 +2824,28 @@ def _target_id(message: Message):
         uid = _resolve_target_token(parts[1])
         return 0 if uid is None else uid    # 0 = @ник, которого бот не видел
     return None
+
+
+def _target_rest(message: Message):
+    """(uid|None, хвост текста после цели) — для /наградить.
+
+    В отличие от _target_dur_reason хвост НЕ разбирается на срок/причину:
+    всё после цели уходит в награду как есть — с пробелами и любыми символами.
+    """
+    body = re.sub(r"^/\S+", "", message.text or "", count=1).strip()
+    r = message.reply_to_message
+    if r and r.from_user:
+        uname_cache_add(r.from_user)
+        return r.from_user.id, body
+    mid = _mention_uid(message)                 # тап-упоминание = одно «слово»
+    if mid is not None:
+        parts = body.split(maxsplit=1)
+        return mid, (parts[1] if len(parts) > 1 else "")
+    parts = body.split(maxsplit=1)
+    if parts and _is_target_token(parts[0]):
+        uid = _resolve_target_token(parts[0])
+        return (0 if uid is None else uid), (parts[1] if len(parts) > 1 else "")
+    return None, body
 
 
 _UNIT_WORDS = ("нед", "недел", "дн", "ден", "дня", "дне", "дней", "день",
@@ -3389,6 +3434,8 @@ async def cmd_unban(message: Message):
     if await _need_target(message, uid,
                           "Ответь командой на пользователя или укажи его id/@ник."):
         return
+    if await _deny_and_reply(message, uid):     # снять наказание — тоже по иерархии
+        return
     try:
         await bot.unban_chat_member(message.chat.id, uid, only_if_banned=True)
         await message.answer("✅ Разбанен.")
@@ -3454,6 +3501,8 @@ async def cmd_unmute(message: Message):
     if await _need_target(message, uid,
                           "Ответь командой на пользователя или укажи id/@ник."):
         return
+    if await _deny_and_reply(message, uid):     # снять наказание — тоже по иерархии
+        return
     try:
         await bot.restrict_chat_member(message.chat.id, uid, permissions=FULL)
         await message.answer("✅ Размучен.")
@@ -3494,6 +3543,8 @@ async def cmd_unwarn(message: Message):
     uid = _target_id(message)
     if await _need_target(message, uid,
                           "Ответь командой на пользователя или укажи id/@ник."):
+        return
+    if await _deny_and_reply(message, uid):     # снять наказание — тоже по иерархии
         return
     storage.reset_warns(message.chat.id, uid)
     await message.answer("✅ Предупреждения сняты.")
@@ -3841,8 +3892,9 @@ async def cmd_report(message: Message):
     if target.id == reporter.id:
         await _ack(chat_id, "На себя жаловаться нельзя 🙂")
         return
-    if await is_admin(chat_id, target.id) or storage.is_trusted(chat_id, target.id):
-        await _ack(chat_id, "На админа/доверенного жалоба отклонена.")
+    if (storage.is_owner(target.id) or await is_admin(chat_id, target.id)
+            or storage.is_trusted(chat_id, target.id)):
+        await _ack(chat_id, "На владельца/админа/доверенного жалоба отклонена.")
         return
     last = report_cooldown.get((chat_id, reporter.id))
     if last and (now() - last).total_seconds() < config.REPORT_COOLDOWN:
@@ -4100,12 +4152,12 @@ async def nl_command(message: Message):
         await message.delete()
     except TelegramBadRequest:
         pass
-    # Само-защита/иерархия — только для карающих слов (размут/разбан пропускаем).
-    if word in ("мут", "mute", "бан", "ban", "варн", "warn", "кик", "kick"):
-        reason = await _deny_target(chat_id, message.from_user.id, uid)
-        if reason:
-            await message.answer(reason)
-            return
+    # Само-защита/иерархия — для ЛЮБОГО слова, включая снятие наказаний:
+    # «размут»/«разбан» по админу своего или старшего ранга не проходят.
+    reason = await _deny_target(chat_id, message.from_user.id, uid)
+    if reason:
+        await message.answer(reason)
+        return
     seconds = parse_duration(text)
     by = f" {mod_decision(message.from_user)}"
     audit(f"админ {message.from_user.full_name}", f"{word} {human_duration(seconds)}",
@@ -4287,11 +4339,16 @@ async def cmd_info(message: Message):
                      f"права: {', '.join(sorted(effective_perms(uid))) or '—'}){src}")
     else:
         role_line = "Роль: — (обычный участник)"
-    if storage.is_owner(uid):
+    if storage.is_root_owner(uid):
+        role_line = (f"{role_line}\n{config.OWNER_TAG}\n"
+                     "   ↳ неприкосновенен: команды против него удаляются, "
+                     "наказания и снятие наказаний запрещены")
+    elif storage.is_owner(uid):
         role_line += " 👑 владелец бота"
     joined = newcomer.get((chat_id, uid))
     txt = (
-        "👤 <b>Досье</b>\n"
+        ("👑 <b>ДОСЬЕ ГЛАВНОГО ВЛАДЕЛЬЦА</b>\n" if storage.is_root_owner(uid)
+         else "👤 <b>Досье</b>\n") +
         f"ID: <code>{uid}</code>\nИмя: {esc(name)}\nЮзер: {esc(uname)}\n"
         f"Статус в чате: {esc(status)}\n"
         f"{role_line}\n"
@@ -4310,7 +4367,46 @@ async def cmd_info(message: Message):
             txt += chr(10) + f"Первое сообщение: {fmt_when(_first)}"
     if joined:
         txt += f"\nВошёл: {fmt_when(joined)}"
+    aw = storage.awards_of(uid)
+    if aw:
+        txt += f"\n\n🏅 <b>Награждён</b> — {len(aw)} шт.:"
+        for a in aw[-5:]:
+            who = a.get("by_name") or ""
+            txt += f"\n• {esc(a.get('text'))}" + (f" — {esc(who)}" if who else "")
+        if len(aw) > 5:
+            txt += f"\n… и ещё {len(aw) - 5} (показаны последние 5 из {len(aw)})."
     await message.answer(txt)
+
+
+@dp.message(Command("наградить", "награда", "award"))
+async def cmd_award(message: Message):
+    """🏅 Выдать награду: /наградить <текст> — ответом, по id или @нику.
+
+    Текст награды свободный и сохраняется как есть: пробелы, кавычки, эмодзи,
+    знаки — всё уходит в награду. Юзер после этого «награждён» (видно в /info).
+    """
+    if not await _staff_only(message, "manage"):
+        return
+    uid, text = _target_rest(message)
+    if await _need_target(message, uid,
+                          "Ответь /наградить на сообщение или укажи id/@ник, "
+                          "а после — текст награды."):
+        return
+    if not text:
+        await message.answer(
+            "🏅 Что за награда? Текст пишется после цели и сохраняется как есть:\n"
+            "<code>/наградить За отвагу и хладнокровие!</code> — ответом\n"
+            "<code>/наградить 1234567 За отвагу!</code> — по id")
+        return
+    text = text[:300]
+    me = message.from_user
+    storage.add_award(uid, text, me.id, me.full_name)
+    name = await display_name(message.chat.id, uid)
+    audit(f"админ {me.full_name}", "награда", uid, name, reason=text)
+    n = len(storage.awards_of(uid))
+    await message.answer(f"🏅 {id_mention(uid, name)} — <b>награждён</b>!\n"
+                         f"{esc(text)}\n"
+                         f"Всего наград: {n}. {mod_decision(me)}")
 
 
 @dp.message(Command("history"))
@@ -4369,8 +4465,14 @@ async def cmd_help(message: Message):
         "Текстом ответом: <code>мут 3 часа</code>, <code>бан 2 дня</code>, "
         "<code>размут</code>, <code>варн</code>, <code>кик</code>\n"
         "\n"
+        "🏅 <b>Награды</b>\n"
+        "/наградить &lt;текст&gt; — ответом, либо /наградить id текст\n"
+        "  (текст свободный: пробелы, кавычки, знаки — сохраняются как есть)\n"
+        "\n"
         "🎖 <b>Роли</b> (👑админ &gt; ⭐старший &gt; 🎖модератор)\n"
         "/setrole [@ник|id] роль | /delrole | /roles\n"
+        "  Снять наказание (размут/разбан/варн) можно только у младшего "
+        "по рангу — админа своего/старшего ранга не трогаем.\n"
         "/renamerole &lt;роль&gt; &lt;новое имя&gt;\n"
         "\n"
         "🧱 <b>Фильтры и контент</b>\n"
@@ -5450,16 +5552,23 @@ async def on_edited(message: Message):
 # --------------------------------- удаление команд админов после выполнения
 
 class CommandCleanupMiddleware(BaseMiddleware):
-    """До обработки скрывает команду всего персонала в групповом чате."""
+    """До обработки скрывает команду всего персонала в групповом чате.
+
+    Отдельно: любая команда «в сторону» главного владельца (ответом на его
+    сообщение, по id или @нику) удаляется и НЕ выполняется — даже от админов.
+    """
 
     async def __call__(self, handler, event, data):
         msg = event
         try:
+            is_cmd = bool(msg.text and msg.text.startswith("/"))
+            in_group = msg.chat.type in ("group", "supergroup")
+            if (is_cmd and in_group and msg.from_user
+                    and not _is_root_owner(msg.from_user.id) and _owner_targeted(msg)):
+                await bot.delete_message(msg.chat.id, msg.message_id)
+                return                      # против владельца команда не работает
             cleanup = flag("DELETE_ADMIN_COMMANDS") or flag("ANON_ADMIN")
-            if (cleanup and getattr(msg, "text", None)
-                    and msg.text.startswith("/")
-                    and msg.chat.type in ("group", "supergroup")
-                    and msg.from_user
+            if (cleanup and is_cmd and in_group and msg.from_user
                     and await is_staff_user(msg.chat.id, msg.from_user.id)):
                 await bot.delete_message(msg.chat.id, msg.message_id)
         except TelegramBadRequest:
@@ -5748,10 +5857,17 @@ def asg_pick_keyboard() -> InlineKeyboardMarkup:
 
 
 def owners_keyboard() -> InlineKeyboardMarkup:
-    """Владельцы: снять (❌), сделать себя владельцем, добавить по id."""
+    """Владельцы: снять (❌), сделать себя владельцем, добавить по id.
+
+    Главный владелец (config.OWNER_IDS) — без ❌: его снять нельзя.
+    """
     rows = []
     for u in storage.owners_all():
-        rows.append([InlineKeyboardButton(text=f"❌ {u}", callback_data=f"panel:ownrm:{u}")])
+        if storage.is_root_owner(u):
+            rows.append([InlineKeyboardButton(text=f"👑 {u} — главный, не снять",
+                                              callback_data="panel:noop")])
+        else:
+            rows.append([InlineKeyboardButton(text=f"❌ {u}", callback_data=f"panel:ownrm:{u}")])
     if not rows:
         rows.append([InlineKeyboardButton(text="Владельцев пока нет", callback_data="panel:noop")])
     rows.append([InlineKeyboardButton(text="👑 Сделать меня владельцем", callback_data="panel:ownme")])
@@ -6832,7 +6948,9 @@ async def panel_cb(cb: CallbackQuery):
         await cb.answer()
         txt = ("👑 <b>Владельцы</b>\n"
                "Только владелец раздаёт роли/должности (в чате и здесь).\n"
-               "Тап по id — снять; можно сделать владельцем себя или добавить по id.")
+               "Тап по id — снять; можно сделать владельцем себя или добавить по id.\n"
+               "👑 Главный владелец задан в config.OWNER_IDS — его не снять "
+               "и он неприкосновенен.")
         try:
             await cb.message.edit_text(txt, reply_markup=owners_keyboard())
         except TelegramBadRequest:
@@ -6842,8 +6960,10 @@ async def panel_cb(cb: CallbackQuery):
             storage.add_owner(uid)
             await cb.answer("Ты теперь владелец")
         elif len(parts) > 2 and parts[2].lstrip("-").isdigit():
-            storage.remove_owner(int(parts[2]))
-            await cb.answer("Снят")
+            if storage.remove_owner(int(parts[2])):
+                await cb.answer("Снят")
+            else:
+                await cb.answer("Главного владельца снять нельзя.", show_alert=True)
         else:
             await cb.answer()
         try:
