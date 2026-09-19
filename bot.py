@@ -2827,7 +2827,7 @@ def _target_id(message: Message):
 
 
 def _target_rest(message: Message):
-    """(uid|None, хвост текста после цели) — для /наградить.
+    """(uid|None, хвост текста после цели) — для /award.
 
     В отличие от _target_dur_reason хвост НЕ разбирается на срок/причину:
     всё после цели уходит в награду как есть — с пробелами и любыми символами.
@@ -4340,15 +4340,12 @@ async def cmd_info(message: Message):
     else:
         role_line = "Роль: — (обычный участник)"
     if storage.is_root_owner(uid):
-        role_line = (f"{role_line}\n{config.OWNER_TAG}\n"
-                     "   ↳ неприкосновенен: команды против него удаляются, "
-                     "наказания и снятие наказаний запрещены")
+        role_line = f"👑 <b>{config.OWNER_TAG}</b>"
     elif storage.is_owner(uid):
         role_line += " 👑 владелец бота"
     joined = newcomer.get((chat_id, uid))
     txt = (
-        ("👑 <b>ДОСЬЕ ГЛАВНОГО ВЛАДЕЛЬЦА</b>\n" if storage.is_root_owner(uid)
-         else "👤 <b>Досье</b>\n") +
+        "👤 <b>Досье</b>\n"
         f"ID: <code>{uid}</code>\nИмя: {esc(name)}\nЮзер: {esc(uname)}\n"
         f"Статус в чате: {esc(status)}\n"
         f"{role_line}\n"
@@ -4370,17 +4367,18 @@ async def cmd_info(message: Message):
     aw = storage.awards_of(uid)
     if aw:
         txt += f"\n\n🏅 <b>Награждён</b> — {len(aw)} шт.:"
-        for a in aw[-5:]:
+        start = max(1, len(aw) - 4)                 # номера as-is: /unward N
+        for i, a in enumerate(aw[start - 1:], start):
             who = a.get("by_name") or ""
-            txt += f"\n• {esc(a.get('text'))}" + (f" — {esc(who)}" if who else "")
+            txt += f"\n{i}. {esc(a.get('text'))}" + (f" — {esc(who)}" if who else "")
         if len(aw) > 5:
             txt += f"\n… и ещё {len(aw) - 5} (показаны последние 5 из {len(aw)})."
     await message.answer(txt)
 
 
-@dp.message(Command("наградить", "награда", "award"))
+@dp.message(Command("award"))
 async def cmd_award(message: Message):
-    """🏅 Выдать награду: /наградить <текст> — ответом, по id или @нику.
+    """🏅 Выдать награду: /award <текст> — ответом, по id или @нику.
 
     Текст награды свободный и сохраняется как есть: пробелы, кавычки, эмодзи,
     знаки — всё уходит в награду. Юзер после этого «награждён» (видно в /info).
@@ -4389,14 +4387,14 @@ async def cmd_award(message: Message):
         return
     uid, text = _target_rest(message)
     if await _need_target(message, uid,
-                          "Ответь /наградить на сообщение или укажи id/@ник, "
+                          "Ответь /award на сообщение или укажи id/@ник, "
                           "а после — текст награды."):
         return
     if not text:
         await message.answer(
             "🏅 Что за награда? Текст пишется после цели и сохраняется как есть:\n"
-            "<code>/наградить За отвагу и хладнокровие!</code> — ответом\n"
-            "<code>/наградить 1234567 За отвагу!</code> — по id")
+            "<code>/award За отвагу и хладнокровие!</code> — ответом\n"
+            "<code>/award 1234567 За отвагу!</code> — по id")
         return
     text = text[:300]
     me = message.from_user
@@ -4407,6 +4405,47 @@ async def cmd_award(message: Message):
     await message.answer(f"🏅 {id_mention(uid, name)} — <b>награждён</b>!\n"
                          f"{esc(text)}\n"
                          f"Всего наград: {n}. {mod_decision(me)}")
+
+
+@dp.message(Command("unward"))
+async def cmd_unward(message: Message):
+    """🏅 Снять награду: /unward — последнюю, /unward 2 — вторую, /unward all — все."""
+    if not await _staff_only(message, "manage"):
+        return
+    uid, arg = _target_rest(message)
+    if await _need_target(message, uid,
+                          "Ответь /unward на сообщение или укажи id/@ник."):
+        return
+    aw = storage.awards_of(uid)
+    if not aw:
+        await message.answer("🏅 У него нет наград.")
+        return
+    arg = (arg or "").strip().lower()
+    if arg in ("all", "все", "*"):
+        n = len(aw)
+        while storage.del_award(uid, 1):
+            pass
+        name = await display_name(message.chat.id, uid)
+        audit(f"админ {message.from_user.full_name}", "награды сняты", uid, name,
+              reason=f"все ({n})")
+        await message.answer(f"🏅 Сняты все награды ({n}).")
+        return
+    if arg and not arg.isdigit():
+        await message.answer(
+            "Использование: <code>/unward</code> (ответом) — снять последнюю, "
+            "<code>/unward 2</code> — вторую, <code>/unward all</code> — все.\n"
+            "Список наград — в /info.")
+        return
+    idx = int(arg) if arg else len(aw)
+    rec = storage.del_award(uid, idx)
+    if not rec:
+        await message.answer(f"🏅 Нет награды №{idx} (всего {len(aw)}).")
+        return
+    name = await display_name(message.chat.id, uid)
+    audit(f"админ {message.from_user.full_name}", "награда снята", uid, name,
+          reason=rec.get("text", ""))
+    await message.answer(f"🏅 Награда снята: {esc(rec.get('text'))}\n"
+                         f"Осталось наград: {len(storage.awards_of(uid))}.")
 
 
 @dp.message(Command("history"))
@@ -4466,8 +4505,8 @@ async def cmd_help(message: Message):
         "<code>размут</code>, <code>варн</code>, <code>кик</code>\n"
         "\n"
         "🏅 <b>Награды</b>\n"
-        "/наградить &lt;текст&gt; — ответом, либо /наградить id текст\n"
-        "  (текст свободный: пробелы, кавычки, знаки — сохраняются как есть)\n"
+        "/award &lt;текст&gt; — ответом, либо /award id текст (текст свободный)\n"
+        "/unward — снять последнюю, /unward 2 — вторую, /unward all — все\n"
         "\n"
         "🎖 <b>Роли</b> (👑админ &gt; ⭐старший &gt; 🎖модератор)\n"
         "/setrole [@ник|id] роль | /delrole | /roles\n"

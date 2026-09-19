@@ -577,8 +577,8 @@ async def run_info():
         m = _fmsg(ROOT, "/info", reply=_rep(ROOT))
         m.answer = answer
         await bot.cmd_info(m)
-        check("info: главный владелец помечен особо",
-              "ГЛАВНЫЙ ВЛАДЕЛЕЦ" in sent[-1] and config.OWNER_TAG in sent[-1])
+        check("info: основатель помечен особо",
+              "Основатель бота" in sent[-1] and config.OWNER_TAG in sent[-1])
         storage.add_award(7000007, "За отвагу и стойкость!", 900, "Админ")
         m2 = _fmsg(ROOT, "/info", reply=_rep(7000007))
         m2.answer = answer
@@ -586,8 +586,24 @@ async def run_info():
         check("info: награды видны",
               "Награждён" in sent[-1] and "За отвагу и стойкость!" in sent[-1])
         check("info: обычный юзер без особой отметки",
-              "ГЛАВНЫЙ ВЛАДЕЛЕЦ" not in sent[-1])
-        storage.del_award(7000007, 1)
+              "Основатель бота" not in sent[-1])
+        check("info: награды пронумерованы", "1. За отвагу и стойкость!" in sent[-1])
+        # /unward — снять награду
+        m3 = _fmsg(ROOT, "/unward", reply=_rep(7000007))
+        m3.answer = answer
+        await bot.cmd_unward(m3)
+        check("unward: последняя снята",
+              not storage.is_awarded(7000007) and "Награда снята" in sent[-1])
+        storage.add_award(7000007, "раз", 900, "A")
+        storage.add_award(7000007, "два", 900, "A")
+        m4 = _fmsg(ROOT, "/unward all", reply=_rep(7000007))
+        m4.answer = answer
+        await bot.cmd_unward(m4)
+        check("unward: all чистит всё", not storage.is_awarded(7000007))
+        m5 = _fmsg(ROOT, "/unward", reply=_rep(7000007))
+        m5.answer = answer
+        await bot.cmd_unward(m5)
+        check("unward: без наград — понятный ответ", "нет наград" in sent[-1])
     finally:
         bot.is_admin, bot.bot = real_admin, real_bot
 
