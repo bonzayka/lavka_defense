@@ -149,6 +149,13 @@ stats = {"challenged": 0, "passed": 0, "failed": 0, "img_muted": 0,
          "banned": 0, "reports": 0, "raids": 0, "risk_muted": 0, "deleted_kicked": 0,
          "crises": 0, "deanon_text": 0}
 
+game_cooldown: dict[int, datetime] = {}           # user_id -> datetime когда последний раз запускал игру
+game_flood_hits: dict[int, list[datetime]] = {}   # user_id -> отметки быстрых попыток запуска игр
+cmd_cooldown: dict[int, datetime] = {}            # user_id -> datetime последней команды
+cmd_flood_hits: dict[int, list[datetime]] = {}    # user_id -> отметки быстрого спама команд
+flood_penalties: dict[tuple[int, int], datetime] = {} # (chat_id, user_id) -> окончание 10-мин штрафа за флуд
+GAME_COMMANDS = {"duel", "дуэль", "kubik", "dice", "game", "holdem", "poker", "mafia", "мафия", "start"}
+
 # Ограничитель тяжёлого CV/OCR-анализа картинок: не больше ОДНОГО инференса
 # одновременно на весь процесс. Иначе несколько картинок разом занимают все ядра
 # CPU, event loop «залипает» — и лагают игры (покер/мафия), кнопки и команды.
@@ -1010,6 +1017,9 @@ async def janitor():
                 report_times.pop(k, None)
         for k in [k for k, v in list(probation.items()) if v["until"] < n]:
             probation.pop(k, None)
+        for k, until in list(flood_penalties.items()):
+            if n > until:
+                flood_penalties.pop(k, None)
         # Верификация: истёкшие ожидания (юзер так и не подтвердил номер) —
         # чистим in-memory подсказку; запись в storage.pending_verify оставляем,
         # чтобы юзер мог подтвердить позже (мут снимется только после номера).
@@ -1278,6 +1288,140 @@ def _mafia_chat_locked(msg: Message) -> bool:
     return game.get("phase") != "day"
 
 
+async def _flood_penalty_expiry(chat_id: int, uid: int, user_tag: str, delay: int = 600):
+    """Окончание 10-минутного штрафа за флуд: снятие и финальное сообщение с тегом."""
+    await asyncio.sleep(delay)
+    if storage.is_flood_penalized(chat_id, uid):
+        storage.clear_flood_penalty(chat_id, uid)
+        flood_penalties.pop((chat_id, uid), None)
+        try:
+            await bot.send_message(
+                chat_id,
+                f"⏰ {user_tag}, твои 10 минут штрафа истекли. Надеемся, лекция пошла на пользу. "
+                f"Отдыхай, балбес, и больше не флуди! 😉"
+            )
+        except TelegramBadRequest:
+            pass
+
+
+async def trigger_flood_penalty(message: Message, reason: str = "флуд"):
+    """Наказание за флуд (сообщениями, играми или командами).
+    
+    1. Устанавливает 10-минутный штраф (все сообщения удаляются, даже если нарушитель — админ).
+    2. Читает нарушителю лекцию о вреде флуда с тегом «отдыхай, балбес».
+    3. Зачищает недавние сообщения нарушителя.
+    4. Запускает таймер на 10 минут, по истечении которого отмечает нарушителя.
+    """
+    chat_id = message.chat.id
+    user = message.from_user
+    if not user:
+        return
+    uid = user.id
+    dur_min = int(getattr(config, "FLOOD_PENALTY_MINUTES", 10))
+    until = now() + timedelta(minutes=dur_min)
+
+    flood_penalties[(chat_id, uid)] = until
+    storage.set_flood_penalty(chat_id, uid, until.isoformat())
+
+    try:
+        await message.delete()
+    except TelegramBadRequest:
+        pass
+
+    try:
+        await purge_recent(chat_id, uid)
+    except Exception as e:
+        log.warning("purge_recent error for %s: %s", uid, e)
+
+    try:
+        await mute_user(chat_id, uid, until=until)
+    except Exception:
+        pass
+
+    user_tag = mention(user)
+    lecture_text = (
+        f"📢 <b>Внимание: Лекция о вреде флуда!</b>\n\n"
+        f"Уважаемый(ая) {user_tag}!\n\n"
+        f"Флуд — это не признак крутости, остроумия или продвинутости, а бессмысленное засорение "
+        f"информационного пространства. Беспорядочная отправка сообщений и долбёжка по командам/играм "
+        f"создаёт паразитарную нагрузку на серверы бота, отвлекает и раздражает других участников чата.\n\n"
+        f"Попытки «положить» бота частыми запросами лишь показывают полное неуважение к сообществу. "
+        f"Уважай чужой труд и время тех, кто общается рядом с тобой.\n\n"
+        f"⚖️ <b>Мера пресечения:</b>\n"
+        f"Все твои сообщения в этом чате будут <b>автоматически удаляться в течение {dur_min} минут</b> "
+        f"(даже если у тебя права админа).\n\n"
+        f"{user_tag}, отдыхай, балбес! 🤡🛋️"
+    )
+
+    try:
+        await bot.send_message(chat_id, lecture_text)
+    except TelegramBadRequest as e:
+        log.warning("Не смог отправить лекцию о флуде: %s", e)
+
+    audit("антифлуд", f"штраф {dur_min}м", uid, user.full_name, f"Лекция о флуде ({reason})")
+    if flag("NOTIFY_VIOLATIONS"):
+        await notify_panel(event_card("🚨 Антифлуд: лекция + 10м штраф", user, reason=reason))
+
+    asyncio.create_task(_flood_penalty_expiry(chat_id, uid, user_tag, dur_min * 60))
+
+
+def check_game_cooldown(user_id: int) -> tuple[bool, int, bool]:
+    """Проверяет кулдаун на игры (30 сек).
+    
+    Возвращает (allowed, remaining_seconds, is_flooding).
+    """
+    g_secs = getattr(config, "GAME_COOLDOWN_SECONDS", 30)
+    t = now()
+    last_g = game_cooldown.get(user_id)
+    if not last_g:
+        game_cooldown[user_id] = t
+        return True, 0, False
+
+    elapsed = (t - last_g).total_seconds()
+    if elapsed >= g_secs:
+        game_cooldown[user_id] = t
+        return True, 0, False
+
+    hits = game_flood_hits.setdefault(user_id, [])
+    hits.append(t)
+    game_flood_hits[user_id] = [x for x in hits if (t - x).total_seconds() < 10]
+    
+    if len(game_flood_hits[user_id]) >= 3:
+        game_flood_hits.pop(user_id, None)
+        return False, int(g_secs - elapsed) + 1, True
+
+    return False, int(g_secs - elapsed) + 1, False
+
+
+def check_command_cooldown(user_id: int) -> tuple[bool, int, bool]:
+    """Проверяет кулдаун на выполнение обычных команд (3 сек).
+    
+    Возвращает (allowed, remaining_seconds, is_flooding).
+    """
+    c_secs = getattr(config, "COMMAND_COOLDOWN_SECONDS", 3)
+    f_lim = getattr(config, "COMMAND_FLOOD_LIMIT", 4)
+    t = now()
+    last_c = cmd_cooldown.get(user_id)
+    if not last_c:
+        cmd_cooldown[user_id] = t
+        return True, 0, False
+
+    elapsed = (t - last_c).total_seconds()
+    if elapsed >= c_secs:
+        cmd_cooldown[user_id] = t
+        return True, 0, False
+
+    c_hits = cmd_flood_hits.setdefault(user_id, [])
+    c_hits.append(t)
+    cmd_flood_hits[user_id] = [x for x in c_hits if (t - x).total_seconds() < 10]
+    
+    if len(cmd_flood_hits[user_id]) >= f_lim:
+        cmd_flood_hits.pop(user_id, None)
+        return False, int(c_secs - elapsed) + 1, True
+
+    return False, int(c_secs - elapsed) + 1, False
+
+
 class ModerationMiddleware(BaseMiddleware):
     """Фильтрует сообщения не-админов; нарушение -> наказание, сообщение не идёт дальше."""
 
@@ -1290,6 +1434,17 @@ class ModerationMiddleware(BaseMiddleware):
 
     async def _moderate(self, msg: Message) -> bool:
         chat_id = msg.chat.id
+        user = msg.from_user
+
+        # 0. Проверка 10-минутного штрафа за флуд.
+        # ВАЖНО: по требованию «даже если это админ удалять» — проверяется ДО проверки прав админа!
+        if user and not user.is_bot:
+            if storage.is_flood_penalized(chat_id, user.id):
+                try:
+                    await msg.delete()
+                except TelegramBadRequest:
+                    pass
+                return True
 
         # Идёт фото-капча с вводом кода: любое сообщение новичка перехватываем
         # (удаляем; на фото-шаге сверяем код). Раньше всех прочих проверок.
@@ -1313,9 +1468,51 @@ class ModerationMiddleware(BaseMiddleware):
             await report(chat_id, f"🚫 Заблокирован постинг от имени канала «{esc(sc.title or sc.id)}».")
             return True
 
-        user = msg.from_user
-        if (not user or user.is_bot or await is_admin(chat_id, user.id)
-                or storage.is_owner(user.id) or storage.is_trusted(chat_id, user.id)):
+        if not user or user.is_bot:
+            return False
+
+        is_staff = (await is_admin(chat_id, user.id)
+                    or storage.is_owner(user.id) or storage.is_trusted(chat_id, user.id))
+
+        # Проверка антифлуда играми и командами
+        cmd = _cmd_name(msg.text or "")
+        if cmd:
+            # 1. Запуск игр: кулдаун 30 секунд на человека (чтобы не ломали бота).
+            # Применяется ко всем, включая админов (кроме главного владельца бота).
+            if cmd in GAME_COMMANDS and not storage.is_owner(user.id):
+                allowed, rem, is_fl = check_game_cooldown(user.id)
+                if not allowed:
+                    if is_fl:
+                        await trigger_flood_penalty(msg, reason="флуд играми")
+                    else:
+                        try:
+                            await msg.reply(
+                                f"⏳ Игры можно запускать не чаще, чем раз в "
+                                f"{getattr(config, 'GAME_COOLDOWN_SECONDS', 30)} секунд. "
+                                f"Подожди {rem} с."
+                            )
+                        except TelegramBadRequest:
+                            pass
+                    return True
+
+            # 2. Обычные команды: кулдаун для не-персонала
+            if not is_staff:
+                allowed, rem, is_fl = check_command_cooldown(user.id)
+                if not allowed:
+                    if is_fl:
+                        await trigger_flood_penalty(msg, reason="флуд командами")
+                    else:
+                        if len(cmd_flood_hits.get(user.id, [])) <= 2:
+                            try:
+                                await msg.reply(
+                                    f"⏳ Команды можно выполнять не чаще, чем раз в "
+                                    f"{getattr(config, 'COMMAND_COOLDOWN_SECONDS', 3)} сек."
+                                )
+                            except TelegramBadRequest:
+                                pass
+                    return True
+
+        if is_staff:
             return False
 
         regular = is_regular(chat_id, user.id)
@@ -1410,7 +1607,7 @@ class ModerationMiddleware(BaseMiddleware):
 
         # Антифлуд.
         if flag("ANTIFLOOD_ENABLED") and not regular and antiflood_hit(chat_id, user.id):
-            await apply_punishment(msg, "флуд", action_for("ANTIFLOOD_ACTION"))
+            await trigger_flood_penalty(msg, reason="флуд сообщениями")
             return True
 
         # Анти-повтор: одинаковые сообщения подряд.
@@ -3532,6 +3729,8 @@ async def cmd_unmute(message: Message):
         return
     if await _deny_and_reply(message, uid):     # снять наказание — тоже по иерархии
         return
+    storage.clear_flood_penalty(message.chat.id, uid)
+    flood_penalties.pop((message.chat.id, uid), None)
     try:
         await bot.restrict_chat_member(message.chat.id, uid, permissions=FULL)
         await message.answer("✅ Размучен.")
@@ -4829,9 +5028,9 @@ def _parse_duel_bet(rest: str) -> tuple[str, int | str, str]:
         return "rep", val, f"{val} реп."
 
     # 2) Рубли / деньги:
-    m_money = re.search(r"(\d+)\s*(?:на\s+)?(?:руб\w*|rub|₽)", raw, re.I)
+    m_money = re.search(r"(\d+)\s*(?:на\s+)?(?:руб\w*|rub|₽|р(?![а-яёa-z0-9]))", raw, re.I)
     if not m_money:
-        m_money = re.search(r"(?:на\s+)?(?:руб\w*|rub|₽)\s*(?:на\s+)?(\d+)", raw, re.I)
+        m_money = re.search(r"(?:на\s+)?(?:руб\w*|rub|₽|р(?![а-яёa-z0-9]))\s*(?:на\s+)?(\d+)", raw, re.I)
     if m_money:
         val = int(m_money.group(1))
         return "money", val, f"{val} руб."
@@ -4923,9 +5122,14 @@ async def duel_cmd(message: Message):
                 await message.reply(f"У соперника слишком низкая репутация ({rep2}).")
                 return
     elif bet_type == "money":
-        if isinstance(bet_val, int) and bet_val <= 0:
-            await message.reply("Сумма ставки должна быть больше 0.")
-            return
+        if isinstance(bet_val, int):
+            if bet_val <= 0:
+                await message.reply("Сумма ставки должна быть больше 0.")
+                return
+            max_m = getattr(config, "DUEL_MAX_MONEY", 10000)
+            if bet_val > max_m:
+                await message.reply(f"Максимальная ставка в дуэли — {max_m:,} руб.".replace(",", " "))
+                return
 
     duel_seq += 1
     d_id = duel_seq
@@ -6444,6 +6648,23 @@ class CommandCleanupMiddleware(BaseMiddleware):
         return await handler(event, data)
 
 
+class FloodPenaltyCallbackMiddleware(BaseMiddleware):
+    """Блокирует нажатия кнопок для пользователей под штрафом за флуд."""
+
+    async def __call__(self, handler, event, data):
+        cb = event
+        if cb.message and cb.message.chat:
+            chat_id = cb.message.chat.id
+            uid = cb.from_user.id
+            if storage.is_flood_penalized(chat_id, uid):
+                try:
+                    await cb.answer("Ты на штрафе за флуд. Отдыхай, балбес! 🤡", show_alert=True)
+                except TelegramBadRequest:
+                    pass
+                return
+        return await handler(event, data)
+
+
 # ----------------------------------------- админ-панель в личке (пароль)
 
 PANEL_TEXT = ("🛠 <b>Панель управления</b>\n"
@@ -7950,6 +8171,7 @@ async def main():
     dp.message.outer_middleware(TrackMiddleware())
     dp.message.outer_middleware(ModerationMiddleware())
     dp.edited_message.outer_middleware(ModerationMiddleware())
+    dp.callback_query.outer_middleware(FloodPenaltyCallbackMiddleware())
     asyncio.create_task(janitor())
     asyncio.create_task(crisis_monitor())
     if getattr(config, "WEBAPP_ENABLED", False) and not IS_CHILD:

@@ -176,6 +176,11 @@ ANTIFLOOD_ENABLED = True
 ANTIFLOOD_COUNT = 6           # сообщений...
 ANTIFLOOD_SECONDS = 5         # ...за столько секунд -> наказание
 ANTIFLOOD_ACTION = "mute"
+GAME_COOLDOWN_SECONDS = 30    # ограничение на человека: игра раз в 30 секунд
+COMMAND_COOLDOWN_SECONDS = 3  # ограничение на выполнение команд (раз в 3 сек)
+COMMAND_FLOOD_LIMIT = 4       # попыток в кулдауне -> флуд-наказание
+FLOOD_PENALTY_MINUTES = 10    # удалять все сообщения нарушителя 10 минут
+DUEL_MAX_MONEY = 10000        # максимальная ставка в рублях в дуэли
 ANTIREPEAT_ENABLED = True     # одинаковые сообщения подряд = флуд
 ANTIREPEAT_COUNT = 4          # столько одинаковых подряд -> наказание
 ANTIREPEAT_ACTION = "delete"  # delete | warn | mute | ban

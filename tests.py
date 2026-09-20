@@ -5,6 +5,7 @@
 """
 
 import asyncio
+from datetime import datetime, timezone, timedelta
 import json
 import os
 import re
@@ -1126,6 +1127,11 @@ check("duel: ставка rep (репутация 15)", bot._parse_duel_bet("р�
 check("duel: ставка число -> rep", bot._parse_duel_bet("25")[0] == "rep" and bot._parse_duel_bet("25")[1] == 25)
 check("duel: ставка money (500 руб)", bot._parse_duel_bet("500 руб")[0] == "money" and bot._parse_duel_bet("500 руб")[1] == 500)
 check("duel: ставка money (100 на рубли)", bot._parse_duel_bet("100 на рубли")[0] == "money" and bot._parse_duel_bet("100 на рубли")[1] == 100)
+check("duel: ставка money (10000р)", bot._parse_duel_bet("10000р")[0] == "money" and bot._parse_duel_bet("10000р")[1] == 10000)
+check("duel: ставка money (10000 р)", bot._parse_duel_bet("10000 р")[0] == "money" and bot._parse_duel_bet("10000 р")[1] == 10000)
+check("duel: ставка money (10000 руб)", bot._parse_duel_bet("10000 руб")[0] == "money" and bot._parse_duel_bet("10000 руб")[1] == 10000)
+check("duel: ставка money (на 10000р)", bot._parse_duel_bet("на 10000р")[0] == "money" and bot._parse_duel_bet("на 10000р")[1] == 10000)
+check("duel: лимит ставки money", config.DUEL_MAX_MONEY == 10000)
 
 
 
@@ -1340,6 +1346,100 @@ _p_cur = _t["players"][_cur]
 _max_to = _p_cur["street_bet"] + _p_cur["stack"]
 _res_allin = _h.apply_action(_t, _cur, "raise", _max_to + 500)
 check("holdem raise >= max_to -> all-in", _res_allin.get("ok") is True and _p_cur.get("all_in") is True)
+
+# ---- Антифлуд играми, командами и штраф за флуд ----
+# 1. Кулдаун на запуск игр (30 секунд)
+_u_game = 77001
+_g1, _, _ = bot.check_game_cooldown(_u_game)
+_g2, _rem, _fl2 = bot.check_game_cooldown(_u_game)
+check("game cooldown: первый запуск разрешен", _g1 is True)
+check("game cooldown: повторный запуск в течение 30с заблокирован", _g2 is False and _rem > 0 and _fl2 is False)
+# Многократный спам играми -> детект флуда
+_g3, _, _ = bot.check_game_cooldown(_u_game)
+_g4, _, _fl4 = bot.check_game_cooldown(_u_game)
+check("game cooldown: спам играми -> детект флуда", _fl4 is True)
+
+# 2. Кулдаун на команды
+_u_cmd = 77002
+_c1, _, _ = bot.check_command_cooldown(_u_cmd)
+_c2, _, _ = bot.check_command_cooldown(_u_cmd)
+check("cmd cooldown: первая команда разрешена", _c1 is True)
+check("cmd cooldown: повторная команда в пределах 3с заблокирована", _c2 is False)
+
+# 3. Штраф за флуд в storage
+_pen_chat, _pen_user = -10099, 88001
+check("flood penalty: изначально нет штрафа", not storage.is_flood_penalized(_pen_chat, _pen_user))
+_future = (datetime.now(timezone.utc) + timedelta(minutes=10)).isoformat()
+storage.set_flood_penalty(_pen_chat, _pen_user, _future)
+check("flood penalty: штраф активен", storage.is_flood_penalized(_pen_chat, _pen_user) is True)
+storage.clear_flood_penalty(_pen_chat, _pen_user)
+check("flood penalty: штраф снят", not storage.is_flood_penalized(_pen_chat, _pen_user))
+
+# 4. Проверка удаления сообщений даже для админов
+class _MockChat:
+    id = -10099
+    type = "supergroup"
+
+class _MockUser:
+    id = 88002
+    is_bot = False
+    full_name = "Админ"
+
+class _MockMsg:
+    chat = _MockChat()
+    from_user = _MockUser()
+    sender_chat = None
+    text = "Привет всем"
+    caption = None
+    entities = []
+    caption_entities = []
+    photo = None
+    video = None
+    animation = None
+    sticker = None
+    document = None
+    audio = None
+    voice = None
+    video_note = None
+    forward_origin = None
+    forward_date = None
+    is_automatic_forward = False
+    deleted = False
+
+    async def delete(self):
+        self.deleted = True
+
+_mock_msg = _MockMsg()
+_mod = bot.ModerationMiddleware()
+storage.set_flood_penalty(_mock_msg.chat.id, _mock_msg.from_user.id, _future)
+_res_pen = asyncio.run(_mod._moderate(_mock_msg))
+check("flood penalty: даже админ удаляется при штрафе", _res_pen is True and _mock_msg.deleted is True)
+storage.clear_flood_penalty(_mock_msg.chat.id, _mock_msg.from_user.id)
+
+# 5. Проверка блокировки callback-кнопок при штрафе за флуд
+class _MockCbMsg:
+    chat = _MockChat()
+
+class _MockCbEvent:
+    message = _MockCbMsg()
+    from_user = _MockUser()
+    answered_text = None
+    show_alert = False
+
+    async def answer(self, text=None, show_alert=False):
+        self.answered_text = text
+        self.show_alert = show_alert
+
+_cb_middleware = bot.FloodPenaltyCallbackMiddleware()
+_mock_cb = _MockCbEvent()
+storage.set_flood_penalty(_mock_cb.message.chat.id, _mock_cb.from_user.id, _future)
+
+async def _dummy_cb_handler(event, data):
+    return "ok"
+
+_cb_res = asyncio.run(_cb_middleware(_dummy_cb_handler, _mock_cb, {}))
+check("flood penalty cb: кнопка заблокирована", _cb_res is None and "балбес" in (_mock_cb.answered_text or ""))
+storage.clear_flood_penalty(_mock_cb.message.chat.id, _mock_cb.from_user.id)
 
 print(f"\nИтог: {PASS} ок, {FAIL} провалов.")
 # Importing the application creates an aiogram HTTP session. Some async tests

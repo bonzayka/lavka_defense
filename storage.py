@@ -43,6 +43,7 @@ _DEFAULT = {
     "reputation": {},         # "chat:user" -> {"score","plus","minus"} — репутация (+реп/-реп)
     "rep_quota": {},          # "chat:giver" -> {"day":"YYYY-MM-DD","count":N,"targets":[...]} — суточная квота выдач (сброс в 00:00 МСК)
     "awards": {},             # str(user_id) -> [{"text","by","ts"}] — награды (/наградить), текст свободный
+    "flood_penalties": {},    # "chat:user" -> iso_timestamp_until — штраф за флуд (автоудаление сообщений)
 }
 
 AUDIT_LIMIT = 200
@@ -653,3 +654,39 @@ def rep_top(chat_id: int, n: int = 10) -> list:
                             "minus": int(rec.get("minus", 0))}))
     items.sort(key=lambda x: x[1]["score"], reverse=True)
     return items[:n]
+
+
+# --------------------------------------------------- штраф за флуд
+def set_flood_penalty(chat_id: int, user_id: int, until_iso: str) -> None:
+    """Установить штраф за флуд (все сообщения удаляются)."""
+    _data.setdefault("flood_penalties", {})[_key(chat_id, user_id)] = until_iso
+    save()
+
+
+def get_flood_penalty(chat_id: int, user_id: int) -> str | None:
+    """Получить ISO-время окончания штрафа за флуд."""
+    return _data.get("flood_penalties", {}).get(_key(chat_id, user_id))
+
+
+def is_flood_penalized(chat_id: int, user_id: int) -> bool:
+    """Проверить, действует ли штраф за флуд. Если истёк — автоматически очистить."""
+    ts = get_flood_penalty(chat_id, user_id)
+    if not ts:
+        return False
+    try:
+        until = datetime.fromisoformat(ts)
+        now_dt = datetime.now(until.tzinfo) if until.tzinfo else datetime.utcnow()
+        if now_dt < until:
+            return True
+        clear_flood_penalty(chat_id, user_id)
+        return False
+    except Exception:
+        return False
+
+
+def clear_flood_penalty(chat_id: int, user_id: int) -> None:
+    """Снять штраф за флуд."""
+    fp = _data.get("flood_penalties")
+    if fp and _key(chat_id, user_id) in fp:
+        fp.pop(_key(chat_id, user_id), None)
+        save()
