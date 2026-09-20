@@ -1119,8 +1119,15 @@ check("storage: change_rep (-)", new_rep2 == new_rep - 5)
 # duel: парсер ставок
 check("duel: ставка none", bot._parse_duel_bet("")[0] == "none")
 check("duel: ставка rep", bot._parse_duel_bet("10 rep")[0] == "rep" and bot._parse_duel_bet("10 rep")[1] == 10)
+check("duel: ставка rep (5 rep на репутацию)", bot._parse_duel_bet("5 rep на репутацию")[0] == "rep" and bot._parse_duel_bet("5 rep на репутацию")[1] == 5)
+check("duel: ставка rep (5 на репутацию)", bot._parse_duel_bet("5 на репутацию")[0] == "rep" and bot._parse_duel_bet("5 на репутацию")[1] == 5)
+check("duel: ставка rep (на репутацию 5)", bot._parse_duel_bet("на репутацию 5")[0] == "rep" and bot._parse_duel_bet("на репутацию 5")[1] == 5)
+check("duel: ставка rep (репутация 15)", bot._parse_duel_bet("репутация 15")[0] == "rep" and bot._parse_duel_bet("репутация 15")[1] == 15)
 check("duel: ставка число -> rep", bot._parse_duel_bet("25")[0] == "rep" and bot._parse_duel_bet("25")[1] == 25)
-check("duel: ставка money", bot._parse_duel_bet("500 руб")[0] == "money" and bot._parse_duel_bet("500 руб")[1] == 500)
+check("duel: ставка money (500 руб)", bot._parse_duel_bet("500 руб")[0] == "money" and bot._parse_duel_bet("500 руб")[1] == 500)
+check("duel: ставка money (100 на рубли)", bot._parse_duel_bet("100 на рубли")[0] == "money" and bot._parse_duel_bet("100 на рубли")[1] == 100)
+
+
 
 
 
@@ -1259,6 +1266,32 @@ _cb_mafia = _MockCb("maf:cancel", 34567, "Анна_Мафиози", -1003, 44)
 asyncio.run(bot.mafia_lobby_cb(_cb_mafia))
 check("mafia cancel: упоминает юзера", "Анна_Мафиози" in (_cb_mafia.message.edited_text or "") and "34567" in (_cb_mafia.message.edited_text or ""))
 check("mafia cancel: игра удалена", -1003 not in bot.mafia_games)
+
+# 4. Дуэль: открытый вызов (u2=None) принимается любым игроком
+_d_open_id = 99999
+_duel_obj = {
+    "id": _d_open_id,
+    "chat_id": -1009,
+    "u1": 5001,
+    "p1_name": "Игрок_1",
+    "u2": None,
+    "p2_name": "любой участник",
+    "bet_type": "rep",
+    "bet_val": 5,
+    "bet_desc": "5 реп.",
+    "accepted": False,
+    "done": False,
+    "msg_id": 99,
+}
+bot.duels[_d_open_id] = _duel_obj
+_cb_self = _MockCb(f"duel:acc:{_d_open_id}", 5001, "Игрок_1", -1009, 99)
+asyncio.run(bot.duel_cb(_cb_self))
+check("duel: сам создатель не может принять свой вызов", not _duel_obj["accepted"])
+
+_cb_other = _MockCb(f"duel:acc:{_d_open_id}", 5002, "Игрок_2", -1009, 99)
+asyncio.run(bot.duel_cb(_cb_other))
+check("duel: открытый вызов принят вторым игроком", _duel_obj["accepted"] and _duel_obj["u2"] == 5002)
+bot.duels.pop(_d_open_id, None)
 
 # ---- Texas Hold'em: улучшения и интерфейс ----
 # 1. Форматирование карт (T -> 10, A -> A)

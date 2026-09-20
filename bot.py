@@ -4819,30 +4819,30 @@ def _parse_duel_bet(rest: str) -> tuple[str, int | str, str]:
     raw = (rest or "").strip()
     if not raw:
         return "none", 0, "На интерес (без ставки)"
-    
-    # 1) Рубли / деньги
-    m_money = re.search(r"(\d+)\s*(?:руб|рубл|rub|₽)", raw, re.I)
-    if not m_money:
-        m_money = re.search(r"(?:руб|рубл|rub|₽)\s*(\d+)", raw, re.I)
-    if m_money:
-        val = int(m_money.group(1))
-        return "money", val, f"{val} руб."
-    
-    # 2) Репутация
-    m_rep = re.search(r"(\d+)\s*(?:rep|реп)", raw, re.I)
+
+    # 1) Репутация (поддерживает: "5 rep", "5 реп", "5 на репутацию", "на репутацию 5", "на 5 реп", "5 репы", "rep 5"):
+    m_rep = re.search(r"(\d+)\s*(?:на\s+)?(?:rep|реп\w*)", raw, re.I)
     if not m_rep:
-        m_rep = re.search(r"(?:rep|реп)\s*(\d+)", raw, re.I)
+        m_rep = re.search(r"(?:на\s+)?(?:rep|реп\w*)\s*(?:на\s+)?(\d+)", raw, re.I)
     if m_rep:
         val = int(m_rep.group(1))
         return "rep", val, f"{val} реп."
-    
+
+    # 2) Рубли / деньги:
+    m_money = re.search(r"(\d+)\s*(?:на\s+)?(?:руб\w*|rub|₽)", raw, re.I)
+    if not m_money:
+        m_money = re.search(r"(?:на\s+)?(?:руб\w*|rub|₽)\s*(?:на\s+)?(\d+)", raw, re.I)
+    if m_money:
+        val = int(m_money.group(1))
+        return "money", val, f"{val} руб."
+
     # 3) Просто число -> считаем репутацией
     if raw.isdigit():
         val = int(raw)
         return "rep", val, f"{val} реп."
-    
+
     # 4) Если есть явное упоминание валют
-    if re.search(r"\b(?:usd|eur|евро|доллар|баксов|бакс|money|деньги)\b|\$|€", raw, re.I):
+    if re.search(r"\b(?:usd|eur|евро|доллар\w*|баксов|бакс\w*|money|деньги)\b|\$|€", raw, re.I):
         return "money", raw[:40], raw[:40]
 
     return "custom", raw[:40], raw[:40]
@@ -4863,16 +4863,16 @@ async def duel_cmd(message: Message):
     p1_name = message.from_user.full_name
 
     uid, rest = _target_rest(message)
-    if uid is None:
-        await message.reply(
-            "⚔️ <b>Дуэль на кубиках</b>\n\n"
-            "Укажите соперника: ответьте на его сообщение или напишите @ник/id.\n"
-            "<b>Примеры:</b>\n"
-            "• <code>/duel @username</code> — дружеская дуэль (без ставки)\n"
-            "• <code>/duel @username 5 rep</code> — дуэль на 5 очков репутации\n"
-            "• <code>/duel @username 100 руб</code> — дуэль на рубли"
-        )
-        return
+
+    # Если цель не найдена в начале, проверяем, нет ли @username в тексте
+    if uid is None and rest:
+        m_at = re.search(r"@[A-Za-z0-9_]{3,32}", rest)
+        if m_at:
+            cand = _resolve_username(m_at.group(0))
+            uid = 0 if cand is None else cand
+            rest = (rest[:m_at.start()] + " " + rest[m_at.end():]).strip()
+            rest = " ".join(rest.split())
+
     if uid == 0:
         await message.reply("Этот пользователь ещё не писал в чате при боте (не могу определить его ID).")
         return
@@ -4883,36 +4883,45 @@ async def duel_cmd(message: Message):
         await message.reply("Боты не участвуют в дуэлях! 🤖")
         return
 
-    # Проверяем, не занят ли кто-то из игроков
+    # Проверяем, не занят ли кто-то из игроков в дуэли
     for d in duels.values():
         if d["chat_id"] == chat_id and not d.get("done"):
-            if u1 in (d["u1"], d["u2"]) or uid in (d["u1"], d["u2"]):
-                await message.reply("Один из участников уже участвует в дуэли. Завершите текущую!")
+            if u1 in (d["u1"], d.get("u2")):
+                await message.reply("Вы уже участвуете в незавершённой дуэли. Завершите или отмените её!")
+                return
+            if uid and uid in (d["u1"], d.get("u2")):
+                await message.reply("Соперник уже участвует в дуэли. Дождитесь её окончания!")
                 return
 
-    try:
-        m_member = await bot.get_chat_member(chat_id, uid)
-        p2_name = m_member.user.full_name
-        if m_member.user.is_bot:
-            await message.reply("Боты не участвуют в дуэлях! 🤖")
-            return
-    except TelegramBadRequest:
-        p2_name = f"ID:{uid}"
+    p2_name = None
+    if uid is not None:
+        try:
+            m_member = await bot.get_chat_member(chat_id, uid)
+            p2_name = m_member.user.full_name
+            if m_member.user.is_bot:
+                await message.reply("Боты не участвуют в дуэлях! 🤖")
+                return
+        except TelegramBadRequest:
+            p2_name = f"ID:{uid}"
 
     bet_type, bet_val, bet_desc = _parse_duel_bet(rest)
 
     if bet_type == "rep":
         if not isinstance(bet_val, int) or bet_val <= 0:
-            await message.reply("Ставка репутации должна быть больше 0.")
+            await message.reply("Ставка репутации должна быть больше 0 (например, <code>/duel 5 rep</code>).")
+            return
+        if bet_val > 100:
+            await message.reply("Максимальная ставка репутации в одной дуэли — 100 очков.")
             return
         rep1 = storage.get_rep(chat_id, u1)["score"]
-        if rep1 < bet_val:
-            await message.reply(f"У вас недостаточно репутации (у вас {rep1}, ставка {bet_val}).")
+        if rep1 < -50:
+            await message.reply(f"У вас слишком низкая репутация ({rep1}). Нельзя играть на репутацию со счётом ниже -50.")
             return
-        rep2 = storage.get_rep(chat_id, uid)["score"]
-        if rep2 < bet_val:
-            await message.reply(f"У соперника недостаточно репутации (у него {rep2}, ставка {bet_val}).")
-            return
+        if uid is not None:
+            rep2 = storage.get_rep(chat_id, uid)["score"]
+            if rep2 < -50:
+                await message.reply(f"У соперника слишком низкая репутация ({rep2}).")
+                return
     elif bet_type == "money":
         if isinstance(bet_val, int) and bet_val <= 0:
             await message.reply("Сумма ставки должна быть больше 0.")
@@ -4926,7 +4935,7 @@ async def duel_cmd(message: Message):
         "u1": u1,
         "p1_name": p1_name,
         "u2": uid,
-        "p2_name": p2_name,
+        "p2_name": p2_name or "любой участник",
         "bet_type": bet_type,
         "bet_val": bet_val,
         "bet_desc": bet_desc,
@@ -4943,13 +4952,22 @@ async def duel_cmd(message: Message):
             "Игра носит исключительно дружеский и развлекательный характер.</i>\n"
         )
 
-    text = (
-        f"⚔️ <b>Вызов на дуэль!</b>\n\n"
-        f"{id_mention(u1, p1_name)} бросает вызов {id_mention(uid, p2_name)}!\n\n"
-        f"🎲 <b>Ставка:</b> {bet_desc}\n"
-        f"{money_warn}\n"
-        f"{id_mention(uid, p2_name)}, принимаешь вызов?"
-    )
+    if uid is not None:
+        text = (
+            f"⚔️ <b>Вызов на дуэль!</b>\n\n"
+            f"{id_mention(u1, p1_name)} бросает вызов {id_mention(uid, p2_name)}!\n\n"
+            f"🎲 <b>Ставка:</b> {bet_desc}\n"
+            f"{money_warn}\n"
+            f"{id_mention(uid, p2_name)}, принимаешь вызов?"
+        )
+    else:
+        text = (
+            f"⚔️ <b>Открытый вызов на дуэль!</b>\n\n"
+            f"{id_mention(u1, p1_name)} бросает вызов любому участнику чата!\n\n"
+            f"🎲 <b>Ставка:</b> {bet_desc}\n"
+            f"{money_warn}\n"
+            f"👇 <i>Кто готов сразиться — жмите кнопку ниже:</i>"
+        )
 
     sent = await message.answer(text, reply_markup=_duel_kb(d_id))
     duel["msg_id"] = sent.message_id
@@ -4962,8 +4980,9 @@ async def _duel_expire(d_id: int, delay: int = 90):
     if duel and not duel["accepted"] and not duel["done"]:
         duels.pop(d_id, None)
         try:
+            target_str = id_mention(duel["u2"], duel["p2_name"]) if duel.get("u2") else "в чате"
             await bot.edit_message_text(
-                f"⏳ Время ожидания ответа на вызов {id_mention(duel['u2'], duel['p2_name'])} истекло.",
+                f"⏳ Время ожидания ответа на вызов {target_str} истекло.",
                 duel["chat_id"], duel["msg_id"]
             )
         except TelegramBadRequest:
@@ -4990,7 +5009,18 @@ async def duel_cb(cb: CallbackQuery):
 
     uid = cb.from_user.id
     if action == "dec":
-        if uid == duel["u2"]:
+        if uid == duel["u1"]:
+            duel["done"] = True
+            duels.pop(d_id, None)
+            await cb.answer("Вы отозвали вызов.")
+            try:
+                await cb.message.edit_text(
+                    f"❌ {id_mention(duel['u1'], duel['p1_name'])} отозвал(а) свой вызов на дуэль."
+                )
+            except TelegramBadRequest:
+                pass
+            return
+        elif duel.get("u2") is not None and uid == duel["u2"]:
             duel["done"] = True
             duels.pop(d_id, None)
             await cb.answer("Вы отклонили вызов.")
@@ -5002,46 +5032,48 @@ async def duel_cb(cb: CallbackQuery):
             except TelegramBadRequest:
                 pass
             return
-        elif uid == duel["u1"]:
-            duel["done"] = True
-            duels.pop(d_id, None)
-            await cb.answer("Вы отозвали вызов.")
-            try:
-                await cb.message.edit_text(
-                    f"❌ {id_mention(duel['u1'], duel['p1_name'])} отозвал(а) свой вызов на дуэль."
-                )
-            except TelegramBadRequest:
-                pass
-            return
         else:
-            await cb.answer("Вы не участник этой дуэли.", show_alert=True)
+            await cb.answer("Вы не можете отклонить этот вызов.", show_alert=True)
             return
 
     elif action == "acc":
-        if uid != duel["u2"]:
+        if duel.get("u2") is not None and uid != duel["u2"]:
             await cb.answer("Этот вызов адресован не вам!", show_alert=True)
             return
+        if uid == duel["u1"]:
+            await cb.answer("Нельзя принять свой собственный вызов! 😅", show_alert=True)
+            return
 
-        # Проверка баланса перед стартом
+        # Проверяем, не занят ли принимающий в другой дуэли
+        for d in duels.values():
+            if d["chat_id"] == duel["chat_id"] and not d.get("done") and d["id"] != d_id:
+                if uid in (d["u1"], d.get("u2")):
+                    await cb.answer("Вы уже участвуете в другой дуэли.", show_alert=True)
+                    return
+
+        # Если это был открытый вызов — фиксируем второго игрока
+        if duel.get("u2") is None:
+            duel["u2"] = uid
+            duel["p2_name"] = cb.from_user.full_name
+
+        # Проверка репутации перед стартом
         if duel["bet_type"] == "rep":
             bet = duel["bet_val"]
-            if storage.get_rep(duel["chat_id"], duel["u1"])["score"] < bet:
+            rep1 = storage.get_rep(duel["chat_id"], duel["u1"])["score"]
+            if rep1 < -50:
                 duel["done"] = True
                 duels.pop(d_id, None)
-                await cb.answer("У инициатора больше нет нужного количества репутации.", show_alert=True)
+                await cb.answer("У инициатора слишком низкая репутация.", show_alert=True)
                 try:
-                    await cb.message.edit_text("❌ Дуэль отменена: у инициатора не хватает репутации.")
+                    await cb.message.edit_text("❌ Дуэль отменена: у инициатора репутация ниже -50.")
                 except TelegramBadRequest:
                     pass
                 return
-            if storage.get_rep(duel["chat_id"], duel["u2"])["score"] < bet:
-                duel["done"] = True
-                duels.pop(d_id, None)
-                await cb.answer("У вас не хватает репутации для этой ставки.", show_alert=True)
-                try:
-                    await cb.message.edit_text("❌ Дуэль отменена: у принимающего не хватает репутации.")
-                except TelegramBadRequest:
-                    pass
+            rep2 = storage.get_rep(duel["chat_id"], duel["u2"])["score"]
+            if rep2 < -50:
+                await cb.answer("У вас слишком низкая репутация (ниже -50).", show_alert=True)
+                duel["u2"] = None
+                duel["p2_name"] = "любой участник"
                 return
 
         duel["accepted"] = True
