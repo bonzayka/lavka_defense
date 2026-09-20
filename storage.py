@@ -592,13 +592,18 @@ def get_rep(chat_id: int, user_id: int) -> dict:
 
 def add_rep(chat_id: int, target_id: int, delta: int) -> dict:
     """Начислить +1/-1 получателю. Возвращает новый счётчик."""
+    return change_rep(chat_id, target_id, 1 if delta > 0 else -1)
+
+
+def change_rep(chat_id: int, target_id: int, delta: int) -> dict:
+    """Изменить репутацию получателя на delta (+/- N). Возвращает новый счётчик."""
     k = _key(chat_id, target_id)
     rec = _rep_all().setdefault(k, {"score": 0, "plus": 0, "minus": 0})
-    rec["score"] = int(rec.get("score", 0)) + (1 if delta > 0 else -1)
+    rec["score"] = int(rec.get("score", 0)) + delta
     if delta > 0:
-        rec["plus"] = int(rec.get("plus", 0)) + 1
-    else:
-        rec["minus"] = int(rec.get("minus", 0)) + 1
+        rec["plus"] = int(rec.get("plus", 0)) + delta
+    elif delta < 0:
+        rec["minus"] = int(rec.get("minus", 0)) + abs(delta)
     save()
     return {"score": rec["score"], "plus": rec["plus"], "minus": rec["minus"]}
 

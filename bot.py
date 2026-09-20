@@ -126,9 +126,12 @@ panel_newbot: dict[int, dict] = {}                 # черновик созда
 ub_login: dict[int, dict] = {}                     # состояние скрытого логина юзербота (uid -> telethon state)
 msgcount: dict[tuple[int, int], int] = {}          # счётчик сообщений юзеров (с момента старта)
 dice_games: dict[int, dict] = {}                   # chat_id -> game state
+duels: dict[int, dict] = {}                        # duel_id -> duel state
+duel_seq: int = 0                                  # счётчик ID дуэлей
 holdem_games: dict[int, dict] = {}                 # chat_id -> состояние игры Texas Hold'em
 holdem_player_chat: dict[int, int] = {}            # uid -> chat_id активного стола холдема
 holdem_turn_tasks: dict[int, asyncio.Task] = {}    # chat_id -> активный таймер хода
+holdem_custom_wait: dict[int, dict] = {}           # uid -> {chat_id, token} ожидание ввода своей ставки
 mafia_games: dict[int, dict] = {}                  # chat_id -> состояние игры «Мафия»
 mafia_player_chat: dict[int, int] = {}             # uid -> chat_id активной игры (для ночных ЛС-кнопок)
 uname_cache: dict[str, int] = {}                   # "@username" (lower, без @) -> user_id (для таргета по нику)
@@ -1047,14 +1050,11 @@ async def maybe_autosweep_deleted():
 # ----------------------------------------------------------- наказания
 
 def mod_rows(chat_id: int, uid: int) -> list:
-    """Кнопки модерации: бан/мут, мут на срок, бан+чистка, размут."""
+    """Кнопки модерации: бан, мут (с выбором срока), бан+чистка, размут."""
     p = f"{chat_id}:{uid}"
     return [
         [InlineKeyboardButton(text="🔨 Бан", callback_data=f"mod:ban:{p}"),
-         InlineKeyboardButton(text="🔇 Мут", callback_data=f"mod:mute:{p}")],
-        [InlineKeyboardButton(text="Мут 1ч", callback_data=f"mod:mute:{p}:3600"),
-         InlineKeyboardButton(text="1д", callback_data=f"mod:mute:{p}:86400"),
-         InlineKeyboardButton(text="3д", callback_data=f"mod:mute:{p}:259200")],
+         InlineKeyboardButton(text="🔇 Мут", callback_data=f"mod:mutepick:{p}")],
         [InlineKeyboardButton(text="🧹 Бан+чистка", callback_data=f"mod:banwipe:{p}"),
          InlineKeyboardButton(text="✅ Размут", callback_data=f"mod:unmute:{p}")],
     ]
@@ -1062,6 +1062,18 @@ def mod_rows(chat_id: int, uid: int) -> list:
 
 def mod_keyboard(chat_id: int, uid: int) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=mod_rows(chat_id, uid))
+
+
+def mute_pick_keyboard(chat_id: int, uid: int) -> InlineKeyboardMarkup:
+    """Всплывающий выбор срока мута: 10 мин, 1 час, 1 день, навсегда."""
+    p = f"{chat_id}:{uid}"
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="10 мин", callback_data=f"mod:mute:{p}:600"),
+         InlineKeyboardButton(text="1 час", callback_data=f"mod:mute:{p}:3600")],
+        [InlineKeyboardButton(text="1 день", callback_data=f"mod:mute:{p}:86400"),
+         InlineKeyboardButton(text="Навсегда", callback_data=f"mod:mute:{p}:0")],
+        [InlineKeyboardButton(text="⬅️ Назад", callback_data=f"mod:back:{p}")],
+    ])
 
 
 async def report(chat_id: int, text: str, kb: InlineKeyboardMarkup | None = None):
@@ -1243,7 +1255,7 @@ def antiflood_hit(chat_id: int, user_id: int) -> bool:
 # Команды, доступные ВСЕМ участникам (не считаются «чужой админ-командой»).
 PUBLIC_CMDS = {"rules", "report", "ping", "help", "vb", "start", "privacy",
                "kubik", "dice", "game", "mafia", "мафия", "holdem", "poker",
-               "holdemhelp", "pokerhelp"}
+               "holdemhelp", "pokerhelp", "duel", "дуэль", "bet", "raise", "ставка", "рейз"}
 
 
 def _cmd_name(text: str) -> str | None:
@@ -2378,17 +2390,33 @@ async def on_moderation(cb: CallbackQuery):
         return
 
     # Право под конкретное действие кнопки (TG-админ проходит всегда через can()).
-    _perm_for = {"ban": "ban", "banwipe": "ban", "mute": "mute",
+    _perm_for = {"ban": "ban", "banwipe": "ban", "mute": "mute", "mutepick": "mute", "back": "mute",
                  "warn": "warn", "kick": "kick"}.get(action, "ban")
     if not await can(gid, cb.from_user.id, _perm_for):
         await cb.answer("Нет прав на это действие.", show_alert=True)
         return
 
-    if action in ("ban", "mute", "banwipe", "unmute", "unban", "warn", "kick"):
+    if action in ("ban", "mute", "banwipe", "unmute", "unban", "warn", "kick", "mutepick", "back"):
         reason = await _deny_target(gid, cb.from_user.id, uid)
         if reason:
             await cb.answer(reason, show_alert=True)
             return
+
+    if action == "mutepick":
+        await cb.answer()
+        try:
+            await cb.message.edit_reply_markup(reply_markup=mute_pick_keyboard(gid, uid))
+        except TelegramBadRequest:
+            pass
+        return
+
+    if action == "back":
+        await cb.answer()
+        try:
+            await cb.message.edit_reply_markup(reply_markup=mod_keyboard(gid, uid))
+        except TelegramBadRequest:
+            pass
+        return
 
     actor = f"админ {cb.from_user.full_name}"
     try:  # ник цели (чтобы было видно, КОГО наказали)
@@ -2408,10 +2436,11 @@ async def on_moderation(cb: CallbackQuery):
         await cb.answer("Бан + чистка")
         result = f"🧹 {tgt} — бан + удалено {n} сообщ. {mod_decision(cb.from_user)}"
     elif action == "mute":
-        await mute_user(gid, uid, secs)
-        audit(actor, f"mute {human_duration(secs)}", uid)
+        duration = secs if secs and secs > 0 else None
+        await mute_user(gid, uid, duration)
+        audit(actor, f"mute {human_duration(duration)}", uid)
         await cb.answer("Замучен")
-        result = f"🔇 {tgt} — мут ({human_duration(secs)}). {mod_decision(cb.from_user)}"
+        result = f"🔇 {tgt} — мут ({human_duration(duration)}). {mod_decision(cb.from_user)}"
     elif action == "unmute":
         try:
             await bot.restrict_chat_member(gid, uid, permissions=FULL)
@@ -4692,9 +4721,10 @@ async def dice_cb(cb: CallbackQuery):
     elif action == "cancel":
         # Отменять может кто угодно — чтобы «зависшую» игру всегда можно закрыть.
         dice_games.pop(chat_id, None)
+        who = mention(cb.from_user)
         await cb.answer("Отменено.")
         try:
-            await cb.message.edit_text("🎲 Игра отменена.")
+            await cb.message.edit_text(f"🎲 Игра отменена участником {who}.")
         except TelegramBadRequest:
             pass
         asyncio.create_task(_dice_cleanup(chat_id, [game["msg_id"]]))
@@ -4778,7 +4808,327 @@ async def _dice_run(chat_id: int, game: dict):
         asyncio.create_task(_dice_cleanup(chat_id, msgs))
 
 
+# =============================== Дуэль (Dice Duel) ===========================
+
+def _parse_duel_bet(rest: str) -> tuple[str, int | str, str]:
+    """Распознать ставку дуэли из хвоста команды.
+    
+    Возвращает (bet_type, bet_val, bet_desc), где:
+      bet_type: 'none' | 'rep' | 'money' | 'custom'
+    """
+    raw = (rest or "").strip()
+    if not raw:
+        return "none", 0, "На интерес (без ставки)"
+    
+    # 1) Рубли / деньги
+    m_money = re.search(r"(\d+)\s*(?:руб|рубл|rub|₽)", raw, re.I)
+    if not m_money:
+        m_money = re.search(r"(?:руб|рубл|rub|₽)\s*(\d+)", raw, re.I)
+    if m_money:
+        val = int(m_money.group(1))
+        return "money", val, f"{val} руб."
+    
+    # 2) Репутация
+    m_rep = re.search(r"(\d+)\s*(?:rep|реп)", raw, re.I)
+    if not m_rep:
+        m_rep = re.search(r"(?:rep|реп)\s*(\d+)", raw, re.I)
+    if m_rep:
+        val = int(m_rep.group(1))
+        return "rep", val, f"{val} реп."
+    
+    # 3) Просто число -> считаем репутацией
+    if raw.isdigit():
+        val = int(raw)
+        return "rep", val, f"{val} реп."
+    
+    # 4) Если есть явное упоминание валют
+    if re.search(r"\b(?:usd|eur|евро|доллар|баксов|бакс|money|деньги)\b|\$|€", raw, re.I):
+        return "money", raw[:40], raw[:40]
+
+    return "custom", raw[:40], raw[:40]
+
+
+def _duel_kb(duel_id: int) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="⚔️ Принять вызов", callback_data=f"duel:acc:{duel_id}"),
+         InlineKeyboardButton(text="🏳️ Отклонить", callback_data=f"duel:dec:{duel_id}")],
+    ])
+
+
+@dp.message(Command("duel", "дуэль"), F.chat.type.in_({"group", "supergroup"}))
+async def duel_cmd(message: Message):
+    global duel_seq
+    chat_id = message.chat.id
+    u1 = message.from_user.id
+    p1_name = message.from_user.full_name
+
+    uid, rest = _target_rest(message)
+    if uid is None:
+        await message.reply(
+            "⚔️ <b>Дуэль на кубиках</b>\n\n"
+            "Укажите соперника: ответьте на его сообщение или напишите @ник/id.\n"
+            "<b>Примеры:</b>\n"
+            "• <code>/duel @username</code> — дружеская дуэль (без ставки)\n"
+            "• <code>/duel @username 5 rep</code> — дуэль на 5 очков репутации\n"
+            "• <code>/duel @username 100 руб</code> — дуэль на рубли"
+        )
+        return
+    if uid == 0:
+        await message.reply("Этот пользователь ещё не писал в чате при боте (не могу определить его ID).")
+        return
+    if uid == u1:
+        await message.reply("Нельзя вызвать на дуэль самого себя! 😅")
+        return
+    if uid == bot_self_id:
+        await message.reply("Боты не участвуют в дуэлях! 🤖")
+        return
+
+    # Проверяем, не занят ли кто-то из игроков
+    for d in duels.values():
+        if d["chat_id"] == chat_id and not d.get("done"):
+            if u1 in (d["u1"], d["u2"]) or uid in (d["u1"], d["u2"]):
+                await message.reply("Один из участников уже участвует в дуэли. Завершите текущую!")
+                return
+
+    try:
+        m_member = await bot.get_chat_member(chat_id, uid)
+        p2_name = m_member.user.full_name
+        if m_member.user.is_bot:
+            await message.reply("Боты не участвуют в дуэлях! 🤖")
+            return
+    except TelegramBadRequest:
+        p2_name = f"ID:{uid}"
+
+    bet_type, bet_val, bet_desc = _parse_duel_bet(rest)
+
+    if bet_type == "rep":
+        if not isinstance(bet_val, int) or bet_val <= 0:
+            await message.reply("Ставка репутации должна быть больше 0.")
+            return
+        rep1 = storage.get_rep(chat_id, u1)["score"]
+        if rep1 < bet_val:
+            await message.reply(f"У вас недостаточно репутации (у вас {rep1}, ставка {bet_val}).")
+            return
+        rep2 = storage.get_rep(chat_id, uid)["score"]
+        if rep2 < bet_val:
+            await message.reply(f"У соперника недостаточно репутации (у него {rep2}, ставка {bet_val}).")
+            return
+    elif bet_type == "money":
+        if isinstance(bet_val, int) and bet_val <= 0:
+            await message.reply("Сумма ставки должна быть больше 0.")
+            return
+
+    duel_seq += 1
+    d_id = duel_seq
+    duel = {
+        "id": d_id,
+        "chat_id": chat_id,
+        "u1": u1,
+        "p1_name": p1_name,
+        "u2": uid,
+        "p2_name": p2_name,
+        "bet_type": bet_type,
+        "bet_val": bet_val,
+        "bet_desc": bet_desc,
+        "accepted": False,
+        "done": False,
+        "msg_id": 0,
+    }
+    duels[d_id] = duel
+
+    money_warn = ""
+    if bet_type == "money":
+        money_warn = (
+            "\n⚠️ <i>Напоминание: мы категорически не рекомендуем играть на реальные деньги! "
+            "Игра носит исключительно дружеский и развлекательный характер.</i>\n"
+        )
+
+    text = (
+        f"⚔️ <b>Вызов на дуэль!</b>\n\n"
+        f"{id_mention(u1, p1_name)} бросает вызов {id_mention(uid, p2_name)}!\n\n"
+        f"🎲 <b>Ставка:</b> {bet_desc}\n"
+        f"{money_warn}\n"
+        f"{id_mention(uid, p2_name)}, принимаешь вызов?"
+    )
+
+    sent = await message.answer(text, reply_markup=_duel_kb(d_id))
+    duel["msg_id"] = sent.message_id
+    asyncio.create_task(_duel_expire(d_id, 90))
+
+
+async def _duel_expire(d_id: int, delay: int = 90):
+    await asyncio.sleep(delay)
+    duel = duels.get(d_id)
+    if duel and not duel["accepted"] and not duel["done"]:
+        duels.pop(d_id, None)
+        try:
+            await bot.edit_message_text(
+                f"⏳ Время ожидания ответа на вызов {id_mention(duel['u2'], duel['p2_name'])} истекло.",
+                duel["chat_id"], duel["msg_id"]
+            )
+        except TelegramBadRequest:
+            pass
+
+
+@dp.callback_query(F.data.startswith("duel:"))
+async def duel_cb(cb: CallbackQuery):
+    parts = cb.data.split(":")
+    if len(parts) != 3:
+        await cb.answer()
+        return
+    action, d_id_str = parts[1], parts[2]
+    try:
+        d_id = int(d_id_str)
+    except ValueError:
+        await cb.answer()
+        return
+
+    duel = duels.get(d_id)
+    if not duel or duel["done"]:
+        await cb.answer("Эта дуэль уже недействительна.", show_alert=True)
+        return
+
+    uid = cb.from_user.id
+    if action == "dec":
+        if uid == duel["u2"]:
+            duel["done"] = True
+            duels.pop(d_id, None)
+            await cb.answer("Вы отклонили вызов.")
+            try:
+                await cb.message.edit_text(
+                    f"🏳️ {id_mention(duel['u2'], duel['p2_name'])} отклонил(а) вызов на дуэль от "
+                    f"{id_mention(duel['u1'], duel['p1_name'])}."
+                )
+            except TelegramBadRequest:
+                pass
+            return
+        elif uid == duel["u1"]:
+            duel["done"] = True
+            duels.pop(d_id, None)
+            await cb.answer("Вы отозвали вызов.")
+            try:
+                await cb.message.edit_text(
+                    f"❌ {id_mention(duel['u1'], duel['p1_name'])} отозвал(а) свой вызов на дуэль."
+                )
+            except TelegramBadRequest:
+                pass
+            return
+        else:
+            await cb.answer("Вы не участник этой дуэли.", show_alert=True)
+            return
+
+    elif action == "acc":
+        if uid != duel["u2"]:
+            await cb.answer("Этот вызов адресован не вам!", show_alert=True)
+            return
+
+        # Проверка баланса перед стартом
+        if duel["bet_type"] == "rep":
+            bet = duel["bet_val"]
+            if storage.get_rep(duel["chat_id"], duel["u1"])["score"] < bet:
+                duel["done"] = True
+                duels.pop(d_id, None)
+                await cb.answer("У инициатора больше нет нужного количества репутации.", show_alert=True)
+                try:
+                    await cb.message.edit_text("❌ Дуэль отменена: у инициатора не хватает репутации.")
+                except TelegramBadRequest:
+                    pass
+                return
+            if storage.get_rep(duel["chat_id"], duel["u2"])["score"] < bet:
+                duel["done"] = True
+                duels.pop(d_id, None)
+                await cb.answer("У вас не хватает репутации для этой ставки.", show_alert=True)
+                try:
+                    await cb.message.edit_text("❌ Дуэль отменена: у принимающего не хватает репутации.")
+                except TelegramBadRequest:
+                    pass
+                return
+
+        duel["accepted"] = True
+        await cb.answer("Вызов принят! ⚔️")
+        try:
+            await cb.message.edit_text(
+                f"⚔️ <b>Вызов принят!</b>\n"
+                f"{id_mention(duel['u1'], duel['p1_name'])} против {id_mention(duel['u2'], duel['p2_name'])}\n"
+                f"🎲 Ставка: <b>{duel['bet_desc']}</b>\n\n"
+                f"Бросаем кубики..."
+            )
+        except TelegramBadRequest:
+            pass
+
+        asyncio.create_task(_duel_run(duel["chat_id"], duel))
+    else:
+        await cb.answer()
+
+
+async def _duel_run(chat_id: int, duel: dict):
+    try:
+        u1, u2 = duel["u1"], duel["u2"]
+        p1_name, p2_name = duel["p1_name"], duel["p2_name"]
+        round_num = 1
+        while True:
+            if round_num > 1:
+                await bot.send_message(chat_id, f"🔄 <b>Раунд {round_num}! Перебрасываем кубики…</b>")
+            await asyncio.sleep(1.0)
+            await bot.send_message(chat_id, f"🎲 Бросает {id_mention(u1, p1_name)}:")
+            d1 = await bot.send_dice(chat_id, emoji="🎲")
+            val1 = d1.dice.value
+            await asyncio.sleep(3.5)
+
+            await bot.send_message(chat_id, f"🎲 Бросает {id_mention(u2, p2_name)}:")
+            d2 = await bot.send_dice(chat_id, emoji="🎲")
+            val2 = d2.dice.value
+            await asyncio.sleep(3.5)
+
+            if val1 == val2:
+                await bot.send_message(chat_id, f"🤝 <b>Ничья ({val1} : {val2})!</b> Никто не уступает!")
+                round_num += 1
+                await asyncio.sleep(2.0)
+                continue
+            break
+
+        win_u, lose_u = (u1, u2) if val1 > val2 else (u2, u1)
+        win_val, lose_val = (val1, val2) if val1 > val2 else (val2, val1)
+        win_name = p1_name if val1 > val2 else p2_name
+        lose_name = p2_name if val1 > val2 else p1_name
+
+        rep_line = ""
+        if duel["bet_type"] == "rep":
+            bet = duel["bet_val"]
+            storage.change_rep(chat_id, win_u, bet)
+            storage.change_rep(chat_id, lose_u, -bet)
+            rep_line = (
+                f"\n\n📈 <b>Итоги репутации:</b>\n"
+                f"• {id_mention(win_u, win_name)}: +{bet} (всего {storage.get_rep(chat_id, win_u)['score']})\n"
+                f"• {id_mention(lose_u, lose_name)}: -{bet} (всего {storage.get_rep(chat_id, lose_u)['score']})"
+            )
+        elif duel["bet_type"] == "money":
+            rep_line = (
+                f"\n\n💰 <b>На кону было:</b> {duel['bet_desc']}\n"
+                f"⚠️ <i>(Не забывайте: игра носит сугубо развлекательный характер!)</i>"
+            )
+
+        await bot.send_message(
+            chat_id,
+            f"🏆 <b>Победа в дуэли!</b>\n\n"
+            f"🥇 Победитель: {id_mention(win_u, win_name)} (выпало <b>{win_val}</b>)\n"
+            f"🥈 Проигравший: {id_mention(lose_u, lose_name)} (выпало <b>{lose_val}</b>)\n"
+            f"🎲 Итоговый счёт: <b>{win_val}</b> против <b>{lose_val}</b>"
+            f"{rep_line}"
+        )
+    except Exception as e:
+        log.exception("Ошибка в ходе дуэли: %s", e)
+    finally:
+        duel["done"] = True
+        duels.pop(duel["id"], None)
+
+
 # ============================ Texas Hold'em =================================
+
+
+def _fmt_chips(n: int) -> str:
+    """Форматирование фишек с разделителем тысяч (50 000 вместо 50000)."""
+    return f"{n:,}".replace(",", " ")
 
 
 def _holdem_board_text(game: dict) -> str:
@@ -4788,38 +5138,77 @@ def _holdem_board_text(game: dict) -> str:
     lines = ["🂡 <b>Texas Hold'em</b>"]
     phase = table.get("phase")
     if phase == "lobby":
+        lines.append("━━━━━━━━━━━━━━━━━━━━━")
+        lines.append(f"👥 <b>Игроки за столом ({len(seats)} / {holdem.MAX_PLAYERS}):</b>")
         roster = []
-        for uid in seats:
+        for idx, uid in enumerate(seats, 1):
             p = players[uid]
-            roster.append(f"• {id_mention(uid, p['name'])} — <b>{p['stack']}</b> фишек")
-        who = "\n".join(roster) or "<i>пока никто</i>"
-        lines.append(f"Игроков: <b>{len(seats)}</b> (мин. {holdem.MIN_PLAYERS})")
+            host_mark = " 👑" if uid == table.get("host") else ""
+            roster.append(f"  {idx}. {id_mention(uid, p['name'])}{host_mark} — <b>{_fmt_chips(p['stack'])}</b> фишек")
+        who = "\n".join(roster) or "<i>  пока никого нет</i>"
         lines.append(who)
-        lines.append("")
-        lines.append("У каждого стартовый стек 50 000. Блайнды: SB 500 / BB 1000. Карты придут в ЛС. Жми «Войти».")
+        lines.append("━━━━━━━━━━━━━━━━━━━━━")
+        lines.append(f"💵 Стартовый стек: <b>{_fmt_chips(holdem.STARTING_STACK)}</b> | Блайнды: <b>{holdem.SMALL_BLIND}/{holdem.BIG_BLIND}</b>")
+        lines.append("🃏 Карты раздаются в ЛС. Нажмите «🪑 Войти», затем «▶️ Начать»!")
         return "\n".join(lines)
 
-    lines.append(f"Раздача: <b>#{table.get('hand_no', 0)}</b> · улица: <b>{esc(holdem.street_name(table.get('street')))}</b>")
-    lines.append(f"Банк: <b>{table.get('pot', 0)}</b>")
-    lines.append(f"Стол: {esc(holdem.format_cards(table.get('board', [])))}")
-    lines.append("")
+    street_desc = {
+        "preflop": "Префлоп (карты на руках)",
+        "flop": "Флоп (3 карты на столе)",
+        "turn": "Тёрн (4 карты на столе)",
+        "river": "Ривер (5 карт на столе)",
+    }.get(table.get("street"), "Раздача")
+
+    lines.append(f"Раздача <b>#{table.get('hand_no', 0)}</b> · 📍 <i>{street_desc}</i>")
+    lines.append("━━━━━━━━━━━━━━━━━━━━━")
+    board_cards = table.get("board", [])
+    if board_cards:
+        board_str = "  ".join(holdem.format_card(c) for c in board_cards)
+        lines.append(f"🃏 <b>Стол:</b> [ <b>{board_str}</b> ]")
+    else:
+        lines.append("🃏 <b>Стол:</b> [ 🂠  🂠  🂠  🂠  🂠 ]")
+
+    lines.append(f"💰 <b>Банк:</b> <b>{_fmt_chips(table.get('pot', 0))}</b> фишек")
+    lines.append("━━━━━━━━━━━━━━━━━━━━━")
+
+    lines.append("👥 <b>Игроки:</b>")
+    dealer_idx = table.get("dealer_index", -1)
+    dealer_uid = seats[dealer_idx] if 0 <= dealer_idx < len(seats) else None
+
     for uid in seats:
         p = players[uid]
+        pos_badge = " 🔘D" if uid == dealer_uid else ""
+
         if not p.get("in_table") and p.get("stack", 0) <= 0:
-            status = "вылетел"
+            status = "❌ выбыл"
         elif p.get("folded"):
-            status = "fold"
+            status = "↩️ пас"
         elif p.get("all_in"):
-            status = f"all-in {p['street_bet']}"
+            status = f"🚨 ALL-IN ({_fmt_chips(p['street_bet'])})"
         elif table.get("current_turn") == uid:
-            status = f"ход · to call {holdem.player_to_call(table, uid)}"
+            owe = holdem.player_to_call(table, uid)
+            status = f"⏳ <b>ДУМАЕТ</b> (нужно {_fmt_chips(owe)})"
         else:
-            status = p.get("last_action") or f"в игре · {p['street_bet']}"
+            status = p.get("last_action") or f"в игре (ставка {_fmt_chips(p['street_bet'])})"
+
         marker = "👉 " if table.get("current_turn") == uid else "• "
-        lines.append(f"{marker}{id_mention(uid, p['name'])} — {p['stack']} фишек · {esc(status)}")
+        lines.append(f"{marker}{id_mention(uid, p['name'])}{pos_badge} — <b>{_fmt_chips(p['stack'])}</b> · {status}")
+
+    lines.append("━━━━━━━━━━━━━━━━━━━━━")
+
+    cur_turn = table.get("current_turn")
+    if cur_turn and cur_turn in players and phase == "playing":
+        owe = holdem.player_to_call(table, cur_turn)
+        lines.append(f"👉 <b>Сейчас ходит:</b> {id_mention(cur_turn, players[cur_turn]['name'])}")
+        if owe > 0:
+            lines.append(f"💵 Нужно доставить (Call): <b>{_fmt_chips(owe)}</b> фишек")
+        else:
+            lines.append("✅ Можно сделать бесплатный чек.")
+
     if table.get("last_event"):
         lines.append("")
-        lines.append(esc(table["last_event"]).replace("\n", "\n"))
+        lines.append(esc(table["last_event"]))
+
     return "\n".join(lines)
 
 
@@ -4833,22 +5222,34 @@ def _holdem_lobby_kb() -> InlineKeyboardMarkup:
 
 def _holdem_turn_kb(chat_id: int, uid: int, opts: dict) -> InlineKeyboardMarkup:
     rows = []
-    row = []
+    main_row = []
     if opts.get("check"):
-        row.append(InlineKeyboardButton(text="✅ Check", callback_data=f"thm:{chat_id}:{uid}:check"))
+        main_row.append(InlineKeyboardButton(text="✅ Чек (Check)", callback_data=f"thm:{chat_id}:{uid}:check"))
     if opts.get("call"):
-        row.append(InlineKeyboardButton(text=f"💰 Call {opts.get('call_amount', 0)}",
-                                        callback_data=f"thm:{chat_id}:{uid}:call"))
-    if row:
-        rows.append(row)
-    row = [InlineKeyboardButton(text="↩️ Fold", callback_data=f"thm:{chat_id}:{uid}:fold")]
-    if opts.get("all_in"):
-        row.append(InlineKeyboardButton(text="🚨 All-in", callback_data=f"thm:{chat_id}:{uid}:allin"))
-    rows.append(row)
+        call_amt = opts.get("call_amount", 0)
+        main_row.append(InlineKeyboardButton(text=f"💰 Колл ({_fmt_chips(call_amt)})",
+                                            callback_data=f"thm:{chat_id}:{uid}:call"))
+    main_row.append(InlineKeyboardButton(text="↩️ Пас (Fold)", callback_data=f"thm:{chat_id}:{uid}:fold"))
+    rows.append(main_row)
+
+    raise_row = []
     raises = opts.get("raise_to", []) or []
-    for amt in raises:
-        rows.append([InlineKeyboardButton(text=f"📈 Raise до {amt}",
-                                          callback_data=f"thm:{chat_id}:{uid}:raise:{amt}")])
+    for amt in raises[:2]:
+        raise_row.append(InlineKeyboardButton(text=f"📈 Рейз {_fmt_chips(amt)}",
+                                              callback_data=f"thm:{chat_id}:{uid}:raise:{amt}"))
+    if opts.get("can_raise", bool(raises)):
+        raise_row.append(InlineKeyboardButton(text="✍️ Своя сумма",
+                                              callback_data=f"thm:{chat_id}:{uid}:custom"))
+    if raise_row:
+        rows.append(raise_row)
+
+    bottom_row = []
+    if opts.get("all_in"):
+        bottom_row.append(InlineKeyboardButton(text="🚨 Ва-банк (All-in)",
+                                              callback_data=f"thm:{chat_id}:{uid}:allin"))
+    bottom_row.append(InlineKeyboardButton(text="❓ Комбинации", callback_data=f"thm:{chat_id}:{uid}:help"))
+    rows.append(bottom_row)
+
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
@@ -4891,11 +5292,30 @@ async def _holdem_send_turn_prompt(chat_id: int):
         return
     p = table["players"][uid]
     owe = holdem.player_to_call(table, uid)
-    text = (f"🂠 Твой ход за столом <code>{chat_id}</code>.\n"
-            f"Стол: {holdem.format_cards(table.get('board', []))}\n"
-            f"Твои карты: {holdem.format_cards(p.get('hole', []))}\n"
-            f"Банк: {table.get('pot', 0)} · Нужно доставить: {owe}\n"
-            f"У тебя {holdem.TURN_TIMEOUT_SEC} сек на решение.")
+
+    board = table.get("board", [])
+    board_str = "  ".join(holdem.format_card(c) for c in board) if board else "—"
+    hole_str = "  ".join(holdem.format_card(c) for c in p.get("hole", []))
+
+    combo_info = ""
+    combo_name = holdem.eval_player_combination(p.get("hole", []), board)
+    if combo_name:
+        combo_info = f"\n💡 <i>Твоя комбинация: <b>{combo_name}</b></i>"
+
+    owe_str = f"{_fmt_chips(owe)} фишек" if owe > 0 else "0 (бесплатный чек)"
+
+    text = (
+        f"🂡 <b>Твой ход в Texas Hold'em!</b>\n\n"
+        f"🃏 <b>Стол:</b> [ {board_str} ]\n"
+        f"🂠 <b>Твои карты:</b> <b>{hole_str}</b>"
+        f"{combo_info}\n\n"
+        f"💰 <b>Банк:</b> {_fmt_chips(table.get('pot', 0))} фишек\n"
+        f"🪙 <b>Твой стек:</b> {_fmt_chips(p['stack'])} фишек\n"
+        f"💵 <b>К уравниванию:</b> <b>{owe_str}</b>\n\n"
+        f"⏱ <i>У тебя {holdem.TURN_TIMEOUT_SEC} сек на принятие решения.</i>\n"
+        f"👇 <i>Выбери действие или напиши сумму ставки в чат:</i>"
+    )
+    holdem_custom_wait.pop(uid, None)
     await _holdem_dm(uid, text, _holdem_turn_kb(chat_id, uid, opts))
     await _holdem_cancel_timer(chat_id)
     table["turn_token"] = table.get("turn_token", 0) + 1
@@ -4910,9 +5330,15 @@ async def _holdem_announce_hole_cards(chat_id: int):
     for uid in holdem.active_table_players(table):
         p = table["players"][uid]
         holdem_player_chat[uid] = chat_id
-        await _holdem_dm(uid,
-            f"🂠 Раздача #{table['hand_no']}\nТвои карты: {holdem.format_cards(p.get('hole', []))}\n"
-            f"Стек: {p['stack']} фишек")
+        combo = holdem.eval_player_combination(p.get("hole", []), [])
+        combo_txt = f"\n💡 <i>Комбинация: {combo}</i>" if combo else ""
+        cards_str = "  ".join(holdem.format_card(c) for c in p.get("hole", []))
+        await _holdem_dm(
+            uid,
+            f"🂡 <b>Раздача #{table['hand_no']}</b>\n"
+            f"🃏 Твои карты: <b>{cards_str}</b>{combo_txt}\n"
+            f"🪙 Стек: <b>{_fmt_chips(p['stack'])}</b> фишек"
+        )
 
 
 async def _holdem_after_action(chat_id: int):
@@ -4945,6 +5371,7 @@ async def _holdem_timeout_apply(chat_id: int, uid: int):
     p = table["players"].get(uid)
     if not p:
         return
+    holdem_custom_wait.pop(uid, None)
     p["misses"] = p.get("misses", 0) + 1
     if p["misses"] >= holdem.MAX_TIMEOUTS:
         holdem.disqualify_player(table, uid)
@@ -4990,6 +5417,7 @@ async def _holdem_finish_if_needed(chat_id: int):
     for uid in list(holdem_player_chat):
         if holdem_player_chat.get(uid) == chat_id:
             holdem_player_chat.pop(uid, None)
+            holdem_custom_wait.pop(uid, None)
 
 
 @dp.message(Command("holdem", "poker"), F.chat.type.in_({"group", "supergroup"}))
@@ -5038,9 +5466,11 @@ async def holdem_lobby_cb(cb: CallbackQuery):
         for uid2 in list(holdem_player_chat):
             if holdem_player_chat.get(uid2) == chat_id:
                 holdem_player_chat.pop(uid2, None)
+                holdem_custom_wait.pop(uid2, None)
+        who = mention(cb.from_user)
         await cb.answer("Стол закрыт.")
         try:
-            await cb.message.edit_text("🂡 Стол Texas Hold'em закрыт.")
+            await cb.message.edit_text(f"🂡 Стол Texas Hold'em закрыт участником {who}.")
         except TelegramBadRequest:
             pass
     elif action == "start":
@@ -5054,6 +5484,138 @@ async def holdem_lobby_cb(cb: CallbackQuery):
         await _holdem_send_turn_prompt(chat_id)
     else:
         await cb.answer()
+
+
+def _parse_poker_amount(text: str) -> int | None:
+    raw = (text or "").strip().lower()
+    raw = re.sub(r"^/(?:bet|raise|ставка|рейз)@?\w*\s*", "", raw).strip()
+    raw = raw.replace(" ", "").replace("_", "")
+    m_k = re.match(r"^(\d+(?:[.,]\d+)?)[kк]$", raw)
+    if m_k:
+        try:
+            return int(float(m_k.group(1).replace(",", ".")) * 1000)
+        except ValueError:
+            return None
+    if raw.isdigit():
+        return int(raw)
+    return None
+
+
+async def _holdem_try_text_action(message: Message, chat_id: int, uid: int, raw_text: str) -> bool:
+    game = holdem_games.get(chat_id)
+    if not game:
+        return False
+    table = game["table"]
+    players = table.get("players", {})
+    if uid not in players:
+        return False
+
+    text_lower = raw_text.strip().lower()
+    is_action_word = text_lower in (
+        "чек", "check", "ч",
+        "пас", "fold", "фолд", "сброс", "п",
+        "колл", "call", "к",
+        "вабанк", "ва-банк", "allin", "all-in", "all in", "оллин"
+    )
+    amt = _parse_poker_amount(raw_text)
+    is_custom_waiting = (uid in holdem_custom_wait)
+
+    if not is_action_word and amt is None and not is_custom_waiting:
+        return False
+
+    if table.get("phase") == "lobby":
+        await message.reply("⏳ Игра ещё не началась. Ожидайте старта раздачи.")
+        return True
+
+    if table.get("phase") != "playing":
+        return False
+
+    is_private = (message.chat.type == "private")
+    if table.get("current_turn") != uid:
+        if is_private or raw_text.strip().lower().startswith(("/bet", "/raise", "/ставка", "/рейз")):
+            await message.reply("⏳ Сейчас не твой ход. Дождись своей очереди!")
+            return True
+        return False
+
+    p = players[uid]
+
+    if text_lower in ("чек", "check", "ч"):
+        res = holdem.apply_action(table, uid, "check")
+        if res.get("ok"):
+            await _holdem_cancel_timer(chat_id)
+            holdem_custom_wait.pop(uid, None)
+            await message.reply("✅ Принято: Check.")
+            await _holdem_after_action(chat_id)
+            return True
+        await message.reply("Нельзя сказать чек — нужно доставить фишки (Call) или сбросить (Fold).")
+        return True
+
+    if text_lower in ("пас", "fold", "фолд", "сброс", "п"):
+        res = holdem.apply_action(table, uid, "fold")
+        if res.get("ok"):
+            await _holdem_cancel_timer(chat_id)
+            holdem_custom_wait.pop(uid, None)
+            await message.reply("↩️ Карты сброшены (Fold).")
+            await _holdem_after_action(chat_id)
+            return True
+
+    if text_lower in ("колл", "call", "к"):
+        res = holdem.apply_action(table, uid, "call")
+        if res.get("ok"):
+            await _holdem_cancel_timer(chat_id)
+            holdem_custom_wait.pop(uid, None)
+            await message.reply("💰 Принято: Call.")
+            await _holdem_after_action(chat_id)
+            return True
+
+    if text_lower in ("вабанк", "ва-банк", "allin", "all-in", "all in", "оллин"):
+        res = holdem.apply_action(table, uid, "allin")
+        if res.get("ok"):
+            await _holdem_cancel_timer(chat_id)
+            holdem_custom_wait.pop(uid, None)
+            await message.reply(f"🚨 Принято: Ва-банк ({_fmt_chips(p['stack'])} фишек)!")
+            await _holdem_after_action(chat_id)
+            return True
+
+    if amt is None:
+        if is_custom_waiting and not is_action_word:
+            await message.reply("Не удалось распознать сумму. Введите число (например, <code>5000</code> или <code>5k</code>):")
+            return True
+        return False
+
+    opts = holdem.allowed_actions(table, uid)
+    min_to = opts.get("min_raise_to", table["current_bet"] + holdem.BIG_BLIND)
+    max_to = p["street_bet"] + p["stack"]
+
+    if amt >= max_to:
+        res = holdem.apply_action(table, uid, "allin")
+        if res.get("ok"):
+            await _holdem_cancel_timer(chat_id)
+            holdem_custom_wait.pop(uid, None)
+            await message.reply(f"🚨 Принято: Ва-банк ({_fmt_chips(max_to)} фишек)!")
+            await _holdem_after_action(chat_id)
+            return True
+        await message.reply("Не удалось сделать ставку.")
+        return True
+
+    if amt < min_to:
+        await message.reply(
+            f"⚠️ Слишком маленькая ставка.\n"
+            f"Минимальное повышение: <b>{_fmt_chips(min_to)}</b> фишек (ваш стек: {_fmt_chips(max_to)}).\n"
+            f"Введите число от {_fmt_chips(min_to)} до {_fmt_chips(max_to)}:"
+        )
+        return True
+
+    res = holdem.apply_action(table, uid, "raise", amt)
+    if res.get("ok"):
+        await _holdem_cancel_timer(chat_id)
+        holdem_custom_wait.pop(uid, None)
+        await message.reply(f"📈 Ставка принята: повышение до <b>{_fmt_chips(amt)}</b> фишек!")
+        await _holdem_after_action(chat_id)
+        return True
+
+    await message.reply("Ход не принят (проверьте правила торгов).")
+    return True
 
 
 @dp.callback_query(F.data.startswith("thm:"))
@@ -5077,7 +5639,88 @@ async def holdem_move_cb(cb: CallbackQuery):
     if table.get("current_turn") != uid:
         await cb.answer("Сейчас ход другого игрока.", show_alert=True)
         return
+
+    p = table["players"][uid]
+
+    if action == "custom":
+        opts = holdem.allowed_actions(table, uid)
+        min_to = opts.get("min_raise_to", table["current_bet"] + holdem.BIG_BLIND)
+        max_to = p["street_bet"] + p["stack"]
+        holdem_custom_wait[uid] = {"chat_id": chat_id, "token": table.get("turn_token", 0)}
+        prompt_text = (
+            f"✍️ <b>Ввод своей ставки в Texas Hold'em</b>\n\n"
+            f"• Минимальное повышение: <b>{_fmt_chips(min_to)}</b>\n"
+            f"• Максимальная ставка: <b>{_fmt_chips(max_to)}</b> (весь стек)\n\n"
+            f"Напиши сумму (число) сообщением прямо в этот чат (например: <code>{min_to}</code> или <code>5k</code>).\n"
+            f"Или нажми кнопку ниже:"
+        )
+        kb = InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text=f"🚨 Ва-банк ({_fmt_chips(p['stack'])})",
+                                  callback_data=f"thm:{chat_id}:{uid}:allin")],
+            [InlineKeyboardButton(text="⬅️ Назад к кнопкам",
+                                  callback_data=f"thm:{chat_id}:{uid}:back")],
+        ])
+        await cb.answer()
+        try:
+            await cb.message.edit_text(prompt_text, reply_markup=kb)
+        except TelegramBadRequest:
+            pass
+        return
+
+    if action == "back":
+        holdem_custom_wait.pop(uid, None)
+        opts = holdem.allowed_actions(table, uid)
+        if not opts:
+            await cb.answer("Действия недоступны.")
+            return
+        owe = holdem.player_to_call(table, uid)
+        board = table.get("board", [])
+        board_str = "  ".join(holdem.format_card(c) for c in board) if board else "—"
+        hole_str = "  ".join(holdem.format_card(c) for c in p.get("hole", []))
+        combo_name = holdem.eval_player_combination(p.get("hole", []), board)
+        combo_info = f"\n💡 <i>Твоя комбинация: <b>{combo_name}</b></i>" if combo_name else ""
+        owe_str = f"{_fmt_chips(owe)} фишек" if owe > 0 else "0 (бесплатный чек)"
+        text = (
+            f"🂡 <b>Твой ход в Texas Hold'em!</b>\n\n"
+            f"🃏 <b>Стол:</b> [ {board_str} ]\n"
+            f"🂠 <b>Твои карты:</b> <b>{hole_str}</b>"
+            f"{combo_info}\n\n"
+            f"💰 <b>Банк:</b> {_fmt_chips(table.get('pot', 0))} фишек\n"
+            f"🪙 <b>Твой стек:</b> {_fmt_chips(p['stack'])} фишек\n"
+            f"💵 <b>К уравниванию:</b> <b>{owe_str}</b>\n\n"
+            f"⏱ <i>У тебя {holdem.TURN_TIMEOUT_SEC} сек на решение.</i>\n"
+            f"👇 <i>Выбери действие или напиши свою сумму в чат:</i>"
+        )
+        await cb.answer()
+        try:
+            await cb.message.edit_text(text, reply_markup=_holdem_turn_kb(chat_id, uid, opts))
+        except TelegramBadRequest:
+            pass
+        return
+
+    if action == "help":
+        help_text = (
+            "🂡 <b>Покерные комбинации:</b>\n"
+            "1. <b>Роял / Стрит-флеш:</b> 5 карт по порядку одной масти (напр. 10-J-Q-K-A♥)\n"
+            "2. <b>Каре:</b> 4 карты одного достоинства (напр. 4 Туза)\n"
+            "3. <b>Фулл-хаус:</b> 3 карты + пара (напр. K-K-K + 10-10)\n"
+            "4. <b>Флеш:</b> 5 карт одной масти\n"
+            "5. <b>Стрит:</b> 5 карт по порядку любых мастей\n"
+            "6. <b>Сет (Тройка):</b> 3 карты одного достоинства\n"
+            "7. <b>Две пары:</b> напр. Пара Дам + Пара Десяток\n"
+            "8. <b>Пара:</b> 2 карты одного достоинства\n"
+            "9. <b>Старшая карта</b>\n\n"
+            "🃏 <b>Карты:</b> 2..9, <b>10</b> (десятка), <b>J</b> (Валет), <b>Q</b> (Дама), <b>K</b> (Король), <b>A</b> (Туз)."
+        )
+        await cb.answer("Справка отправлена в ЛС", show_alert=False)
+        try:
+            await _holdem_dm(uid, help_text)
+        except Exception:
+            pass
+        return
+
     await _holdem_cancel_timer(chat_id)
+    holdem_custom_wait.pop(uid, None)
     mapped = {"check": "check", "call": "call", "fold": "fold", "allin": "allin", "raise": "raise"}
     res = holdem.apply_action(table, uid, mapped.get(action, action), amount)
     if not res.get("ok"):
@@ -5086,6 +5729,47 @@ async def holdem_move_cb(cb: CallbackQuery):
         return
     await cb.answer("Ход принят.")
     await _holdem_after_action(chat_id)
+
+
+@dp.message(Command("bet", "raise", "ставка", "рейз"))
+async def holdem_bet_cmd(message: Message):
+    uid = message.from_user.id
+    chat_id = message.chat.id if message.chat.type in ("group", "supergroup") else holdem_player_chat.get(uid)
+    if not chat_id or chat_id not in holdem_games:
+        await message.reply("Вы сейчас не находитесь за активным столом Texas Hold'em.")
+        return
+    handled = await _holdem_try_text_action(message, chat_id, uid, message.text or "")
+    if not handled:
+        await message.reply("Укажите сумму ставки, например: <code>/bet 5000</code> или <code>/raise 5k</code>.")
+
+
+@dp.message(Command("holdemhelp", "pokerhelp"))
+async def holdem_help_cmd(message: Message):
+    text = (
+        "🂡 <b>Справка по Texas Hold'em</b>\n\n"
+        "🃏 <b>Обозначения карт:</b>\n"
+        "• Числа от <b>2</b> до <b>10</b> — обычный номинал (<i>10 — это десятка</i>)\n"
+        "• <b>J</b> — Валет, <b>Q</b> — Дама, <b>K</b> — Король\n"
+        "• <b>A</b> — <b>Туз</b> (самая старшая карта, в стрите А-2-3-4-5 может быть единицей)\n\n"
+        "🏆 <b>Иерархия комбинаций (от сильнейшей к слабейшей):</b>\n"
+        "1. <b>Роял-флеш</b> — 10-J-Q-K-A одной масти\n"
+        "2. <b>Стрит-флеш</b> — любые 5 карт по порядку одной масти (напр. 5-6-7-8-9♠)\n"
+        "3. <b>Каре</b> — 4 карты одного достоинства (напр. 4 Короля)\n"
+        "4. <b>Фулл-хаус</b> — 3 карты + 2 карты (напр. 3 Туза + 2 Десятки)\n"
+        "5. <b>Флеш</b> — любые 5 карт одной масти\n"
+        "6. <b>Стрит</b> — 5 карт подряд любых мастей\n"
+        "7. <b>Сет (Тройка)</b> — 3 карты одного достоинства\n"
+        "8. <b>Две пары</b> — напр. Пара Дам и Пара Восьмёрок\n"
+        "9. <b>Пара</b> — 2 карты одного достоинства\n"
+        "10. <b>Старшая карта</b> — если ни у кого нет комбинации\n\n"
+        "💰 <b>Действия в игре:</b>\n"
+        "• <b>Check (Чек)</b> — пропустить ход, не делая ставку (если никто не ставил)\n"
+        "• <b>Call (Колл)</b> — уравнять чужую ставку\n"
+        "• <b>Raise (Рейз)</b> — повысить ставку (кнопкой или написав число в чат/ЛС)\n"
+        "• <b>Fold (Пас)</b> — сбросить карты и выйти из раздачи\n"
+        "• <b>All-in (Ва-банк)</b> — поставить все свои фишки"
+    )
+    await message.reply(text)
 
 
 @dp.message(Command("stopholdem", "stoppoker"), F.chat.type.in_({"group", "supergroup"}))
@@ -5101,7 +5785,9 @@ async def holdem_stop_cmd(message: Message):
     for uid in list(holdem_player_chat):
         if holdem_player_chat.get(uid) == chat_id:
             holdem_player_chat.pop(uid, None)
-    await message.reply("🛑 Стол Texas Hold'em остановлен админом.")
+            holdem_custom_wait.pop(uid, None)
+    who = mention(message.from_user) if message.from_user else "администратором"
+    await message.reply(f"🛑 Стол Texas Hold'em остановлен: {who}.")
 
 
 # ============================== Игра «Мафия» ================================
@@ -5177,15 +5863,21 @@ async def _maf_dm(uid: int, chat_id: int, text: str,
 
 
 def _maf_night_ready(game: dict) -> bool:
-    """Все, кому есть что делать ночью (мафия/доктор/комиссар), уже сходили?"""
+    """Все, кому есть что делать ночью, уже сходили?"""
     players = game["players"]
     nt = game["night"]
-    for u in mafia.alive_by_role(players, mafia.ROLE_MAFIA):
-        if u not in nt["mafia_votes"]:
+    for u in mafia.alive_mafia_ids(players):
+        if u not in nt.get("mafia_votes", {}):
             return False
-    if mafia.alive_by_role(players, mafia.ROLE_DOCTOR) and not nt["doctor_acted"]:
+    if mafia.alive_by_role(players, mafia.ROLE_DON) and not nt.get("don_acted"):
         return False
-    if mafia.alive_by_role(players, mafia.ROLE_COMMISSAR) and not nt["commissar_acted"]:
+    if mafia.alive_by_role(players, mafia.ROLE_DOCTOR) and not nt.get("doctor_acted"):
+        return False
+    if mafia.alive_by_role(players, mafia.ROLE_COMMISSAR) and not nt.get("commissar_acted"):
+        return False
+    if mafia.alive_by_role(players, mafia.ROLE_MISTRESS) and not nt.get("mistress_acted"):
+        return False
+    if mafia.alive_by_role(players, mafia.ROLE_MANIAC) and not nt.get("maniac_acted"):
         return False
     return True
 
@@ -5278,9 +5970,10 @@ async def mafia_lobby_cb(cb: CallbackQuery):
         mafia_games.pop(chat_id, None)
         for u in list(game["players"]):
             mafia_player_chat.pop(u, None)
+        who = mention(cb.from_user)
         await cb.answer("Отменено.")
         try:
-            await cb.message.edit_text("🎭 Игра «Мафия» отменена.")
+            await cb.message.edit_text(f"🎭 Игра «Мафия» отменена участником {who}.")
         except TelegramBadRequest:
             pass
     elif action == "start":
@@ -5310,18 +6003,25 @@ async def mafia_begin(chat_id: int):
         players[uid]["alive"] = True
         emoji, title, desc = mafia.ROLE_INFO[role]
         extra = ""
-        if role == mafia.ROLE_MAFIA:
+        if mafia.is_mafia(role):
             team = [players[u]["name"] for u, r in roles.items()
-                    if r == mafia.ROLE_MAFIA and u != uid]
+                    if mafia.is_mafia(r) and u != uid]
             extra = ("\n\n👥 Твои подельники: " + ", ".join(esc(t) for t in team)) if team \
                 else "\n\nТы действуешь в одиночку."
         await _maf_dm(uid, chat_id, f"Твоя роль: {emoji} <b>{title}</b>\n{desc}{extra}")
     rl = list(roles.values())
+    role_counts = []
+    for r_code in (mafia.ROLE_DON, mafia.ROLE_MAFIA, mafia.ROLE_COMMISSAR,
+                   mafia.ROLE_DOCTOR, mafia.ROLE_MISTRESS, mafia.ROLE_MANIAC, mafia.ROLE_CIVILIAN):
+        c = rl.count(r_code)
+        if c > 0:
+            emoji, title, _ = mafia.ROLE_INFO[r_code]
+            role_counts.append(f"{emoji} {title}: {c}")
+    tally = " · ".join(role_counts)
     await bot.send_message(
         chat_id,
         "🎭 <b>Игра началась!</b> Роли разосланы в личку.\n"
-        f"🔫 Мафия: {rl.count(mafia.ROLE_MAFIA)} · 🕵️ Комиссар: {rl.count(mafia.ROLE_COMMISSAR)} · "
-        f"💉 Доктор: {rl.count(mafia.ROLE_DOCTOR)} · 👤 Мирные: {rl.count(mafia.ROLE_CIVILIAN)}\n"
+        f"{tally}\n"
         f"Всего игроков: {len(players)}.")
     await mafia_start_night(chat_id)
 
@@ -5332,30 +6032,61 @@ async def mafia_start_night(chat_id: int):
         return
     game["phase"] = "night"
     game["round"] = game.get("round", 0) + 1
-    game["night"] = {"mafia_votes": {}, "doctor_target": None,
-                     "doctor_acted": False, "commissar_acted": False}
+    game["night"] = {
+        "mafia_votes": {},
+        "doctor_target": None,
+        "doctor_acted": False,
+        "commissar_acted": False,
+        "don_acted": False,
+        "mistress_target": None,
+        "mistress_acted": False,
+        "maniac_target": None,
+        "maniac_acted": False,
+    }
     game["token"] = game.get("token", 0) + 1
     players = game["players"]
     await bot.send_message(
         chat_id,
-        f"🌙 <b>Ночь {game['round']}.</b> Город засыпает… Мафия выходит на охоту.\n"
+        f"🌙 <b>Ночь {game['round']}.</b> Город засыпает… Персонажи выходят на ночную охоту.\n"
         "Тайные роли — проверьте личку бота и сделайте ход.")
-    mafiosi = mafia.alive_by_role(players, mafia.ROLE_MAFIA)
-    victims = [u for u in mafia.alive_ids(players) if players[u]["role"] != mafia.ROLE_MAFIA]
+
+    mafiosi = mafia.alive_mafia_ids(players)
+    victims = [u for u in mafia.alive_ids(players) if not mafia.is_mafia(players[u]["role"])]
     team = ", ".join(players[u]["name"] for u in mafiosi)
     for u in mafiosi:
         await _maf_dm(u, chat_id,
-                      f"🔫 <b>Ночь {game['round']}.</b> Банда: {esc(team)}.\nВыбери жертву:",
+                      f"🔫 <b>Ночь {game['round']}.</b> Банда: {esc(team)}.\nВыбери жертву мафии:",
                       _maf_pick_kb("kill", chat_id, victims, players))
+
+    for u in mafia.alive_by_role(players, mafia.ROLE_DON):
+        others = [x for x in mafia.alive_ids(players) if x != u]
+        await _maf_dm(u, chat_id,
+                      f"👑 <b>Ночь {game['round']}.</b> Поиск Комиссара:\nКого проверить?",
+                      _maf_pick_kb("doncheck", chat_id, others, players))
+
     for u in mafia.alive_by_role(players, mafia.ROLE_DOCTOR):
         await _maf_dm(u, chat_id,
                       f"💉 <b>Ночь {game['round']}.</b> Кого лечишь этой ночью?",
                       _maf_pick_kb("heal", chat_id, mafia.alive_ids(players), players))
+
     for u in mafia.alive_by_role(players, mafia.ROLE_COMMISSAR):
         others = [x for x in mafia.alive_ids(players) if x != u]
         await _maf_dm(u, chat_id,
                       f"🕵️ <b>Ночь {game['round']}.</b> Кого проверить?",
                       _maf_pick_kb("check", chat_id, others, players))
+
+    for u in mafia.alive_by_role(players, mafia.ROLE_MISTRESS):
+        others = [x for x in mafia.alive_ids(players) if x != u]
+        await _maf_dm(u, chat_id,
+                      f"💋 <b>Ночь {game['round']}.</b> К кому пойдёшь в гости (блокировка хода)?",
+                      _maf_pick_kb("block", chat_id, others, players))
+
+    for u in mafia.alive_by_role(players, mafia.ROLE_MANIAC):
+        others = [x for x in mafia.alive_ids(players) if x != u]
+        await _maf_dm(u, chat_id,
+                      f"🔪 <b>Ночь {game['round']}.</b> Кого устранить этой ночью?",
+                      _maf_pick_kb("maniac", chat_id, others, players))
+
     asyncio.create_task(_maf_timer(chat_id, game["token"], "night", MAFIA_NIGHT_SEC))
 
 
@@ -5378,10 +6109,10 @@ async def mafia_night_cb(cb: CallbackQuery):
         return
     tgt = players.get(target)
     if action == "kill":
-        if me["role"] != mafia.ROLE_MAFIA:
+        if not mafia.is_mafia(me["role"]):
             await cb.answer("Это не твоё действие.")
             return
-        if not tgt or not tgt["alive"] or tgt["role"] == mafia.ROLE_MAFIA:
+        if not tgt or not tgt["alive"] or mafia.is_mafia(tgt["role"]):
             await cb.answer("Так нельзя.")
             return
         game["night"]["mafia_votes"][uid] = target
@@ -5389,6 +6120,20 @@ async def mafia_night_cb(cb: CallbackQuery):
         try:
             await cb.message.edit_text(f"🔫 Ты выбрал жертву: <b>{esc(tgt['name'])}</b>.\n"
                                        "Ждём остальных…")
+        except TelegramBadRequest:
+            pass
+    elif action == "doncheck":
+        if me["role"] != mafia.ROLE_DON:
+            await cb.answer("Это не твоё действие.")
+            return
+        if not tgt or not tgt["alive"] or target == uid:
+            await cb.answer("Так нельзя.")
+            return
+        game["night"]["don_acted"] = True
+        verdict = "⭐️ КОМИССАР" if tgt["role"] == mafia.ROLE_COMMISSAR else "✖️ не комиссар"
+        await cb.answer()
+        try:
+            await cb.message.edit_text(f"👑 Проверка Дона: <b>{esc(tgt['name'])}</b> — {verdict}.")
         except TelegramBadRequest:
             pass
     elif action == "heal":
@@ -5413,10 +6158,39 @@ async def mafia_night_cb(cb: CallbackQuery):
             await cb.answer("Так нельзя.")
             return
         game["night"]["commissar_acted"] = True
-        verdict = "🔴 МАФИЯ" if tgt["role"] == mafia.ROLE_MAFIA else "🟢 не мафия"
+        verdict = "🔴 МАФИЯ" if mafia.is_mafia(tgt["role"]) else "🟢 не мафия"
         await cb.answer()
         try:
             await cb.message.edit_text(f"🕵️ Проверка: <b>{esc(tgt['name'])}</b> — {verdict}.")
+        except TelegramBadRequest:
+            pass
+    elif action == "block":
+        if me["role"] != mafia.ROLE_MISTRESS:
+            await cb.answer("Это не твоё действие.")
+            return
+        if not tgt or not tgt["alive"] or target == uid:
+            await cb.answer("Так нельзя.")
+            return
+        game["night"]["mistress_target"] = target
+        game["night"]["mistress_acted"] = True
+        await cb.answer("В гости!")
+        try:
+            await cb.message.edit_text(f"💋 Ты провела ночь у: <b>{esc(tgt['name'])}</b>.\n"
+                                       "Его/её действие заблокировано!")
+        except TelegramBadRequest:
+            pass
+    elif action == "maniac":
+        if me["role"] != mafia.ROLE_MANIAC:
+            await cb.answer("Это не твоё действие.")
+            return
+        if not tgt or not tgt["alive"] or target == uid:
+            await cb.answer("Так нельзя.")
+            return
+        game["night"]["maniac_target"] = target
+        game["night"]["maniac_acted"] = True
+        await cb.answer("Жертва выбрана!")
+        try:
+            await cb.message.edit_text(f"🔪 Ты выбрал цель: <b>{esc(tgt['name'])}</b>.\nЖдём остальных…")
         except TelegramBadRequest:
             pass
     else:
@@ -5433,15 +6207,31 @@ async def mafia_resolve_night(chat_id: int):
     game["phase"] = "resolving"        # защита от повторного входа
     players = game["players"]
     nt = game["night"]
-    target = mafia.pick_mafia_target(nt["mafia_votes"])
-    killed = mafia.resolve_night(players, target, nt.get("doctor_target"))
+    active_votes = {
+        u: t for u, t in nt.get("mafia_votes", {}).items()
+        if u != nt.get("mistress_target")
+    }
+    target = mafia.pick_mafia_target(active_votes)
+    killed_list = mafia.resolve_night(
+        players,
+        target,
+        nt.get("doctor_target"),
+        maniac_target=nt.get("maniac_target"),
+        mistress_target=nt.get("mistress_target"),
+        return_list=True,
+    )
     lines = [f"☀️ <b>Утро {game['round']}.</b> Город просыпается."]
-    if killed:
-        players[killed]["alive"] = False
-        emoji, title, _ = mafia.ROLE_INFO[players[killed]["role"]]
-        lines.append(f"💀 Ночью погиб {id_mention(killed, players[killed]['name'])} — "
-                     f"это был {emoji} <b>{title}</b>.")
-        mafia_player_chat.pop(killed, None)
+    if nt.get("mistress_target"):
+        m_tgt = players.get(nt["mistress_target"])
+        if m_tgt and m_tgt["alive"]:
+            lines.append("💋 Ночью Любовница провела время с кем-то из жителей…")
+    if killed_list:
+        for k in killed_list:
+            players[k]["alive"] = False
+            emoji, title, _ = mafia.ROLE_INFO[players[k]["role"]]
+            lines.append(f"💀 Ночью погиб {id_mention(k, players[k]['name'])} — "
+                         f"это был {emoji} <b>{title}</b>.")
+            mafia_player_chat.pop(k, None)
     else:
         lines.append("🌅 Этой ночью все выжили.")
     await bot.send_message(chat_id, "\n".join(lines))
@@ -5533,9 +6323,12 @@ async def mafia_end(chat_id: int, winner: str):
     for u in list(game["players"]):
         mafia_player_chat.pop(u, None)
     players = game["players"]
-    headline = ("🕵️ <b>Мирные жители победили!</b> Вся мафия обезврежена."
-                if winner == "peace" else
-                "🔫 <b>Мафия победила!</b> Город захвачен.")
+    if winner == "peace":
+        headline = "🕵️ <b>Мирные жители победили!</b> Вся мафия и злодеи обезврежены."
+    elif winner == "maniac":
+        headline = "🔪 <b>Маньяк победил!</b> Все остальные пали его жертвами."
+    else:
+        headline = "🔫 <b>Мафия победила!</b> Город захвачен."
     reveal = "\n".join(
         f"{mafia.ROLE_INFO[p['role']][0]} {esc(p['name'])} — "
         f"{mafia.ROLE_INFO[p['role']][1]} ({'жив' if p['alive'] else 'выбыл'})"
@@ -5557,12 +6350,16 @@ async def mafia_stop_cmd(message: Message):
     if game:
         for u in list(game["players"]):
             mafia_player_chat.pop(u, None)
-    await message.reply("🛑 Игра «Мафия» остановлена админом.")
+    who = mention(message.from_user) if message.from_user else "администратором"
+    await message.reply(f"🛑 Игра «Мафия» остановлена: {who}.")
 
 
 @dp.message(F.text, F.chat.type.in_({"group", "supergroup"}))
 async def on_trigger(message: Message):
     """Автоответы на ключевые слова. Регистрируется ПОСЛЕ всех команд."""
+    if message.chat.id in holdem_games and message.from_user:
+        if await _holdem_try_text_action(message, message.chat.id, message.from_user.id, message.text or ""):
+            return
     if not flag("TRIGGERS_ENABLED"):
         return
     trg = storage.triggers()
@@ -6216,9 +7013,13 @@ class PrivacyGate(BaseMiddleware):
         text = (getattr(msg, "text", None) or "").strip()
         if text == config.PANEL_PASSWORD:
             return await handler(event, data)
-        if text.startswith("/start"):
+        if text.startswith(("/start", "/holdemhelp", "/pokerhelp", "/bet", "/raise", "/ставка", "/рейз")):
             # Обычный /start пускаем: игрокам «Мафии» нужно открыть ЛС, чтобы
             # бот мог прислать роль. Панель это НЕ раскрывает (см. panel_entry).
+            # Также пропускаем покерные команды и справку.
+            return await handler(event, data)
+        # Игрок Texas Hold'em в ЛС — пропускаем его сообщения/ставки:
+        if uid in holdem_player_chat or uid in holdem_custom_wait:
             return await handler(event, data)
         # Новичок реально в процессе верификации по номеру — пропускаем.
         if (flag("PHONE_VERIFY_ENABLED") and not storage.is_phone_verified(uid)
@@ -6260,6 +7061,10 @@ async def panel_private(message: Message):
     if not message.from_user:
         return
     uid = message.from_user.id
+    h_chat = holdem_player_chat.get(uid) or (holdem_custom_wait.get(uid, {}).get("chat_id"))
+    if h_chat and h_chat in holdem_games:
+        if await _holdem_try_text_action(message, h_chat, uid, message.text or ""):
+            return
     # Новичок, ожидающий верификацию (не знает пароль панели): не пугаем «паролем».
     if (uid not in panel_auth and flag("PHONE_VERIFY_ENABLED")
             and not storage.is_phone_verified(uid)):

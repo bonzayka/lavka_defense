@@ -97,11 +97,29 @@ def seated_count(table: dict) -> int:
 
 
 def format_card(card: str) -> str:
-    return f"{card[0]}{SUIT_ICON.get(card[1], card[1])}"
+    r = "10" if card[0] == "T" else card[0]
+    return f"{r}{SUIT_ICON.get(card[1], card[1])}"
 
 
 def format_cards(cards: list[str]) -> str:
     return " ".join(format_card(c) for c in cards) if cards else "—"
+
+
+def eval_player_combination(hole: list[str], board: list[str]) -> str:
+    """Определить текущую комбинацию игрока (для подсказки в UI)."""
+    cards = list(hole or []) + list(board or [])
+    if len(cards) >= 5:
+        rank = best_hand(cards)
+        if rank[0] == 8 and len(rank) > 1 and rank[1] == 14:
+            return "роял-флеш"
+        return HAND_NAMES.get(rank[0], "")
+    if len(hole or []) == 2 and not board:
+        r1, r2 = hole[0][0], hole[1][0]
+        if r1 == r2:
+            r_name = "10" if r1 == "T" else r1
+            return f"карманная пара ({r_name})"
+        return "старшая карта"
+    return ""
 
 
 def start_tournament(table: dict, seed: int | None = None) -> dict:
@@ -281,6 +299,10 @@ def allowed_actions(table: dict, uid: int) -> dict:
     if table["current_bet"] == 0:
         min_to = max(BIG_BLIND, min_to)
 
+    opts["min_raise_to"] = min_to
+    opts["max_raise_to"] = current_total
+    opts["can_raise"] = bool(current_total > table["current_bet"] and min_to <= current_total)
+
     if current_total > table["current_bet"] and min_to <= current_total:
         opts["raise_to"].append(min_to)
         double_to = min_to + max(table.get("min_raise", BIG_BLIND), BIG_BLIND)
@@ -326,8 +348,10 @@ def apply_action(table: dict, uid: int, action: str, amount: int | None = None) 
             return {"ok": False, "reason": "raise_not_reopened"}
         to_amount = int(amount)
         max_to = p["street_bet"] + p["stack"]
+        if to_amount >= max_to:
+            return apply_action(table, uid, "allin")
         min_to = table["current_bet"] + max(table.get("min_raise", BIG_BLIND), BIG_BLIND)
-        if to_amount > max_to or to_amount <= table["current_bet"] or to_amount < min_to:
+        if to_amount <= table["current_bet"] or to_amount < min_to:
             return {"ok": False, "reason": "bad_raise"}
         delta = to_amount - p["street_bet"]
         _post(table, uid, delta)

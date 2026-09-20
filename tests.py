@@ -172,11 +172,13 @@ check("manager: свой удаляется", manager.remove("222222", owner=20)
 check("manager: токен валиден", manager.valid_token(T))
 check("manager: мусор не токен", not manager.valid_token("just text"))
 
-# ---- mod-кнопки: срок и banwipe в callback ----
+# ---- mod-кнопки: выбор срока мута и banwipe в callback ----
 rows = bot.mod_rows(-100, 9)
 cbs = [b.callback_data for r in rows for b in r]
-check("mod: мут на 3д", "mod:mute:-100:9:259200" in cbs)
+check("mod: выбор срока мута", "mod:mutepick:-100:9" in cbs)
 check("mod: бан+чистка", "mod:banwipe:-100:9" in cbs)
+mute_pick_cbs = [b.callback_data for r in bot.mute_pick_keyboard(-100, 9).inline_keyboard for b in r]
+check("mod: варианты срока мута", "mod:mute:-100:9:600" in mute_pick_cbs and "mod:mute:-100:9:0" in mute_pick_cbs)
 
 # ---- панель: все тумблеры разложены по разделам, клавиатуры строятся ----
 covered = {k for keys in bot.CAT_FLAGS.values() for k in keys}
@@ -1024,15 +1026,18 @@ asyncio.run(run_crisis_escalate())
 # ---- игра «Мафия» (движок mafia.py) ----
 import mafia  # noqa: E402
 
-# Раздача ролей: ровно один комиссар/доктор, мафии ~четверть, остальные мирные.
+# Раздача ролей: ровно один комиссар/доктор, мафии ~четверть, расширенные роли (дон, любовница, маньяк).
 _ids = list(range(1, 9))            # 8 игроков
 _roles = mafia.assign_roles(_ids, seed=1)
 _rvals = list(_roles.values())
 check("mafia: роли розданы всем", len(_roles) == 8)
-check("mafia: мафии ~25%", _rvals.count(mafia.ROLE_MAFIA) == 2)
+check("mafia: мафии ~25%", sum(1 for r in _rvals if mafia.is_mafia(r)) == 2)
 check("mafia: один комиссар", _rvals.count(mafia.ROLE_COMMISSAR) == 1)
 check("mafia: один доктор", _rvals.count(mafia.ROLE_DOCTOR) == 1)
-check("mafia: остальные мирные", _rvals.count(mafia.ROLE_CIVILIAN) == 4)
+check("mafia: дон мафии", _rvals.count(mafia.ROLE_DON) == 1)
+check("mafia: любовница", _rvals.count(mafia.ROLE_MISTRESS) == 1)
+check("mafia: маньяк", _rvals.count(mafia.ROLE_MANIAC) == 1)
+check("mafia: остальные мирные", _rvals.count(mafia.ROLE_CIVILIAN) == 2)
 
 # Минимум игроков: 4 -> 1 мафия.
 check("mafia: мин.состав 4 -> 1 мафия",
@@ -1043,18 +1048,26 @@ def _mk(role, alive=True):
     return {"role": role, "alive": alive, "name": "x"}
 
 
-# Победа мирных — вся мафия мертва.
+# Победа мирных — вся мафия и маньяк мертвы.
 _p = {1: _mk(mafia.ROLE_MAFIA, alive=False), 2: _mk(mafia.ROLE_CIVILIAN),
       3: _mk(mafia.ROLE_DOCTOR)}
 check("mafia: победа мирных", mafia.check_win(_p) == "peace")
 
-# Победа мафии — мафии >= остальных.
+# Победа мафии — мафии >= остальных при мертвом маньяке.
 _p = {1: _mk(mafia.ROLE_MAFIA), 2: _mk(mafia.ROLE_CIVILIAN)}
 check("mafia: победа мафии (1 vs 1)", mafia.check_win(_p) == "mafia")
 
 # Игра продолжается — мафия в меньшинстве.
 _p = {1: _mk(mafia.ROLE_MAFIA), 2: _mk(mafia.ROLE_CIVILIAN), 3: _mk(mafia.ROLE_DOCTOR)}
 check("mafia: игра идёт (1 vs 2)", mafia.check_win(_p) is None)
+
+# Победа маньяка — мафия мертва, маньяк 1-на-1 с мирным
+_p = {1: _mk(mafia.ROLE_MANIAC), 2: _mk(mafia.ROLE_CIVILIAN), 3: _mk(mafia.ROLE_MAFIA, alive=False)}
+check("mafia: победа маньяка (1 vs 1 мирный)", mafia.check_win(_p) == "maniac")
+
+# Победа маньяка — маньяк 1-на-1 с мафией
+_p = {1: _mk(mafia.ROLE_MANIAC), 2: _mk(mafia.ROLE_MAFIA)}
+check("mafia: победа маньяка (1 vs 1 мафия)", mafia.check_win(_p) == "maniac")
 
 # Резолв ночи: без доктора жертва гибнет.
 _p = {1: _mk(mafia.ROLE_MAFIA), 2: _mk(mafia.ROLE_CIVILIAN), 3: _mk(mafia.ROLE_CIVILIAN)}
@@ -1063,6 +1076,16 @@ check("mafia: жертва гибнет", mafia.resolve_night(_p, 2, None) == 2)
 check("mafia: доктор спас", mafia.resolve_night(_p, 2, 2) is None)
 # Мафия не выбрала цель — никто не гибнет.
 check("mafia: нет цели -> нет жертвы", mafia.resolve_night(_p, None, None) is None)
+
+# Любовница блокирует маньяка -> маньяк не убивает
+_p = {1: _mk(mafia.ROLE_MAFIA), 2: _mk(mafia.ROLE_MANIAC), 3: _mk(mafia.ROLE_MISTRESS), 4: _mk(mafia.ROLE_CIVILIAN)}
+killed = mafia.resolve_night(_p, mafia_target=None, doctor_target=None, maniac_target=4, mistress_target=2, return_list=True)
+check("mafia: любовница заблокировала маньяка", killed == [])
+
+# Любовница блокирует доктора -> лечение срывается
+_p = {1: _mk(mafia.ROLE_MAFIA), 2: _mk(mafia.ROLE_DOCTOR), 3: _mk(mafia.ROLE_MISTRESS), 4: _mk(mafia.ROLE_CIVILIAN)}
+killed = mafia.resolve_night(_p, mafia_target=4, doctor_target=4, maniac_target=None, mistress_target=2, return_list=True)
+check("mafia: любовница заблокировала доктора", killed == [4])
 
 # Выбор жертвы мафией по голосам (большинство).
 check("mafia: большинство голосов", mafia.pick_mafia_target({10: 2, 11: 2, 12: 3}, seed=1) == 2)
@@ -1082,9 +1105,22 @@ _victim = mafia.resolve_night(_p, 2, None)
 _p[_victim]["alive"] = False
 check("mafia: сценарий -> победа мафии", mafia.check_win(_p) == "mafia")
 
-# «start»/«mafia» доступны обычным участникам (не режутся модерацией).
+# «start»/«mafia»/«duel» доступны обычным участникам (не режутся модерацией).
 check("mafia: команды в публичном списке",
-      "mafia" in bot.PUBLIC_CMDS and "start" in bot.PUBLIC_CMDS)
+      "mafia" in bot.PUBLIC_CMDS and "start" in bot.PUBLIC_CMDS and "duel" in bot.PUBLIC_CMDS)
+
+# storage.change_rep
+init_rep = storage.get_rep(-7777, 100)["score"]
+new_rep = storage.change_rep(-7777, 100, 15)["score"]
+check("storage: change_rep (+)", new_rep == init_rep + 15)
+new_rep2 = storage.change_rep(-7777, 100, -5)["score"]
+check("storage: change_rep (-)", new_rep2 == new_rep - 5)
+
+# duel: парсер ставок
+check("duel: ставка none", bot._parse_duel_bet("")[0] == "none")
+check("duel: ставка rep", bot._parse_duel_bet("10 rep")[0] == "rep" and bot._parse_duel_bet("10 rep")[1] == 10)
+check("duel: ставка число -> rep", bot._parse_duel_bet("25")[0] == "rep" and bot._parse_duel_bet("25")[1] == 25)
+check("duel: ставка money", bot._parse_duel_bet("500 руб")[0] == "money" and bot._parse_duel_bet("500 руб")[1] == 500)
 
 
 
@@ -1183,6 +1219,94 @@ check("aiguard: наказаний 2 (дебаунс не дал третьег�
 check("aiguard: наказан именно нарушитель", [u for u, _ in _hits] == [1, 4])
 check("aiguard: чистое сообщение никого не наказало", 2 not in [u for u, _ in _hits])
 check("aiguard: повтор взялся из кэша, а не из сети", aiguard._stats["cached"] >= 1)
+
+# ---- отмена игр (показ ника/упоминания отменившего) ----
+class _MockMsg:
+    def __init__(self, chat_id, msg_id):
+        self.chat = types.SimpleNamespace(id=chat_id)
+        self.message_id = msg_id
+        self.edited_text = None
+    async def edit_text(self, text, **kwargs):
+        self.edited_text = text
+
+class _MockCb:
+    def __init__(self, data, uid, name, chat_id, msg_id):
+        self.data = data
+        self.from_user = types.SimpleNamespace(id=uid, full_name=name)
+        self.message = _MockMsg(chat_id, msg_id)
+        self.answered = False
+    async def answer(self, *args, **kwargs):
+        self.answered = True
+
+# 1. Кубик
+bot.dice_games[-1001] = {"players": {}, "host": 999, "rolling": False, "msg_id": 42}
+_cb_dice = _MockCb("dg:cancel", 12345, "Иван_Кубист", -1001, 42)
+asyncio.run(bot.dice_cb(_cb_dice))
+check("dice cancel: упоминает юзера", "Иван_Кубист" in (_cb_dice.message.edited_text or "") and "12345" in (_cb_dice.message.edited_text or ""))
+check("dice cancel: игра удалена", -1001 not in bot.dice_games)
+
+# 2. Texas Hold'em
+import holdem as _h
+bot.holdem_games[-1002] = {"table": _h.new_table(999), "msg_id": 43}
+_cb_holdem = _MockCb("th:cancel", 23456, "Петр_Покерист", -1002, 43)
+asyncio.run(bot.holdem_lobby_cb(_cb_holdem))
+check("holdem cancel: упоминает юзера", "Петр_Покерист" in (_cb_holdem.message.edited_text or "") and "23456" in (_cb_holdem.message.edited_text or ""))
+check("holdem cancel: стол удалён", -1002 not in bot.holdem_games)
+
+# 3. Мафия
+bot.mafia_games[-1003] = {"phase": "lobby", "players": {}, "host": 999, "msg_id": 44}
+_cb_mafia = _MockCb("maf:cancel", 34567, "Анна_Мафиози", -1003, 44)
+asyncio.run(bot.mafia_lobby_cb(_cb_mafia))
+check("mafia cancel: упоминает юзера", "Анна_Мафиози" in (_cb_mafia.message.edited_text or "") and "34567" in (_cb_mafia.message.edited_text or ""))
+check("mafia cancel: игра удалена", -1003 not in bot.mafia_games)
+
+# ---- Texas Hold'em: улучшения и интерфейс ----
+# 1. Форматирование карт (T -> 10, A -> A)
+check("holdem: T отображается как 10", _h.format_card("Th") == "10♥" and _h.format_card("Ts") == "10♠")
+check("holdem: A отображается как A", _h.format_card("Ah") == "A♥" and _h.format_card("As") == "A♠")
+check("holdem: другие номиналы не затронуты", _h.format_card("Kd") == "K♦" and _h.format_card("2c") == "2♣")
+check("holdem: format_cards со списком", _h.format_cards(["Th", "Ah", "Kd"]) == "10♥ A♥ K♦")
+
+# 2. Подсказки комбинаций (eval_player_combination)
+check("holdem combo: карманная пара 10", _h.eval_player_combination(["Th", "Td"], []) == "карманная пара (10)")
+check("holdem combo: карманная пара A", _h.eval_player_combination(["Ah", "Ad"], []) == "карманная пара (A)")
+check("holdem combo: старшая карта до флопа", _h.eval_player_combination(["Ah", "Kd"], []) == "старшая карта")
+check("holdem combo: роял-флеш", _h.eval_player_combination(["Ah", "Kh"], ["Qh", "Jh", "Th"]) == "роял-флеш")
+check("holdem combo: фулл-хаус", _h.eval_player_combination(["Ah", "Ad"], ["Ac", "Kd", "Kh"]) == "фулл-хаус")
+
+# 3. Парсер произвольной суммы ставки (_parse_poker_amount)
+check("poker parse: целое число", bot._parse_poker_amount("5000") == 5000)
+check("poker parse: суффикс k латиница", bot._parse_poker_amount("5k") == 5000)
+check("poker parse: суффикс к кириллица", bot._parse_poker_amount("10к") == 10000)
+check("poker parse: дробное с точкой 2.5k", bot._parse_poker_amount("2.5k") == 2500)
+check("poker parse: дробное с запятой 1,5к", bot._parse_poker_amount("1,5к") == 1500)
+check("poker parse: команда /bet 3000", bot._parse_poker_amount("/bet 3000") == 3000)
+check("poker parse: команда /raise 2k", bot._parse_poker_amount("/raise 2k") == 2000)
+check("poker parse: команда /ставка 500", bot._parse_poker_amount("/ставка 500") == 500)
+check("poker parse: пробелы в числе 5 000", bot._parse_poker_amount("5 000") == 5000)
+check("poker parse: некорректный ввод", bot._parse_poker_amount("abc") is None and bot._parse_poker_amount("") is None)
+
+# 4. Форматирование фишек (_fmt_chips)
+check("fmt chips: тысячи", bot._fmt_chips(50000) == "50 000")
+check("fmt chips: миллион", bot._fmt_chips(1000000) == "1 000 000")
+check("fmt chips: сотня", bot._fmt_chips(500) == "500")
+
+# 5. Публичные команды для покера
+check("public cmds: покерные команды", {"bet", "raise", "ставка", "рейз", "holdemhelp", "pokerhelp"} <= bot.PUBLIC_CMDS)
+
+# 6. Опции повышения в allowed_actions и авто all-in при amount >= max_to
+_t = _h.new_table(101)
+_h.add_player(_t, 101, "Игрок1")
+_h.add_player(_t, 102, "Игрок2")
+_h.start_tournament(_t, seed=42)
+_cur = _t["current_turn"]
+_opts = _h.allowed_actions(_t, _cur)
+check("holdem actions: min_raise_to экспортируется", "min_raise_to" in _opts and _opts["min_raise_to"] >= _h.BIG_BLIND)
+check("holdem actions: can_raise флаг", "can_raise" in _opts and _opts["can_raise"] is True)
+_p_cur = _t["players"][_cur]
+_max_to = _p_cur["street_bet"] + _p_cur["stack"]
+_res_allin = _h.apply_action(_t, _cur, "raise", _max_to + 500)
+check("holdem raise >= max_to -> all-in", _res_allin.get("ok") is True and _p_cur.get("all_in") is True)
 
 print(f"\nИтог: {PASS} ок, {FAIL} провалов.")
 # Importing the application creates an aiogram HTTP session. Some async tests
