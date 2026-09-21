@@ -2,214 +2,1801 @@
 <html lang="ru">
 <head>
   <meta charset="utf-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no" />
-  <title>Texas Hold'em</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover" />
+  <title>Texas Hold'em Poker</title>
   <script src="https://telegram.org/js/telegram-web-app.js"></script>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Cinzel:wght@600;700;900&family=Outfit:wght@400;500;600;700;800&family=Space+Grotesk:wght@600;700&display=swap" rel="stylesheet">
   <style>
     :root {
-      --bg: var(--tg-theme-bg-color, #0e1621);
-      --card: var(--tg-theme-secondary-bg-color, #17212b);
-      --text: var(--tg-theme-text-color, #ffffff);
-      --hint: var(--tg-theme-hint-color, #7d8b99);
-      --btn: var(--tg-theme-button-color, #2ea6ff);
-      --btn-text: var(--tg-theme-button-text-color, #ffffff);
-      --felt: #17663f;
-      --accent: #ffd166;
+      --bg-dark: #070b10;
+      --bg-gradient: radial-gradient(circle at 50% 30%, #101c26 0%, #060a0f 100%);
+      --felt-center: #1a6f44;
+      --felt-mid: #104e2e;
+      --felt-rim: #072615;
+      --rail-rim: #1f130d;
+      --rail-border: #52341b;
+      --gold: #f8c846;
+      --gold-dark: #b8860b;
+      --gold-glow: rgba(248, 200, 70, 0.45);
+      --emerald: #10b981;
+      --emerald-glow: rgba(16, 185, 129, 0.35);
+      --crimson: #ef4444;
+      --crimson-glow: rgba(239, 68, 68, 0.4);
+      --card-bg: #ffffff;
+      --text-main: #f8fafc;
+      --text-muted: #94a3b8;
+      --glass-panel: rgba(15, 23, 42, 0.78);
+      --glass-border: rgba(255, 255, 255, 0.1);
+      --radius-sm: 8px;
+      --radius-md: 14px;
+      --radius-lg: 20px;
+      --font-main: 'Outfit', -apple-system, BlinkMacSystemFont, sans-serif;
+      --font-casino: 'Cinzel', serif;
+      --font-num: 'Space Grotesk', sans-serif;
     }
-    * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
-    body {
-      margin: 0; padding: 12px; background: var(--bg); color: var(--text);
-      font-family: -apple-system, "Segoe UI", Roboto, sans-serif; font-size: 15px;
+
+    * {
+      box-sizing: border-box;
+      -webkit-tap-highlight-color: transparent;
+      user-select: none;
+      -webkit-user-select: none;
+      margin: 0;
+      padding: 0;
     }
-    h1 { font-size: 18px; margin: 0 0 4px; }
-    .muted { color: var(--hint); font-size: 13px; }
-    .felt {
-      background: radial-gradient(ellipse at center, #1e7a4b, var(--felt));
-      border-radius: 18px; padding: 16px 12px; margin: 10px 0;
-      box-shadow: inset 0 0 40px rgba(0,0,0,.4);
+
+    html, body {
+      width: 100%;
+      height: 100%;
+      overflow: hidden;
+      background: var(--bg-dark);
+      background-image: var(--bg-gradient);
+      color: var(--text-main);
+      font-family: var(--font-main);
+      font-size: 14px;
     }
-    .board { display: flex; gap: 6px; justify-content: center; min-height: 54px; align-items: center; }
-    .pot { text-align: center; font-weight: 600; margin-top: 8px; color: var(--accent); }
-    .pcard, .board .pcard {
-      display: inline-flex; align-items: center; justify-content: center;
-      min-width: 34px; height: 48px; padding: 0 4px; border-radius: 6px;
-      background: #fff; color: #111; font-size: 20px; font-weight: 700;
-      box-shadow: 0 2px 4px rgba(0,0,0,.3);
+
+    .app-root {
+      display: flex;
+      flex-direction: column;
+      height: 100dvh;
+      width: 100%;
+      max-width: 520px;
+      margin: 0 auto;
+      position: relative;
+      overflow: hidden;
+      box-shadow: 0 0 50px rgba(0,0,0,0.8);
     }
-    .pcard.red { color: #d23; }
-    .pcard.back { background: linear-gradient(135deg,#3a6ea5,#204060); color:#cfe0f5; }
-    .seat {
-      display: flex; align-items: center; gap: 10px; padding: 8px 10px; margin: 6px 0;
-      background: var(--card); border-radius: 12px; border: 1px solid transparent;
+
+    /* =========================================================================
+       1. HEADER BAR
+       ========================================================================= */
+    .app-header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 8px 12px;
+      background: rgba(8, 14, 22, 0.85);
+      backdrop-filter: blur(12px);
+      -webkit-backdrop-filter: blur(12px);
+      border-bottom: 1px solid var(--glass-border);
+      z-index: 50;
+      flex-shrink: 0;
     }
-    .seat.turn { border-color: var(--accent); box-shadow: 0 0 0 1px var(--accent); }
-    .seat.me { background: #1d2b38; }
-    .seat.folded { opacity: .45; }
-    .seat .info { flex: 1; min-width: 0; }
-    .seat .nm { font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-    .seat .sub { font-size: 12px; color: var(--hint); }
-    .seat .mini { display: flex; gap: 3px; }
-    .seat .mini .pcard { min-width: 22px; height: 30px; font-size: 13px; }
-    .chip { font-size: 11px; padding: 2px 6px; border-radius: 8px; background: #0b2a1c; color: var(--accent); }
-    .event { margin: 8px 0; padding: 8px 10px; background: var(--card); border-radius: 10px;
-             font-size: 13px; white-space: pre-wrap; min-height: 18px; }
-    .actions { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 10px; }
-    button.act {
-      flex: 1 1 40%; padding: 14px 10px; border: none; border-radius: 12px;
-      font-size: 15px; font-weight: 700; color: var(--btn-text); background: var(--btn);
+
+    .header-left {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      min-width: 0;
+    }
+
+    .casino-logo {
+      font-size: 20px;
+      line-height: 1;
+      filter: drop-shadow(0 0 8px var(--gold-glow));
+    }
+
+    .room-badge-group {
+      display: flex;
+      flex-direction: column;
+      min-width: 0;
+    }
+
+    .room-title {
+      font-size: 13px;
+      font-weight: 700;
+      color: var(--text-main);
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      display: flex;
+      align-items: center;
+      gap: 5px;
+    }
+
+    .chat-pill {
+      font-size: 9px;
+      text-transform: uppercase;
+      font-weight: 800;
+      letter-spacing: 0.5px;
+      background: linear-gradient(135deg, #0ea5e9, #2563eb);
+      color: #fff;
+      padding: 2px 6px;
+      border-radius: 6px;
+    }
+
+    .room-sub {
+      font-size: 11px;
+      color: var(--text-muted);
+      white-space: nowrap;
+    }
+
+    .header-right {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      flex-shrink: 0;
+    }
+
+    .icon-btn {
+      background: rgba(255, 255, 255, 0.08);
+      border: 1px solid var(--glass-border);
+      color: var(--text-main);
+      width: 34px;
+      height: 34px;
+      border-radius: 10px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      cursor: pointer;
+      font-size: 15px;
+      transition: all 0.2s ease;
+    }
+
+    .icon-btn:active {
+      transform: scale(0.92);
+      background: rgba(255, 255, 255, 0.16);
+    }
+
+    .status-dot {
+      width: 8px;
+      height: 8px;
+      border-radius: 50%;
+      background: #22c55e;
+      box-shadow: 0 0 8px #22c55e;
+      margin-left: 2px;
+    }
+
+    .status-dot.offline {
+      background: #ef4444;
+      box-shadow: 0 0 8px #ef4444;
+    }
+
+    /* =========================================================================
+       2. POKER TABLE (3D ARENA)
+       ========================================================================= */
+    .table-viewport {
+      flex: 1;
+      position: relative;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      padding: 10px 8px;
+      perspective: 900px;
+      overflow: hidden;
+    }
+
+    .poker-table {
+      width: 100%;
+      height: 98%;
+      max-height: 480px;
+      position: relative;
+      border-radius: 130px;
+      background: radial-gradient(ellipse at 50% 45%, var(--felt-center) 0%, var(--felt-mid) 60%, var(--felt-rim) 100%);
+      border: 8px solid var(--rail-rim);
+      outline: 2px solid var(--rail-border);
+      box-shadow: 
+        inset 0 0 45px rgba(0, 0, 0, 0.85),
+        0 16px 40px rgba(0, 0, 0, 0.9),
+        0 0 25px rgba(16, 185, 129, 0.15);
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      transform: rotateX(16deg);
+      transform-origin: center 55%;
+    }
+
+    /* Felt Inner Gold Stitched Line */
+    .poker-table::before {
+      content: '';
+      position: absolute;
+      inset: 12px;
+      border-radius: 110px;
+      border: 1px dashed rgba(248, 200, 70, 0.28);
+      pointer-events: none;
+    }
+
+    /* Table Watermark Pattern */
+    .table-watermark {
+      position: absolute;
+      top: 50%;
+      left: 50%;
+      transform: translate(-50%, -50%);
+      font-family: var(--font-casino);
+      font-size: 32px;
+      font-weight: 900;
+      color: rgba(255, 255, 255, 0.04);
+      letter-spacing: 4px;
+      pointer-events: none;
+      text-transform: uppercase;
+      white-space: nowrap;
+    }
+
+    /* Center Board & Pot Area */
+    .board-center {
+      position: absolute;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      gap: 6px;
+      z-index: 10;
+      width: 86%;
+      max-width: 290px;
+    }
+
+    .pot-display {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      background: rgba(0, 0, 0, 0.72);
+      border: 1px solid rgba(248, 200, 70, 0.35);
+      border-radius: 20px;
+      padding: 4px 14px;
+      box-shadow: 0 4px 15px rgba(0, 0, 0, 0.5), 0 0 12px var(--gold-glow);
+    }
+
+    .pot-icon {
+      font-size: 15px;
+      animation: coinFloat 2s ease-in-out infinite;
+    }
+
+    @keyframes coinFloat {
+      0%, 100% { transform: translateY(0); }
+      50% { transform: translateY(-2px); }
+    }
+
+    .pot-amount {
+      font-family: var(--font-num);
+      font-size: 14px;
+      font-weight: 700;
+      color: var(--gold);
+      letter-spacing: 0.5px;
+    }
+
+    .street-pill {
+      font-size: 9px;
+      font-weight: 800;
+      text-transform: uppercase;
+      letter-spacing: 1px;
+      background: rgba(255, 255, 255, 0.12);
+      color: #e2e8f0;
+      padding: 2px 8px;
+      border-radius: 10px;
+    }
+
+    /* Community Cards */
+    .community-cards {
+      display: flex;
+      gap: 5px;
+      justify-content: center;
+      min-height: 58px;
+      align-items: center;
+      perspective: 600px;
+    }
+
+    .card-slot {
+      width: 38px;
+      height: 54px;
+      border-radius: 6px;
+      border: 1px dashed rgba(255, 255, 255, 0.2);
+      background: rgba(0, 0, 0, 0.18);
+      display: flex;
+      align-items: center;
+      justify-content: center;
+    }
+
+    /* =========================================================================
+       3. PLAYING CARDS DESIGN
+       ========================================================================= */
+    .p-card {
+      width: 38px;
+      height: 54px;
+      border-radius: 6px;
+      background: var(--card-bg);
+      box-shadow: 0 3px 8px rgba(0,0,0,0.45), 0 0 2px rgba(0,0,0,0.3);
+      display: flex;
+      flex-direction: column;
+      justify-content: space-between;
+      padding: 3px 4px;
+      position: relative;
+      font-family: var(--font-num);
+      font-weight: 700;
+      line-height: 1;
+      transform-style: preserve-3d;
+      animation: cardDeal 0.3s cubic-bezier(0.18, 0.89, 0.32, 1.28) forwards;
+    }
+
+    @keyframes cardDeal {
+      from { transform: translateY(-20px) scale(0.7) rotate(-8deg); opacity: 0; }
+      to { transform: translateY(0) scale(1) rotate(0deg); opacity: 1; }
+    }
+
+    .p-card .rank {
+      font-size: 13px;
+      font-weight: 800;
+    }
+
+    .p-card .suit-center {
+      font-size: 16px;
+      text-align: center;
+      line-height: 1;
+      margin: auto 0;
+    }
+
+    .p-card .rank-bot {
+      font-size: 9px;
+      text-align: right;
+      opacity: 0.8;
+    }
+
+    .p-card.red {
+      color: #dc2626;
+    }
+
+    .p-card.black {
+      color: #0f172a;
+    }
+
+    .p-card.back {
+      background: linear-gradient(135deg, #1e3a8a 0%, #172554 100%);
+      border: 1px solid #3b82f6;
+      box-shadow: 0 2px 6px rgba(0,0,0,0.5);
+      display: flex;
+      align-items: center;
+      justify-content: center;
+    }
+
+    .p-card.back::after {
+      content: '🂠';
+      color: #93c5fd;
+      font-size: 22px;
+      opacity: 0.9;
+    }
+
+    /* Big Hero Cards in Player Hand */
+    .hero-cards-wrap {
+      display: flex;
+      gap: 10px;
+      justify-content: center;
+      align-items: center;
+      margin: 4px 0;
+    }
+
+    .hero-card {
+      width: 58px;
+      height: 82px;
+      border-radius: 9px;
+      padding: 5px 6px;
+      box-shadow: 0 6px 18px rgba(0,0,0,0.6), 0 0 10px rgba(248, 200, 70, 0.2);
+      transition: transform 0.2s ease;
+    }
+
+    .hero-card:hover, .hero-card:active {
+      transform: translateY(-4px) scale(1.04);
+    }
+
+    .hero-card .rank {
+      font-size: 18px;
+    }
+
+    .hero-card .suit-center {
+      font-size: 26px;
+    }
+
+    .hero-card .rank-bot {
+      font-size: 12px;
+    }
+
+    /* =========================================================================
+       4. PLAYER SEATS (RADIAL / OVAL LAYOUT)
+       ========================================================================= */
+    .seats-layer {
+      position: absolute;
+      inset: 0;
+      pointer-events: none;
+    }
+
+    .seat-node {
+      position: absolute;
+      transform: translate(-50%, -50%);
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      gap: 3px;
+      pointer-events: auto;
+      transition: all 0.3s ease;
+      z-index: 20;
+    }
+
+    /* Standard radial seat coordinates (8 seats around table) */
+    .seat-node[data-pos="0"] { top: 12%; left: 50%; }   /* Top Center */
+    .seat-node[data-pos="1"] { top: 22%; left: 82%; }   /* Top Right */
+    .seat-node[data-pos="2"] { top: 50%; left: 89%; }   /* Mid Right */
+    .seat-node[data-pos="3"] { top: 78%; left: 80%; }   /* Bottom Right */
+    .seat-node[data-pos="4"] { top: 88%; left: 50%; }   /* Bottom Center (Hero Spotlight) */
+    .seat-node[data-pos="5"] { top: 78%; left: 20%; }   /* Bottom Left */
+    .seat-node[data-pos="6"] { top: 50%; left: 11%; }   /* Mid Left */
+    .seat-node[data-pos="7"] { top: 22%; left: 18%; }   /* Top Left */
+
+    .seat-avatar-wrap {
+      position: relative;
+      width: 44px;
+      height: 44px;
+      border-radius: 50%;
+      background: #1e293b;
+      border: 2px solid rgba(255, 255, 255, 0.2);
+      box-shadow: 0 4px 10px rgba(0,0,0,0.6);
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font-weight: 700;
+      font-size: 14px;
+      color: #f1f5f9;
+      transition: all 0.25s ease;
+    }
+
+    .seat-node.is-turn .seat-avatar-wrap {
+      border-color: var(--gold);
+      box-shadow: 0 0 18px var(--gold-glow), 0 0 0 3px rgba(248, 200, 70, 0.4);
+      animation: turnPulse 1.4s infinite alternate ease-in-out;
+    }
+
+    @keyframes turnPulse {
+      0% { box-shadow: 0 0 10px var(--gold-glow), 0 0 0 2px rgba(248, 200, 70, 0.4); }
+      100% { box-shadow: 0 0 24px var(--gold-glow), 0 0 0 5px rgba(248, 200, 70, 0.8); }
+    }
+
+    .seat-node.is-me .seat-avatar-wrap {
+      border-color: #38bdf8;
+    }
+
+    .seat-node.folded {
+      opacity: 0.4;
+      filter: grayscale(0.8);
+    }
+
+    .dealer-btn {
+      position: absolute;
+      bottom: -3px;
+      right: -5px;
+      width: 17px;
+      height: 17px;
+      border-radius: 50%;
+      background: #facc15;
+      color: #78350f;
+      font-size: 10px;
+      font-weight: 900;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      border: 1px solid #b45309;
+      box-shadow: 0 2px 4px rgba(0,0,0,0.5);
+    }
+
+    .seat-info-pill {
+      background: rgba(15, 23, 42, 0.85);
+      border: 1px solid rgba(255, 255, 255, 0.14);
+      border-radius: 12px;
+      padding: 2px 7px;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      min-width: 68px;
+      max-width: 90px;
+      box-shadow: 0 2px 6px rgba(0,0,0,0.4);
+    }
+
+    .seat-name {
+      font-size: 10px;
+      font-weight: 700;
+      color: #f8fafc;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      max-width: 100%;
+    }
+
+    .seat-chips {
+      font-family: var(--font-num);
+      font-size: 10px;
+      font-weight: 700;
+      color: var(--gold);
+    }
+
+    .seat-cards-mini {
+      display: flex;
+      gap: 2px;
+      position: absolute;
+      top: -12px;
+      z-index: 5;
+    }
+
+    .seat-cards-mini .p-card {
+      width: 20px;
+      height: 28px;
+      padding: 1px;
+      border-radius: 3px;
+    }
+
+    .seat-cards-mini .p-card .rank { font-size: 8px; }
+    .seat-cards-mini .p-card .suit-center { font-size: 10px; }
+    .seat-cards-mini .p-card .rank-bot { display: none; }
+
+    .seat-bet-badge {
+      position: absolute;
+      background: rgba(0, 0, 0, 0.8);
+      border: 1px solid var(--gold);
+      color: var(--gold);
+      font-family: var(--font-num);
+      font-size: 9px;
+      font-weight: 800;
+      padding: 1px 5px;
+      border-radius: 8px;
+      white-space: nowrap;
+      box-shadow: 0 2px 5px rgba(0,0,0,0.5);
+    }
+
+    /* Placement of bet badges relative to avatar */
+    .seat-node[data-pos="0"] .seat-bet-badge { bottom: -22px; }
+    .seat-node[data-pos="1"] .seat-bet-badge { bottom: -12px; left: -32px; }
+    .seat-node[data-pos="2"] .seat-bet-badge { left: -36px; }
+    .seat-node[data-pos="3"] .seat-bet-badge { top: -14px; left: -32px; }
+    .seat-node[data-pos="4"] .seat-bet-badge { top: -20px; }
+    .seat-node[data-pos="5"] .seat-bet-badge { top: -14px; right: -32px; }
+    .seat-node[data-pos="6"] .seat-bet-badge { right: -36px; }
+    .seat-node[data-pos="7"] .seat-bet-badge { bottom: -12px; right: -32px; }
+
+    .seat-action-text {
+      font-size: 9px;
+      color: #38bdf8;
+      font-weight: 600;
+      white-space: nowrap;
+    }
+
+    /* =========================================================================
+       5. HERO SECTION & CONTROLS (BOTTOM BAR)
+       ========================================================================= */
+    .hero-station {
+      background: rgba(10, 16, 26, 0.92);
+      backdrop-filter: blur(16px);
+      -webkit-backdrop-filter: blur(16px);
+      border-top: 1px solid var(--glass-border);
+      padding: 8px 12px 14px;
+      display: flex;
+      flex-direction: column;
+      gap: 6px;
+      z-index: 40;
+      flex-shrink: 0;
+    }
+
+    /* Combination Glow Banner */
+    .combo-banner {
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      gap: 6px;
+      background: linear-gradient(90deg, rgba(248, 200, 70, 0.08) 0%, rgba(248, 200, 70, 0.18) 50%, rgba(248, 200, 70, 0.08) 100%);
+      border: 1px solid rgba(248, 200, 70, 0.35);
+      border-radius: 12px;
+      padding: 4px 10px;
+      font-size: 12px;
+      font-weight: 700;
+      color: var(--gold);
+      box-shadow: 0 0 12px rgba(248, 200, 70, 0.15);
+      animation: comboGlow 2.5s infinite ease-in-out;
+    }
+
+    @keyframes comboGlow {
+      0%, 100% { border-color: rgba(248, 200, 70, 0.3); }
+      50% { border-color: rgba(248, 200, 70, 0.7); box-shadow: 0 0 16px rgba(248, 200, 70, 0.3); }
+    }
+
+    .hero-status-bar {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      font-size: 12px;
+      color: var(--text-muted);
+      padding: 0 4px;
+    }
+
+    .hero-stack-info {
+      font-family: var(--font-num);
+      font-weight: 700;
+      color: var(--gold);
+      display: flex;
+      align-items: center;
+      gap: 4px;
+    }
+
+    /* Raise Slider & Presets */
+    .raise-controller {
+      display: flex;
+      flex-direction: column;
+      gap: 5px;
+      background: rgba(15, 23, 42, 0.7);
+      border: 1px solid var(--glass-border);
+      border-radius: 14px;
+      padding: 6px 10px;
+    }
+
+    .raise-stepper-row {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 10px;
+    }
+
+    .stepper-btn {
+      width: 32px;
+      height: 30px;
+      border-radius: 8px;
+      background: rgba(255, 255, 255, 0.1);
+      border: 1px solid var(--glass-border);
+      color: #fff;
+      font-size: 16px;
+      font-weight: 800;
+      display: flex;
+      align-items: center;
+      justify-content: center;
       cursor: pointer;
     }
-    button.act:disabled { opacity: .4; }
-    button.danger { background: #e5484d; }
-    button.warn { background: #f2a900; color:#111; }
-    button.ghost { background: #33465a; }
-    #status { text-align:center; font-size:12px; color:var(--hint); margin-top:6px; }
+
+    .stepper-btn:active { background: rgba(255, 255, 255, 0.2); }
+
+    .raise-slider-wrap {
+      flex: 1;
+      display: flex;
+      align-items: center;
+    }
+
+    input[type="range"].poker-slider {
+      width: 100%;
+      height: 6px;
+      -webkit-appearance: none;
+      background: #1e293b;
+      border-radius: 6px;
+      outline: none;
+      cursor: pointer;
+    }
+
+    input[type="range"].poker-slider::-webkit-slider-thumb {
+      -webkit-appearance: none;
+      width: 20px;
+      height: 20px;
+      border-radius: 50%;
+      background: var(--gold);
+      box-shadow: 0 0 10px var(--gold-glow);
+      cursor: pointer;
+      border: 2px solid #fff;
+    }
+
+    .raise-amount-badge {
+      font-family: var(--font-num);
+      font-weight: 700;
+      font-size: 13px;
+      color: var(--gold);
+      min-width: 65px;
+      text-align: right;
+    }
+
+    .presets-row {
+      display: flex;
+      gap: 4px;
+      justify-content: space-between;
+    }
+
+    .preset-chip {
+      flex: 1;
+      background: rgba(255, 255, 255, 0.06);
+      border: 1px solid rgba(255, 255, 255, 0.08);
+      color: #cbd5e1;
+      font-size: 11px;
+      font-weight: 700;
+      padding: 4px 0;
+      border-radius: 8px;
+      cursor: pointer;
+      text-align: center;
+      transition: all 0.15s ease;
+    }
+
+    .preset-chip:active {
+      background: var(--gold);
+      color: #111;
+    }
+
+    /* Action Buttons Grid */
+    .actions-grid {
+      display: grid;
+      grid-template-columns: 1fr 1fr 1fr;
+      gap: 8px;
+    }
+
+    .btn-act {
+      border: none;
+      border-radius: 12px;
+      padding: 12px 6px;
+      font-family: var(--font-main);
+      font-size: 14px;
+      font-weight: 800;
+      cursor: pointer;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      gap: 2px;
+      color: #fff;
+      transition: transform 0.1s ease, filter 0.2s ease;
+      box-shadow: 0 4px 12px rgba(0,0,0,0.3);
+    }
+
+    .btn-act:active {
+      transform: scale(0.96);
+    }
+
+    .btn-act:disabled {
+      opacity: 0.35;
+      cursor: not-allowed;
+      filter: grayscale(0.8);
+      transform: none !important;
+    }
+
+    .btn-fold {
+      background: linear-gradient(135deg, #ef4444 0%, #b91c1c 100%);
+      border: 1px solid rgba(239, 68, 68, 0.5);
+    }
+
+    .btn-check-call {
+      background: linear-gradient(135deg, #10b981 0%, #047857 100%);
+      border: 1px solid rgba(16, 185, 129, 0.5);
+    }
+
+    .btn-raise {
+      background: linear-gradient(135deg, #f59e0b 0%, #d97706 100%);
+      border: 1px solid rgba(245, 158, 11, 0.5);
+    }
+
+    .btn-allin {
+      grid-column: span 3;
+      background: linear-gradient(135deg, #dc2626 0%, #7f1d1d 50%, #ea580c 100%);
+      border: 1px solid rgba(234, 88, 12, 0.7);
+      box-shadow: 0 0 16px rgba(234, 88, 12, 0.3);
+      padding: 10px;
+    }
+
+    .btn-sub-txt {
+      font-size: 10px;
+      opacity: 0.88;
+      font-weight: 600;
+    }
+
+    /* Turn Wait State */
+    .turn-wait-banner {
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      gap: 8px;
+      padding: 14px;
+      background: rgba(15, 23, 42, 0.6);
+      border: 1px dashed rgba(255, 255, 255, 0.15);
+      border-radius: 14px;
+      color: var(--text-muted);
+      font-size: 13px;
+      font-weight: 600;
+    }
+
+    .turn-wait-dot {
+      width: 8px;
+      height: 8px;
+      border-radius: 50%;
+      background: #38bdf8;
+      animation: waitDot 1.2s infinite ease-in-out;
+    }
+
+    @keyframes waitDot {
+      0%, 100% { opacity: 0.3; transform: scale(0.8); }
+      50% { opacity: 1; transform: scale(1.2); }
+    }
+
+    /* Lobby State Controls */
+    .lobby-panel {
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+      padding: 6px 0;
+    }
+
+    .lobby-sync-badge {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      background: rgba(14, 165, 233, 0.12);
+      border: 1px solid rgba(14, 165, 233, 0.3);
+      color: #7dd3fc;
+      border-radius: 10px;
+      padding: 6px 10px;
+      font-size: 11px;
+      line-height: 1.3;
+    }
+
+    .lobby-btns-row {
+      display: flex;
+      gap: 8px;
+    }
+
+    .lobby-btns-row button {
+      flex: 1;
+      padding: 12px;
+      border-radius: 12px;
+      font-size: 14px;
+      font-weight: 800;
+      border: none;
+      cursor: pointer;
+      color: #fff;
+    }
+
+    .btn-join {
+      background: linear-gradient(135deg, #2563eb, #1d4ed8);
+      box-shadow: 0 4px 14px rgba(37, 99, 235, 0.4);
+    }
+
+    .btn-start {
+      background: linear-gradient(135deg, #10b981, #059669);
+      box-shadow: 0 4px 14px rgba(16, 185, 129, 0.4);
+    }
+
+    .btn-start:disabled {
+      opacity: 0.4;
+      cursor: not-allowed;
+      box-shadow: none;
+    }
+
+    /* =========================================================================
+       6. LIVE EVENT TOAST NOTIFIER
+       ========================================================================= */
+    .event-toast {
+      position: absolute;
+      top: 54px;
+      left: 50%;
+      transform: translateX(-50%);
+      background: rgba(15, 23, 42, 0.9);
+      border: 1px solid var(--glass-border);
+      backdrop-filter: blur(8px);
+      padding: 5px 14px;
+      border-radius: 20px;
+      font-size: 12px;
+      color: #e2e8f0;
+      white-space: nowrap;
+      box-shadow: 0 6px 20px rgba(0,0,0,0.5);
+      z-index: 60;
+      pointer-events: none;
+      transition: all 0.3s ease;
+      opacity: 0;
+    }
+
+    .event-toast.show {
+      opacity: 1;
+      transform: translateX(-50%) translateY(4px);
+    }
+
+    /* =========================================================================
+       7. ACTIVE ROOMS MODAL
+       ========================================================================= */
+    .modal-overlay {
+      position: fixed;
+      inset: 0;
+      background: rgba(0, 0, 0, 0.75);
+      backdrop-filter: blur(6px);
+      display: none;
+      align-items: center;
+      justify-content: center;
+      padding: 16px;
+      z-index: 100;
+    }
+
+    .modal-overlay.open {
+      display: flex;
+    }
+
+    .modal-card {
+      background: #0f172a;
+      border: 1px solid var(--glass-border);
+      border-radius: 20px;
+      width: 100%;
+      max-width: 420px;
+      max-height: 80vh;
+      display: flex;
+      flex-direction: column;
+      overflow: hidden;
+      box-shadow: 0 20px 40px rgba(0,0,0,0.8);
+    }
+
+    .modal-header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 14px 18px;
+      border-bottom: 1px solid var(--glass-border);
+    }
+
+    .modal-title {
+      font-size: 16px;
+      font-weight: 700;
+      color: var(--text-main);
+    }
+
+    .modal-body {
+      padding: 14px 18px;
+      overflow-y: auto;
+      display: flex;
+      flex-direction: column;
+      gap: 10px;
+    }
+
+    .room-item-card {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      background: rgba(255, 255, 255, 0.05);
+      border: 1px solid rgba(255, 255, 255, 0.08);
+      padding: 10px 14px;
+      border-radius: 12px;
+      cursor: pointer;
+      transition: all 0.2s ease;
+    }
+
+    .room-item-card:hover {
+      background: rgba(255, 255, 255, 0.1);
+      border-color: var(--gold);
+    }
+
+    .room-item-info {
+      display: flex;
+      flex-direction: column;
+      gap: 2px;
+    }
+
+    .room-item-title {
+      font-size: 14px;
+      font-weight: 700;
+      color: #fff;
+    }
+
+    .room-item-sub {
+      font-size: 12px;
+      color: var(--text-muted);
+    }
   </style>
 </head>
 <body>
-  <h1>🂡 Texas Hold'em</h1>
-  <div class="muted" id="sub">Подключение…</div>
+  <div class="app-root">
+    <!-- Header Bar -->
+    <header class="app-header">
+      <div class="header-left">
+        <span class="casino-logo">🂡</span>
+        <div class="room-badge-group">
+          <div class="room-title">
+            <span id="roomNameLabel">Загрузка...</span>
+            <span class="chat-pill" id="chatPill">ЧАТ</span>
+          </div>
+          <div class="room-sub" id="headerSub">Подключение...</div>
+        </div>
+      </div>
+      <div class="header-right">
+        <button class="icon-btn" id="soundBtn" title="Звук">🔊</button>
+        <button class="icon-btn" id="roomsListBtn" title="Активные столы">🗂</button>
+        <div class="status-dot" id="onlineDot" title="Статус сети"></div>
+      </div>
+    </header>
 
-  <div class="felt">
-    <div class="board" id="board"></div>
-    <div class="pot" id="pot"></div>
+    <!-- Event Notification Toast -->
+    <div class="event-toast" id="eventToast"></div>
+
+    <!-- 3D Poker Arena -->
+    <div class="table-viewport">
+      <div class="poker-table">
+        <div class="table-watermark">TEXAS HOLD'EM</div>
+
+        <!-- Center Pot & Board Cards -->
+        <div class="board-center">
+          <div class="pot-display" id="potDisplay">
+            <span class="pot-icon">🪙</span>
+            <span class="pot-amount" id="potText">БАНК: 0</span>
+          </div>
+          <div class="street-pill" id="streetPill">ОЖИДАНИЕ</div>
+          <div class="community-cards" id="boardCards">
+            <div class="card-slot"></div>
+            <div class="card-slot"></div>
+            <div class="card-slot"></div>
+            <div class="card-slot"></div>
+            <div class="card-slot"></div>
+          </div>
+        </div>
+
+        <!-- Dynamic Seats around Table -->
+        <div class="seats-layer" id="seatsLayer"></div>
+      </div>
+    </div>
+
+    <!-- Hero Station & Actions (Bottom) -->
+    <footer class="hero-station">
+      <!-- Player Combination Badge -->
+      <div class="combo-banner" id="comboBanner" style="display: none;">
+        <span>💡</span>
+        <span id="comboText">Твоя комбинация</span>
+      </div>
+
+      <!-- Hero Hand Cards -->
+      <div class="hero-cards-wrap" id="heroCardsWrap"></div>
+
+      <!-- Hero Balance & Info -->
+      <div class="hero-status-bar">
+        <div class="hero-stack-info">
+          <span>Стек:</span>
+          <span id="heroStack">🪙 0</span>
+        </div>
+        <div id="heroToCall">К уравниванию: 0</div>
+      </div>
+
+      <!-- Dynamic Action Controls -->
+      <div id="actionControls"></div>
+    </footer>
   </div>
 
-  <div id="seats"></div>
-  <div class="event" id="event"></div>
-  <div class="actions" id="actions"></div>
-  <div id="status"></div>
+  <!-- Modal: Active Tables List -->
+  <div class="modal-overlay" id="roomsModal">
+    <div class="modal-card">
+      <div class="modal-header">
+        <div class="modal-title">🂡 Покерные столы</div>
+        <button class="icon-btn" id="closeModalBtn">✕</button>
+      </div>
+      <div class="modal-body" id="roomsModalList">
+        <div style="text-align:center; color: var(--text-muted); padding: 20px;">Загрузка списка столов...</div>
+      </div>
+    </div>
+  </div>
 
 <script>
-(function () {
+(function() {
   "use strict";
-  const tg = window.Telegram && window.Telegram.WebApp;
-  if (tg) { tg.ready(); tg.expand(); }
 
-  // room берём из start_param (?startapp=CODE) или ?room=CODE, иначе "main".
+  // Telegram WebApp Setup
+  const tg = window.Telegram && window.Telegram.WebApp;
+  if (tg) {
+    try {
+      tg.ready();
+      tg.expand();
+      if (tg.enableClosingConfirmation) tg.enableClosingConfirmation();
+    } catch(e) {}
+  }
+
+  // Sound Synthesizer (Native Web Audio API - Zero External Assets)
+  const SoundFX = {
+    ctx: null,
+    enabled: localStorage.getItem("poker_sound") !== "0",
+    init() {
+      if (!this.ctx) {
+        const AudioCtx = window.AudioContext || window.webkitAudioContext;
+        if (AudioCtx) this.ctx = new AudioCtx();
+      }
+    },
+    toggle() {
+      this.enabled = !this.enabled;
+      localStorage.setItem("poker_sound", this.enabled ? "1" : "0");
+      return this.enabled;
+    },
+    chip() {
+      if (!this.enabled) return;
+      this.init();
+      if (!this.ctx) return;
+      const t = this.ctx.currentTime;
+      const osc = this.ctx.createOscillator();
+      const gain = this.ctx.createGain();
+      osc.type = "sine";
+      osc.frequency.setValueAtTime(2200, t);
+      osc.frequency.exponentialRampToValueAtTime(1400, t + 0.06);
+      gain.gain.setValueAtTime(0.3, t);
+      gain.gain.exponentialRampToValueAtTime(0.001, t + 0.07);
+      osc.connect(gain);
+      gain.connect(this.ctx.destination);
+      osc.start(t);
+      osc.stop(t + 0.08);
+    },
+    deal() {
+      if (!this.enabled) return;
+      this.init();
+      if (!this.ctx) return;
+      const t = this.ctx.currentTime;
+      const osc = this.ctx.createOscillator();
+      const gain = this.ctx.createGain();
+      osc.type = "triangle";
+      osc.frequency.setValueAtTime(450, t);
+      osc.frequency.exponentialRampToValueAtTime(120, t + 0.09);
+      gain.gain.setValueAtTime(0.2, t);
+      gain.gain.exponentialRampToValueAtTime(0.01, t + 0.09);
+      osc.connect(gain);
+      gain.connect(this.ctx.destination);
+      osc.start(t);
+      osc.stop(t + 0.1);
+    },
+    knock() {
+      if (!this.enabled) return;
+      this.init();
+      if (!this.ctx) return;
+      const t = this.ctx.currentTime;
+      [0, 0.07].forEach((delay) => {
+        const osc = this.ctx.createOscillator();
+        const gain = this.ctx.createGain();
+        osc.type = "sine";
+        osc.frequency.setValueAtTime(120, t + delay);
+        osc.frequency.exponentialRampToValueAtTime(50, t + delay + 0.05);
+        gain.gain.setValueAtTime(0.4, t + delay);
+        gain.gain.exponentialRampToValueAtTime(0.01, t + delay + 0.05);
+        osc.connect(gain);
+        gain.connect(this.ctx.destination);
+        osc.start(t + delay);
+        osc.stop(t + delay + 0.06);
+      });
+    },
+    fanfare() {
+      if (!this.enabled) return;
+      this.init();
+      if (!this.ctx) return;
+      const t = this.ctx.currentTime;
+      const notes = [523.25, 659.25, 783.99, 1046.50]; // C5, E5, G5, C6
+      notes.forEach((freq, idx) => {
+        const osc = this.ctx.createOscillator();
+        const gain = this.ctx.createGain();
+        osc.type = "triangle";
+        osc.frequency.setValueAtTime(freq, t + idx * 0.1);
+        gain.gain.setValueAtTime(0.25, t + idx * 0.1);
+        gain.gain.exponentialRampToValueAtTime(0.001, t + idx * 0.1 + 0.35);
+        osc.connect(gain);
+        gain.connect(this.ctx.destination);
+        osc.start(t + idx * 0.1);
+        osc.stop(t + idx * 0.1 + 0.36);
+      });
+    },
+    turnAlert() {
+      if (!this.enabled) return;
+      this.init();
+      if (!this.ctx) return;
+      const t = this.ctx.currentTime;
+      const osc = this.ctx.createOscillator();
+      const gain = this.ctx.createGain();
+      osc.type = "sine";
+      osc.frequency.setValueAtTime(880, t);
+      osc.frequency.setValueAtTime(1174.66, t + 0.1);
+      gain.gain.setValueAtTime(0.25, t);
+      gain.gain.exponentialRampToValueAtTime(0.001, t + 0.28);
+      osc.connect(gain);
+      gain.connect(this.ctx.destination);
+      osc.start(t);
+      osc.stop(t + 0.3);
+    }
+  };
+
+  // Haptic feedback helper
+  function triggerHaptic(type = "light") {
+    if (tg && tg.HapticFeedback) {
+      try {
+        if (type === "success" || type === "warning" || type === "error") {
+          tg.HapticFeedback.notificationOccurred(type);
+        } else {
+          tg.HapticFeedback.impactOccurred(type);
+        }
+      } catch(e) {}
+    }
+  }
+
+  // Query and room resolution
   const params = new URLSearchParams(location.search);
   const startParam = (tg && tg.initDataUnsafe && tg.initDataUnsafe.start_param) || "";
-  const room = (params.get("room") || startParam || "main").slice(0, 32);
+  const room = (params.get("room") || startParam || "main").slice(0, 48);
   const initData = (tg && tg.initData) || "";
 
+  // DOM Elements
   const $ = (id) => document.getElementById(id);
-  const RED = new Set(["♦", "♥"]);
-  let ws, state = null, myUid = null, reconnectTimer = null;
+  const RED_SUITS = new Set(["♦", "♥", "d", "h"]);
 
-  function cardEl(txt, cls) {
-    const d = document.createElement("div");
-    d.className = "pcard" + (cls ? " " + cls : "");
-    if (txt === "🂠") { d.className += " back"; d.textContent = "🂠"; }
-    else {
-      d.textContent = txt;
-      if ([...txt].some((ch) => RED.has(ch))) d.className += " red";
-    }
-    return d;
+  let ws = null;
+  let state = null;
+  let myUid = null;
+  let reconnectTimer = null;
+  let lastEventMsg = "";
+  let currentRaiseVal = 0;
+  let lastTurnUid = null;
+
+  // Format chip numbers with spaces
+  function fmtChips(n) {
+    return Number(n || 0).toLocaleString("ru-RU").replace(/\u00A0/g, " ");
   }
 
-  function render() {
-    if (!state) return;
-    myUid = state.you.uid;
-    $("sub").textContent = state.phase === "lobby"
-      ? `Комната «${room}» · лобби · игроков нужно ${state.min_players}+`
-      : `Комната «${room}» · раздача #${state.hand_no} · ${state.street} · банк ${state.pot}`;
-
-    const board = $("board"); board.innerHTML = "";
-    if (state.board.length) state.board.forEach((c) => board.appendChild(cardEl(c)));
-    else board.appendChild(Object.assign(document.createElement("span"),
-      { className: "muted", textContent: state.phase === "lobby" ? "Ждём игроков…" : "—" }));
-    $("pot").textContent = state.pot ? "Банк: " + state.pot : "";
-
-    const seats = $("seats"); seats.innerHTML = "";
-    state.seats.forEach((s) => {
-      const row = document.createElement("div");
-      row.className = "seat" + (s.is_turn ? " turn" : "") + (s.is_me ? " me" : "") + (s.folded ? " folded" : "");
-      const mini = document.createElement("div"); mini.className = "mini";
-      (s.cards || []).forEach((c) => mini.appendChild(cardEl(c)));
-      const info = document.createElement("div"); info.className = "info";
-      let sub = [];
-      if (!s.in_table && s.stack <= 0) sub.push("вылетел");
-      else if (s.folded) sub.push("fold");
-      else if (s.all_in) sub.push("all-in");
-      if (s.showdown) sub.push(s.showdown);
-      else if (s.last_action) sub.push(s.last_action);
-      if (s.bet) sub.push("ставка " + s.bet);
-      info.innerHTML = `<div class="nm">${s.is_turn ? "👉 " : ""}${escapeHtml(s.name)}${s.is_me ? " (ты)" : ""}</div>`
-        + `<div class="sub">${escapeHtml(sub.join(" · ") || "в игре")}</div>`;
-      const chip = document.createElement("div"); chip.className = "chip"; chip.textContent = s.stack;
-      row.appendChild(mini); row.appendChild(info); row.appendChild(chip);
-      seats.appendChild(row);
-    });
-
-    $("event").textContent = state.last_event || "";
-    renderActions();
+  // Parse card string into {rank, suit, isRed, isBack}
+  function parseCard(c) {
+    if (!c || c === "🂠") return { isBack: true };
+    const clean = c.trim();
+    const lastChar = clean.slice(-1);
+    const suit = lastChar;
+    const rank = clean.slice(0, -1);
+    const isRed = RED_SUITS.has(suit);
+    return { rank, suit, isRed, isBack: false };
   }
 
-  function renderActions() {
-    const box = $("actions"); box.innerHTML = "";
-    const phase = state.phase, you = state.you;
-
-    if (phase === "lobby") {
-      addBtn(box, you.seated ? "✅ Ты за столом" : "🪑 Войти", "act", () => send("join"), you.seated);
-      addBtn(box, "▶️ Начать", "act warn", () => send("start"), state.seats.length < state.min_players);
-      return;
+  // Create card DOM element
+  function createCardEl(cardStr, isHero = false) {
+    const info = parseCard(cardStr);
+    const el = document.createElement("div");
+    if (info.isBack) {
+      el.className = `p-card back ${isHero ? "hero-card" : ""}`;
+      return el;
     }
-    if (phase === "finished") {
-      addBtn(box, "🔄 Новый стол", "act ghost", () => location.reload(), false);
-      return;
-    }
-    // playing / between_hands
-    const isMyTurn = state.current_turn === myUid && Object.keys(you.options || {}).length > 0;
-    const o = you.options || {};
-    if (!isMyTurn) {
-      const info = document.createElement("div");
-      info.className = "muted"; info.style.textAlign = "center"; info.style.width = "100%";
-      info.textContent = phase === "between_hands" ? "Раздача завершена, следующая скоро…" : "Ход другого игрока…";
-      box.appendChild(info); return;
-    }
-    if (o.check) addBtn(box, "✅ Check", "act", () => send("action", { action: "check" }));
-    if (o.call) addBtn(box, `💰 Call ${o.call_amount || ""}`.trim(), "act", () => send("action", { action: "call" }));
-    (o.raise_to || []).forEach((amt) =>
-      addBtn(box, `📈 Raise до ${amt}`, "act", () => send("action", { action: "raise", amount: amt })));
-    addBtn(box, "↩️ Fold", "act danger", () => send("action", { action: "fold" }), !o.fold && !o.check);
-    if (o.all_in) addBtn(box, `🚨 All-in ${o.all_in_to || ""}`.trim(), "act warn", () => send("action", { action: "allin" }));
-  }
-
-  function addBtn(box, label, cls, fn, disabled) {
-    const b = document.createElement("button");
-    b.className = cls; b.textContent = label; b.disabled = !!disabled;
-    b.onclick = () => { if (tg && tg.HapticFeedback) tg.HapticFeedback.impactOccurred("light"); fn(); };
-    box.appendChild(b);
+    el.className = `p-card ${info.isRed ? "red" : "black"} ${isHero ? "hero-card" : ""}`;
+    el.innerHTML = `
+      <div class="rank">${escapeHtml(info.rank)}</div>
+      <div class="suit-center">${escapeHtml(info.suit)}</div>
+      <div class="rank-bot">${escapeHtml(info.rank)}</div>
+    `;
+    return el;
   }
 
   function escapeHtml(s) {
-    return String(s).replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
+    return String(s || "").replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
   }
 
-  function send(type, extra) {
-    if (ws && ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify(Object.assign({ type }, extra || {})));
+  // Show Toast
+  function showToast(text) {
+    if (!text) return;
+    const t = $("eventToast");
+    t.textContent = text;
+    t.classList.add("show");
+    clearTimeout(t._timer);
+    t._timer = setTimeout(() => t.classList.remove("show"), 3200);
   }
 
+  // Render Whole Game Screen
+  function render() {
+    if (!state) return;
+    myUid = state.you ? state.you.uid : null;
+
+    // 1. Header Information
+    const isChat = state.code.startsWith("chat_");
+    $("chatPill").style.display = isChat ? "inline-block" : "none";
+    $("roomNameLabel").textContent = state.chat_title || (isChat ? "Стол чата" : `Комната «${state.code}»`);
+    
+    if (state.phase === "lobby") {
+      $("headerSub").textContent = `Лобби · Мин. ${state.min_players} игрока · Блайнды: ${fmtChips(state.small_blind)} / ${fmtChips(state.big_blind)}`;
+    } else {
+      $("headerSub").textContent = `Раздача #${state.hand_no} · ${state.street || "Игра"} · Блайнды: ${fmtChips(state.small_blind)}/${fmtChips(state.big_blind)}`;
+    }
+
+    // 2. Central Pot and Street
+    $("potText").textContent = `БАНК: ${fmtChips(state.pot)}`;
+    $("streetPill").textContent = state.phase === "lobby" ? "ЛОББИ" : (state.street || "РАЗДАЧА").toUpperCase();
+
+    // 3. Community Board Cards
+    const boardWrap = $("boardCards");
+    boardWrap.innerHTML = "";
+    const boardCards = state.board || [];
+    for (let i = 0; i < 5; i++) {
+      if (i < boardCards.length) {
+        boardWrap.appendChild(createCardEl(boardCards[i]));
+      } else {
+        const slot = document.createElement("div");
+        slot.className = "card-slot";
+        boardWrap.appendChild(slot);
+      }
+    }
+
+    // 4. Seats Placement (Radial mapping)
+    renderSeats();
+
+    // 5. Toast on new events
+    if (state.last_event && state.last_event !== lastEventMsg) {
+      lastEventMsg = state.last_event;
+      showToast(lastEventMsg);
+      if (lastEventMsg.includes("забрал") || lastEventMsg.includes("победил") || lastEventMsg.includes("Банк")) {
+        SoundFX.fanfare();
+        triggerHaptic("success");
+      }
+    }
+
+    // 6. Turn Sound Alert
+    const isMyTurn = (state.current_turn === myUid) && (state.phase === "playing");
+    if (isMyTurn && lastTurnUid !== myUid) {
+      SoundFX.turnAlert();
+      triggerHaptic("warning");
+    }
+    lastTurnUid = state.current_turn;
+
+    // 7. Hero Hand Cards & Combination Banner
+    renderHeroStation();
+
+    // 8. Action Controller
+    renderActionControls();
+  }
+
+  // Render 8-Seat Oval Map
+  function renderSeats() {
+    const layer = $("seatsLayer");
+    layer.innerHTML = "";
+    const seats = state.seats || [];
+    const dealerUid = state.dealer_uid;
+
+    // Arrange seats relative to Hero at position 4 (Bottom Center)
+    let myIndex = seats.findIndex(s => s.is_me);
+    if (myIndex === -1) myIndex = 0;
+
+    seats.forEach((s, idx) => {
+      // Calculate visual position offset so Hero is at bottom
+      const visualPos = (idx - myIndex + 4 + 8) % 8;
+
+      const node = document.createElement("div");
+      node.className = `seat-node ${s.is_turn ? "is-turn" : ""} ${s.is_me ? "is-me" : ""} ${s.folded ? "folded" : ""}`;
+      node.setAttribute("data-pos", visualPos);
+
+      // Mini cards over seat
+      if (s.cards && s.cards.length && !s.is_me) {
+        const mcWrap = document.createElement("div");
+        mcWrap.className = "seat-cards-mini";
+        s.cards.forEach(c => mcWrap.appendChild(createCardEl(c)));
+        node.appendChild(mcWrap);
+      }
+
+      // Avatar circle
+      const av = document.createElement("div");
+      av.className = "seat-avatar-wrap";
+      const initials = (s.name || "P").slice(0, 2).toUpperCase();
+      av.textContent = initials;
+
+      // Dealer badge
+      if (dealerUid && s.uid === dealerUid) {
+        const dBtn = document.createElement("div");
+        dBtn.className = "dealer-btn";
+        dBtn.textContent = "D";
+        av.appendChild(dBtn);
+      }
+      node.appendChild(av);
+
+      // Info pill (Name & Stack)
+      const pill = document.createElement("div");
+      pill.className = "seat-info-pill";
+      let statusTxt = "";
+      if (!s.in_table && s.stack <= 0) statusTxt = "Выбыл";
+      else if (s.folded) statusTxt = "Пас";
+      else if (s.all_in) statusTxt = "ALL-IN";
+      else if (s.showdown) statusTxt = s.showdown;
+      else if (s.last_action) statusTxt = s.last_action;
+
+      pill.innerHTML = `
+        <div class="seat-name">${escapeHtml(s.name)}${s.is_me ? " (ты)" : ""}</div>
+        <div class="seat-chips">🪙 ${fmtChips(s.stack)}</div>
+        ${statusTxt ? `<div class="seat-action-text">${escapeHtml(statusTxt)}</div>` : ""}
+      `;
+      node.appendChild(pill);
+
+      // Current street bet chip pile
+      if (s.bet > 0) {
+        const betBadge = document.createElement("div");
+        betBadge.className = "seat-bet-badge";
+        betBadge.textContent = `🪙 ${fmtChips(s.bet)}`;
+        node.appendChild(betBadge);
+      }
+
+      layer.appendChild(node);
+    });
+  }
+
+  // Render Hero Cards & Combination Banner
+  function renderHeroStation() {
+    const heroCardsWrap = $("heroCardsWrap");
+    heroCardsWrap.innerHTML = "";
+    const comboBanner = $("comboBanner");
+    const meSeat = (state.seats || []).find(s => s.is_me);
+
+    if (meSeat) {
+      $("heroStack").textContent = `🪙 ${fmtChips(meSeat.stack)}`;
+    }
+    const toCall = state.you ? (state.you.to_call || 0) : 0;
+    $("heroToCall").textContent = toCall > 0 ? `К уравниванию: ${fmtChips(toCall)}` : "Чек доступен";
+
+    // Cards
+    const myCards = meSeat && meSeat.cards && meSeat.cards.length ? meSeat.cards : [];
+    if (myCards.length && myCards[0] !== "🂠") {
+      myCards.forEach(c => heroCardsWrap.appendChild(createCardEl(c, true)));
+    }
+
+    // Combination name
+    const comboName = state.you && state.you.combo;
+    if (comboName) {
+      comboBanner.style.display = "flex";
+      $("comboText").textContent = comboName;
+    } else {
+      comboBanner.style.display = "none";
+    }
+  }
+
+  // Render Betting & Action Buttons
+  function renderActionControls() {
+    const box = $("actionControls");
+    box.innerHTML = "";
+    const phase = state.phase;
+    const you = state.you || {};
+
+    // 1. Lobby State
+    if (phase === "lobby") {
+      const lobby = document.createElement("div");
+      lobby.className = "lobby-panel";
+      lobby.innerHTML = `
+        <div class="lobby-sync-badge">
+          <span>💬</span>
+          <span><b>Синхронизировано с Telegram:</b> игроки из чата и веб-приложения играют за одним живым столом.</span>
+        </div>
+      `;
+      const btnRow = document.createElement("div");
+      btnRow.className = "lobby-btns-row";
+
+      const joinBtn = document.createElement("button");
+      joinBtn.className = "btn-join";
+      joinBtn.textContent = you.seated ? "✅ Ты за столом" : "🪑 Сесть за стол";
+      joinBtn.disabled = you.seated;
+      joinBtn.onclick = () => {
+        SoundFX.chip();
+        triggerHaptic("medium");
+        send("join");
+      };
+      btnRow.appendChild(joinBtn);
+
+      const startBtn = document.createElement("button");
+      startBtn.className = "btn-start";
+      const seatedCount = (state.seats || []).length;
+      startBtn.textContent = seatedCount < state.min_players ? `▶️ Начать (${seatedCount}/${state.min_players})` : "▶️ Начать игру";
+      startBtn.disabled = seatedCount < state.min_players;
+      startBtn.onclick = () => {
+        SoundFX.deal();
+        triggerHaptic("heavy");
+        send("start");
+      };
+      btnRow.appendChild(startBtn);
+
+      lobby.appendChild(btnRow);
+      box.appendChild(lobby);
+      return;
+    }
+
+    // 2. Between Hands / Waiting
+    if (phase === "between_hands") {
+      box.innerHTML = `
+        <div class="turn-wait-banner">
+          <div class="turn-wait-dot"></div>
+          <span>Раздача завершена. Новая раздача начнётся через несколько секунд...</span>
+        </div>
+      `;
+      return;
+    }
+
+    // 3. Finished
+    if (phase === "finished") {
+      box.innerHTML = `
+        <div class="turn-wait-banner">
+          <span>🏆 Игра завершена!</span>
+        </div>
+      `;
+      return;
+    }
+
+    // 4. Playing State: Check if it's My Turn
+    const isMyTurn = (state.current_turn === myUid) && Object.keys(you.options || {}).length > 0;
+    if (!isMyTurn) {
+      const curTurnSeat = (state.seats || []).find(s => s.uid === state.current_turn);
+      const turnName = curTurnSeat ? curTurnSeat.name : "другого игрока";
+      box.innerHTML = `
+        <div class="turn-wait-banner">
+          <div class="turn-wait-dot"></div>
+          <span>Ходит <b>${escapeHtml(turnName)}</b> · Ожидайте свой черёд...</span>
+        </div>
+      `;
+      return;
+    }
+
+    // --- Active Turn Controls ---
+    const opts = you.options || {};
+    const toCall = you.to_call || 0;
+    const meSeat = (state.seats || []).find(s => s.is_me) || { stack: 0, street_bet: 0 };
+    const maxRaise = meSeat.street_bet + meSeat.stack;
+    const minRaise = opts.min_raise_to || (state.current_bet + state.big_blind);
+
+    if (currentRaiseVal < minRaise || currentRaiseVal > maxRaise) {
+      currentRaiseVal = Math.min(minRaise, maxRaise);
+    }
+
+    // Raise Slider Box (if raise is permitted)
+    if (opts.can_raise && maxRaise > minRaise) {
+      const raiseBox = document.createElement("div");
+      raiseBox.className = "raise-controller";
+
+      // Stepper & Slider
+      const stepRow = document.createElement("div");
+      stepRow.className = "raise-stepper-row";
+
+      const minusBtn = document.createElement("button");
+      minusBtn.className = "stepper-btn";
+      minusBtn.textContent = "−";
+      minusBtn.onclick = () => {
+        currentRaiseVal = Math.max(minRaise, currentRaiseVal - state.big_blind);
+        updateRaiseSlider();
+        SoundFX.chip();
+        triggerHaptic("light");
+      };
+
+      const sliderWrap = document.createElement("div");
+      sliderWrap.className = "raise-slider-wrap";
+      const slider = document.createElement("input");
+      slider.type = "range";
+      slider.className = "poker-slider";
+      slider.min = minRaise;
+      slider.max = maxRaise;
+      slider.step = state.big_blind;
+      slider.value = currentRaiseVal;
+      slider.oninput = (e) => {
+        currentRaiseVal = Number(e.target.value);
+        updateRaiseSlider();
+      };
+      sliderWrap.appendChild(slider);
+
+      const plusBtn = document.createElement("button");
+      plusBtn.className = "stepper-btn";
+      plusBtn.textContent = "+";
+      plusBtn.onclick = () => {
+        currentRaiseVal = Math.min(maxRaise, currentRaiseVal + state.big_blind);
+        updateRaiseSlider();
+        SoundFX.chip();
+        triggerHaptic("light");
+      };
+
+      const amountBadge = document.createElement("div");
+      amountBadge.className = "raise-amount-badge";
+      amountBadge.id = "raiseBadgeVal";
+      amountBadge.textContent = fmtChips(currentRaiseVal);
+
+      stepRow.appendChild(minusBtn);
+      stepRow.appendChild(sliderWrap);
+      stepRow.appendChild(plusBtn);
+      stepRow.appendChild(amountBadge);
+      raiseBox.appendChild(stepRow);
+
+      // Quick Preset Chips
+      const presetsRow = document.createElement("div");
+      presetsRow.className = "presets-row";
+
+      const presets = [
+        { label: "Мин", val: minRaise },
+        { label: "2x", val: Math.min(maxRaise, state.current_bet * 2 || minRaise) },
+        { label: "1/2 Банка", val: Math.min(maxRaise, Math.max(minRaise, Math.floor(state.pot / 2))) },
+        { label: "Банк", val: Math.min(maxRaise, Math.max(minRaise, state.pot)) },
+        { label: "All-in", val: maxRaise }
+      ];
+
+      presets.forEach(pr => {
+        const prBtn = document.createElement("button");
+        prBtn.className = "preset-chip";
+        prBtn.textContent = pr.label;
+        prBtn.onclick = () => {
+          currentRaiseVal = pr.val;
+          slider.value = pr.val;
+          updateRaiseSlider();
+          SoundFX.chip();
+          triggerHaptic("light");
+        };
+        presetsRow.appendChild(prBtn);
+      });
+      raiseBox.appendChild(presetsRow);
+      box.appendChild(raiseBox);
+    }
+
+    function updateRaiseSlider() {
+      const b = $("raiseBadgeVal");
+      if (b) b.textContent = fmtChips(currentRaiseVal);
+      const raiseBtn = $("mainRaiseBtn");
+      if (raiseBtn) raiseBtn.innerHTML = `📈 Рейз<span class="btn-sub-txt">${fmtChips(currentRaiseVal)}</span>`;
+    }
+
+    // Grid Action Buttons: Fold, Check/Call, Raise
+    const grid = document.createElement("div");
+    grid.className = "actions-grid";
+
+    // 1. Fold Button
+    const foldBtn = document.createElement("button");
+    foldBtn.className = "btn-act btn-fold";
+    foldBtn.innerHTML = `↩️ Пас<span class="btn-sub-txt">Сбросить</span>`;
+    foldBtn.onclick = () => {
+      SoundFX.deal();
+      triggerHaptic("medium");
+      send("action", { action: "fold" });
+    };
+    grid.appendChild(foldBtn);
+
+    // 2. Check / Call Button
+    const checkCallBtn = document.createElement("button");
+    checkCallBtn.className = "btn-act btn-check-call";
+    if (opts.check) {
+      checkCallBtn.innerHTML = `✅ Чек<span class="btn-sub-txt">Бесплатно</span>`;
+      checkCallBtn.onclick = () => {
+        SoundFX.knock();
+        triggerHaptic("light");
+        send("action", { action: "check" });
+      };
+    } else {
+      checkCallBtn.innerHTML = `💰 Колл<span class="btn-sub-txt">${fmtChips(toCall)}</span>`;
+      checkCallBtn.onclick = () => {
+        SoundFX.chip();
+        triggerHaptic("medium");
+        send("action", { action: "call" });
+      };
+    }
+    grid.appendChild(checkCallBtn);
+
+    // 3. Raise Button
+    const raiseBtn = document.createElement("button");
+    raiseBtn.className = "btn-act btn-raise";
+    raiseBtn.id = "mainRaiseBtn";
+    raiseBtn.disabled = !opts.can_raise;
+    raiseBtn.innerHTML = `📈 Рейз<span class="btn-sub-txt">${fmtChips(currentRaiseVal)}</span>`;
+    raiseBtn.onclick = () => {
+      SoundFX.chip();
+      triggerHaptic("heavy");
+      send("action", { action: "raise", amount: currentRaiseVal });
+    };
+    grid.appendChild(raiseBtn);
+
+    // 4. All-in Button (if available)
+    if (opts.all_in) {
+      const allInBtn = document.createElement("button");
+      allInBtn.className = "btn-act btn-allin";
+      allInBtn.innerHTML = `🚨 ВА-БАНК (ALL-IN)<span class="btn-sub-txt">${fmtChips(opts.all_in_to || meSeat.stack)} фишек</span>`;
+      allInBtn.onclick = () => {
+        SoundFX.chip();
+        triggerHaptic("heavy");
+        send("action", { action: "allin" });
+      };
+      grid.appendChild(allInBtn);
+    }
+
+    box.appendChild(grid);
+  }
+
+  // WebSocket Connection and Lifecycle
   function connect() {
     const proto = location.protocol === "https:" ? "wss" : "ws";
     ws = new WebSocket(`${proto}://${location.host}/ws`);
+
     ws.onopen = () => {
-      $("status").textContent = "🟢 онлайн";
-      ws.send(JSON.stringify({ type: "auth", initData, room }));
+      $("onlineDot").className = "status-dot";
+      $("onlineDot").title = "Онлайн";
+      ws.send(JSON.stringify({
+        type: "auth",
+        initData: initData,
+        room: room
+      }));
     };
+
     ws.onmessage = (ev) => {
-      const msg = JSON.parse(ev.data);
-      if (msg.type === "state") { state = msg; render(); }
-      else if (msg.type === "error") { $("status").textContent = "⚠️ " + msg.error; }
+      try {
+        const msg = JSON.parse(ev.data);
+        if (msg.type === "state") {
+          state = msg;
+          render();
+        } else if (msg.type === "error") {
+          showToast("⚠️ " + (msg.error || "Ошибка"));
+        }
+      } catch(e) {}
     };
+
     ws.onclose = () => {
-      $("status").textContent = "🔴 переподключение…";
+      $("onlineDot").className = "status-dot offline";
+      $("onlineDot").title = "Переподключение...";
       clearTimeout(reconnectTimer);
       reconnectTimer = setTimeout(connect, 1500);
     };
-    ws.onerror = () => { try { ws.close(); } catch (e) {} };
+
+    ws.onerror = () => {
+      try { ws.close(); } catch(e) {}
+    };
   }
 
+  function send(type, extra) {
+    if (ws && ws.readyState === WebSocket.OPEN) {
+      ws.send(JSON.stringify(Object.assign({ type }, extra || {})));
+    }
+  }
+
+  // Active Rooms Modal logic
+  async function loadRoomsModal() {
+    $("roomsModal").classList.add("open");
+    const list = $("roomsModalList");
+    list.innerHTML = "<div style='text-align:center; color:var(--text-muted); padding:16px;'>Загрузка...</div>";
+    try {
+      const res = await fetch("/api/rooms");
+      const data = await res.json();
+      if (!data.rooms || !data.rooms.length) {
+        list.innerHTML = `
+          <div style="text-align:center; color:var(--text-muted); padding:20px;">
+            Нет других активных столов.<br>
+            <span style="font-size:12px;">Запустите игру в Telegram-чате командой <b>/holdem</b>!</span>
+          </div>
+        `;
+        return;
+      }
+      list.innerHTML = "";
+      data.rooms.forEach(r => {
+        const item = document.createElement("div");
+        item.className = "room-item-card";
+        const isCurrent = r.code === room;
+        item.innerHTML = `
+          <div class="room-item-info">
+            <div class="room-item-title">${escapeHtml(r.chat_title)} ${isCurrent ? "⭐" : ""}</div>
+            <div class="room-item-sub">Игроков: ${r.players_count} · Банк: 🪙 ${fmtChips(r.pot)} · ${r.phase}</div>
+          </div>
+          <div style="font-size: 13px; font-weight: 700; color: var(--gold);">
+            ${isCurrent ? "Вы здесь" : "Войти →"}
+          </div>
+        `;
+        item.onclick = () => {
+          if (!isCurrent) {
+            location.href = `/?room=${encodeURIComponent(r.code)}`;
+          } else {
+            $("roomsModal").classList.remove("open");
+          }
+        };
+        list.appendChild(item);
+      });
+    } catch(e) {
+      list.innerHTML = "<div style='text-align:center; color:#ef4444; padding:16px;'>Не удалось загрузить столы</div>";
+    }
+  }
+
+  // Header Button Handlers
+  $("soundBtn").onclick = () => {
+    const isEnabled = SoundFX.toggle();
+    $("soundBtn").textContent = isEnabled ? "🔊" : "🔇";
+    triggerHaptic("light");
+    if (isEnabled) SoundFX.chip();
+  };
+  $("soundBtn").textContent = SoundFX.enabled ? "🔊" : "🔇";
+
+  $("roomsListBtn").onclick = () => {
+    triggerHaptic("light");
+    loadRoomsModal();
+  };
+
+  $("closeModalBtn").onclick = () => {
+    $("roomsModal").classList.remove("open");
+  };
+
+  // Start connection
   connect();
 })();
 </script>

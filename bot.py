@@ -878,10 +878,17 @@ async def nsfw_debug(data: bytes, tag: str):
 # ------------------------------------------------- учёт сообщений и зачистка
 
 class TrackMiddleware(BaseMiddleware):
-    """Запоминает id+время сообщений от юзеров (для зачистки спама)."""
+    """Запоминает id+время сообщений от юзеров (для зачистки спама) и кэширует @ники."""
 
     async def __call__(self, handler, event, data):
         msg = event
+        if msg.from_user and not msg.from_user.is_bot:
+            uname_cache_add(msg.from_user)
+        if getattr(msg, "forward_from", None) and not msg.forward_from.is_bot:
+            uname_cache_add(msg.forward_from)
+        if getattr(msg, "reply_to_message", None) and msg.reply_to_message.from_user and not msg.reply_to_message.from_user.is_bot:
+            uname_cache_add(msg.reply_to_message.from_user)
+
         if (msg.from_user and not msg.from_user.is_bot
                 and msg.chat.type in ("group", "supergroup")):
             key = (msg.chat.id, msg.from_user.id)
@@ -890,8 +897,6 @@ class TrackMiddleware(BaseMiddleware):
             buf.append((msg.message_id, now()))
             msgcount[key] = msgcount.get(key, 0) + 1
             storage.bump_activity(msg.chat.id, msg.from_user.id, now().isoformat())
-            if msg.from_user.username:                 # запоминаем @ник -> id для таргета по нику
-                uname_cache[msg.from_user.username.lower()] = msg.from_user.id
             # Сигнал ЧС: волна сообщений от многих РАЗНЫХ юзеров за короткое окно.
             if flag("AUTO_CRISIS_ENABLED") and not crisis_active(msg.chat.id):
                 senders = wave_detect(msg.chat.id, msg.from_user.id)
@@ -2134,6 +2139,7 @@ async def crisis_monitor():
 
 
 async def challenge(chat_id: int, user) -> None:
+    uname_cache_add(user)
     if user.is_bot:
         return
     key = (chat_id, user.id)
@@ -2290,6 +2296,7 @@ async def challenge(chat_id: int, user) -> None:
 async def on_join_request(req: ChatJoinRequest):
     """Авто-приём заявок на вступление (мат/стоп-слова в имени -> отклонить)."""
     chat_id, user = req.chat.id, req.from_user
+    uname_cache_add(user)
     log.info("Заявка на вступление: %s (%s) в чат %s", user.id, user.full_name, chat_id)
     pending_requests.setdefault(chat_id, set()).add(user.id)  # запомнили для /clearrequests
 
@@ -2372,6 +2379,7 @@ async def on_join_request(req: ChatJoinRequest):
 
 @dp.chat_member(ChatMemberUpdatedFilter(member_status_changed=JOIN_TRANSITION))
 async def on_member_joined(event: ChatMemberUpdated):
+    uname_cache_add(event.new_chat_member.user)
     await challenge(event.chat.id, event.new_chat_member.user)
 
 
@@ -2389,11 +2397,13 @@ async def on_new_members(message: Message):
         except TelegramBadRequest:
             pass
     for user in message.new_chat_members:
+        uname_cache_add(user)
         await challenge(message.chat.id, user)
 
 
 @dp.message(F.left_chat_member)
 async def on_left_member(message: Message):
+    uname_cache_add(message.left_chat_member)
     if flag("DELETE_SERVICE_MESSAGES"):
         try:
             await message.delete()
@@ -3134,33 +3144,60 @@ def _mention_uid(message: Message):
 
 
 def uname_cache_add(user) -> None:
-    """Запомнить @ник -> id (для последующего таргета по нику)."""
+    """Запомнить @ник -> id (для последующего таргета по нику) и сохранить в базу."""
+    if not user:
+        return
     username = getattr(user, "username", None)
-    if username:
-        uname = username.lower()
-        old = uid_name_cache.get(user.id)
-        if old and old != uname:
-            uname_cache.pop(old, None)
-        uname_cache[uname] = user.id
-        uid_name_cache[user.id] = uname
+    uid = getattr(user, "id", None)
+    if username and uid:
+        uname = str(username).lstrip("@").strip().lower()
+        if uname:
+            old = uid_name_cache.get(uid)
+            if old and old != uname:
+                uname_cache.pop(old, None)
+            uname_cache[uname] = uid
+            uid_name_cache[uid] = uname
+            try:
+                storage.save_username(uname, uid, getattr(user, "full_name", ""))
+            except Exception:
+                pass
+
+
+def _clean_target_token(token: str) -> str:
+    """Нормализовать токен цели: '@ник', 'https://t.me/ник', 't.me/ник', 'tg://user?id=...' -> '@ник' или id."""
+    token = (token or "").strip()
+    m_url = re.match(r"^(?:https?://)?(?:t(?:elegram)?\.me|telegram\.dog)/(?:@)?([a-zA-Z0-9_]{3,32})/?$", token, re.I)
+    if m_url:
+        return f"@{m_url.group(1)}"
+    m_tg = re.match(r"^tg://user\?id=(\d+)$", token, re.I)
+    if m_tg:
+        return m_tg.group(1)
+    return token
 
 
 def _resolve_username(token: str):
-    """'@ник' или 'ник' -> user_id из кэша (кого бот уже видел), иначе None."""
-    name = token.lstrip("@").lower()
-    return uname_cache.get(name)
+    """'@ник' или 'ник' -> user_id из кэша/хранилища (кого бот уже видел), иначе None."""
+    name = str(token).lstrip("@").strip().lower()
+    uid = uname_cache.get(name)
+    if uid:
+        return uid
+    try:
+        uid = storage.resolve_username(name)
+        if uid:
+            uname_cache[name] = uid
+            uid_name_cache[uid] = name
+            return uid
+    except Exception:
+        pass
+    return None
 
 
 _MIN_TG_ID = 10000  # меньше — это срок («мут 3 часа»), а не user_id
 
 
 def _is_target_token(token: str) -> bool:
-    """Похоже ли слово на указание цели: @ник или правдоподобный числовой id.
-
-    Малые числа (1, 3, 30…) — срок, НЕ id: без порога команда без reply/ника
-    съедала «3» как user_id и мутила несуществующего юзера навсегда с причиной
-    «часа бесит».
-    """
+    """Похоже ли слово на указание цели: @ник, t.me/ник или числовой id."""
+    token = _clean_target_token(token)
     if token.startswith("@"):
         return True
     body = token.lstrip("-")
@@ -3168,7 +3205,8 @@ def _is_target_token(token: str) -> bool:
 
 
 def _resolve_target_token(token: str):
-    """'<id>' -> int, '@ник' -> uid из кэша, иначе None."""
+    """'<id>' -> int, '@ник' -> uid из кэша/базы, иначе None."""
+    token = _clean_target_token(token)
     if token.startswith("@"):
         return _resolve_username(token)
     if token.lstrip("-").isdigit():
@@ -3185,18 +3223,16 @@ def _target_id(message: Message):
     if mid is not None:
         return mid
     parts = (message.text or "").split()
-    if len(parts) > 1 and _is_target_token(parts[1]):
-        uid = _resolve_target_token(parts[1])
-        return 0 if uid is None else uid    # 0 = @ник, которого бот не видел
+    if len(parts) > 1:
+        tok = _clean_target_token(parts[1])
+        if _is_target_token(tok):
+            uid = _resolve_target_token(tok)
+            return 0 if uid is None else uid    # 0 = @ник, которого бот не видел
     return None
 
 
 def _target_rest(message: Message):
-    """(uid|None, хвост текста после цели) — для /award.
-
-    В отличие от _target_dur_reason хвост НЕ разбирается на срок/причину:
-    всё после цели уходит в награду как есть — с пробелами и любыми символами.
-    """
+    """(uid|None, хвост текста после цели) — для /award."""
     body = re.sub(r"^/\S+", "", message.text or "", count=1).strip()
     r = message.reply_to_message
     if r and r.from_user:
@@ -3207,9 +3243,11 @@ def _target_rest(message: Message):
         parts = body.split(maxsplit=1)
         return mid, (parts[1] if len(parts) > 1 else "")
     parts = body.split(maxsplit=1)
-    if parts and _is_target_token(parts[0]):
-        uid = _resolve_target_token(parts[0])
-        return (0 if uid is None else uid), (parts[1] if len(parts) > 1 else "")
+    if parts:
+        tok = _clean_target_token(parts[0])
+        if _is_target_token(tok):
+            uid = _resolve_target_token(tok)
+            return (0 if uid is None else uid), (parts[1] if len(parts) > 1 else "")
     return None, body
 
 
@@ -3239,10 +3277,7 @@ def _split_dur_reason(tokens: list):
 def _target_dur_reason(message: Message):
     """(uid, seconds|None, reason) — для /ban /mute.
 
-    Цель: ответ на сообщение, либо первым аргументом — числовой id / @ник /
-    text_mention. Дальше — необязательные срок и причина.
-    Вернёт uid=None если цель не распознана; uid=0 (спец-код) если @ник ещё
-    не встречался боту (чтобы отличить «не понял» от «не знаю такого ника»).
+    Цель: ответ на сообщение, либо первым аргументом — числовой id / @ник / text_mention / t.me-ссылка.
     """
     r = message.reply_to_message
     parts = (message.text or "").split()
@@ -3254,17 +3289,110 @@ def _target_dur_reason(message: Message):
     if mid is not None:
         secs, reason = _split_dur_reason(parts[1:])   # entity сам не даёт токена — весь хвост
         return mid, secs, reason
-    if len(parts) > 1 and _is_target_token(parts[1]):
-        uid = _resolve_target_token(parts[1])
-        if uid is None:                               # @ник, которого бот не видел
-            return 0, None, ""
-        secs, reason = _split_dur_reason(parts[2:])
-        return uid, secs, reason
+    if len(parts) > 1:
+        tok = _clean_target_token(parts[1])
+        if _is_target_token(tok):
+            uid = _resolve_target_token(tok)
+            if uid is None:                               # @ник, которого бот не видел
+                return 0, None, ""
+            secs, reason = _split_dur_reason(parts[2:])
+            return uid, secs, reason
     return None, None, ""
 
 
-_UNKNOWN_UNAME = ("🤷 Не знаю такого @ника — бот его ещё не видел в этом чате. "
-                  "Ответь командой на его сообщение или укажи числовой id.")
+def _extract_target_token(message: Message) -> str:
+    """Вытащить строковый токен цели из текста команды (напр. '@ASS_ILAS' или 't.me/ASS_ILAS')."""
+    parts = (message.text or "").split()
+    if len(parts) > 1:
+        tok = _clean_target_token(parts[1])
+        if tok.startswith("@") or tok.isdigit():
+            return tok
+    return ""
+
+
+async def _async_resolve_target(message: Message, uid: int | None) -> int | None:
+    """Глубокий поиск цели, если синхронный кэш не нашёл ник (uid == 0).
+
+    Проверяет:
+    1. Персистентное хранилище (storage.py data.json)
+    2. Администраторов чата через Bot API (get_chat_administrators)
+    3. Всех участников группы через Telethon юзербота (iter_participants)
+    4. Прямой get_chat через Bot API (если юзер когда-либо открывал ЛС бота)
+    """
+    if uid != 0:
+        return uid
+    token = _extract_target_token(message)
+    if not token or not token.startswith("@"):
+        return 0
+    clean = token.lstrip("@").strip().lower()
+
+    # 1. Персистентное хранилище
+    try:
+        sid = storage.resolve_username(clean)
+        if sid:
+            uname_cache[clean] = sid
+            uid_name_cache[sid] = clean
+            return sid
+    except Exception:
+        pass
+
+    # 2. Список администраторов чата
+    chat = message.chat
+    if chat and chat.type in ("group", "supergroup"):
+        try:
+            admins = await bot.get_chat_administrators(chat.id)
+            for a in admins:
+                if a.user:
+                    uname_cache_add(a.user)
+                    if getattr(a.user, "username", None) and a.user.username.lower() == clean:
+                        return a.user.id
+        except Exception as e:
+            log.debug("get_chat_administrators lookup error: %s", e)
+
+    # 3. Telethon юзербот (если авторизован — видит ВСЕХ участников группы, даже молчавших)
+    try:
+        import userbot
+        if userbot.available() and await userbot.session_authorized_async():
+            ub_uid = await userbot.resolve_chat_username(chat.id, clean)
+            if ub_uid:
+                uname_cache[clean] = ub_uid
+                uid_name_cache[ub_uid] = clean
+                storage.save_username(clean, ub_uid)
+                return ub_uid
+    except Exception as e:
+        log.debug("userbot participant lookup error: %s", e)
+
+    # 4. Прямой get_chat Bot API (если юзер писал боту в ЛС или это канал/бот)
+    try:
+        c = await bot.get_chat(f"@{clean}")
+        if c and c.id:
+            uname_cache[clean] = c.id
+            uid_name_cache[c.id] = clean
+            storage.save_username(clean, c.id)
+            return c.id
+    except Exception:
+        pass
+
+    return 0
+
+
+async def _resolve_target_id(message: Message) -> int | None:
+    """Синхронный поиск цели + асинхронный фоллбэк, если ник неизвестен (uid == 0)."""
+    uid = _target_id(message)
+    if uid == 0:
+        return await _async_resolve_target(message, uid)
+    return uid
+
+
+async def _resolve_target_dur_reason(message: Message) -> tuple[int | None, int | None, str]:
+    """Синхронный поиск цели + асинхронный фоллбэк для /ban, /mute, /warn."""
+    uid, secs, reason = _target_dur_reason(message)
+    if uid == 0:
+        resolved = await _async_resolve_target(message, uid)
+        return resolved, secs, reason
+    return uid, secs, reason
+
+
 _NO_TARGET = ("Ответь командой на пользователя или укажи id/@ник "
               "(бот должен был видеть его сообщения).")
 
@@ -3278,7 +3406,19 @@ async def _need_target(message: Message, uid, hint: str = _NO_TARGET) -> bool:
         await message.answer(hint)
         return True
     if uid == 0:
-        await message.answer(_UNKNOWN_UNAME)
+        token = _extract_target_token(message)
+        uname_display = f"@{esc(token.lstrip('@'))}" if token else "этого пользователя"
+        text = (
+            f"🤷 Не знаю пользователя {uname_display}.\n\n"
+            f"📌 <b>Почему:</b> Telegram Bot API не передаёт ботам список молчащих участников чата. "
+            f"Бот узнаёт пользователя, когда тот пишет сообщение или входит в чат.\n\n"
+            f"👉 <b>Как применить команду прямо сейчас:</b>\n"
+            f"1. <b>Ответь командой</b> на любое сообщение этого участника в чате.\n"
+            f"2. Либо укажи его <b>числовой ID</b> (напр. <code>/ban 123456789</code>).\n"
+            f"3. Либо перешли любое его сообщение в чат и ответь на него.\n"
+            f"4. Либо авторизуй юзербота в <b>/admin → Юзербот</b> (он видит всех молчащих участников группы)."
+        )
+        await message.answer(text)
         return True
     return False
 
@@ -3596,7 +3736,7 @@ async def cmd_checkdc(message: Message):
     """Показать датацентр пользователя (ответом или по id)."""
     if not await _can(message, "requests"):
         return
-    uid = _target_id(message)
+    uid = await _resolve_target_id(message)
     if await _need_target(message, uid, "Ответь /checkdc на пользователя или укажи id/@ник."):
         return
     dc = await user_dc(uid)
@@ -3736,8 +3876,8 @@ async def cmd_checkin(message: Message):
     reply = message.reply_to_message
     target = reply.from_user if reply else None
     if target is None:
-        uid = _target_id(message)
-        if uid is not None:
+        uid = await _resolve_target_id(message)
+        if uid is not None and uid > 0:
             try:
                 m = await bot.get_chat_member(message.chat.id, uid)
                 target = m.user
@@ -3778,7 +3918,7 @@ async def cmd_checkin(message: Message):
 async def cmd_ban(message: Message):
     if not await _can(message, "ban"):
         return
-    uid, seconds, reason = _target_dur_reason(message)
+    uid, seconds, reason = await _resolve_target_dur_reason(message)
     if await _need_target(message, uid,
                           "Ответь командой на пользователя или укажи id/@ник. "
                           "Можно срок и причину: /ban 3 дня спам."):
@@ -3795,7 +3935,7 @@ async def cmd_ban(message: Message):
 async def cmd_unban(message: Message):
     if not await _can(message, "ban"):
         return
-    uid = _target_id(message)
+    uid = await _resolve_target_id(message)
     if await _need_target(message, uid,
                           "Ответь командой на пользователя или укажи его id/@ник."):
         return
@@ -3812,7 +3952,7 @@ async def cmd_unban(message: Message):
 async def cmd_mute(message: Message):
     if not await _can(message, "mute"):
         return
-    uid, seconds, reason = _target_dur_reason(message)
+    uid, seconds, reason = await _resolve_target_dur_reason(message)
     if await _need_target(message, uid,
                           "Ответь командой на пользователя или укажи id/@ник. "
                           "Можно срок и причину: /mute 3 часа флуд."):
@@ -3862,7 +4002,7 @@ async def cmd_del(message: Message):
 async def cmd_unmute(message: Message):
     if not await _can(message, "mute"):
         return
-    uid = _target_id(message)
+    uid = await _resolve_target_id(message)
     if await _need_target(message, uid,
                           "Ответь командой на пользователя или укажи id/@ник."):
         return
@@ -3881,7 +4021,7 @@ async def cmd_unmute(message: Message):
 async def cmd_warn(message: Message):
     if not await _can(message, "warn"):
         return
-    uid = _target_id(message)
+    uid = await _resolve_target_id(message)
     if await _need_target(message, uid,
                           "Ответь командой на сообщение нарушителя или укажи id/@ник."):
         return
@@ -3907,7 +4047,7 @@ async def cmd_warn(message: Message):
 async def cmd_unwarn(message: Message):
     if not await _can(message, "warn"):
         return
-    uid = _target_id(message)
+    uid = await _resolve_target_id(message)
     if await _need_target(message, uid,
                           "Ответь командой на пользователя или укажи id/@ник."):
         return
@@ -3921,7 +4061,7 @@ async def cmd_unwarn(message: Message):
 async def cmd_whitelist(message: Message):
     if not await _staff_only(message, "words"):
         return
-    uid = _target_id(message)
+    uid = await _resolve_target_id(message)
     if await _need_target(message, uid,
                           "Ответь командой на пользователя или укажи id/@ник, чтобы разрешить ему ссылки."):
         return
@@ -4032,7 +4172,7 @@ async def cmd_words(message: Message):
 async def cmd_trust(message: Message):
     if not await _staff_only(message, "manage"):
         return
-    uid = _target_id(message)
+    uid = await _resolve_target_id(message)
     if await _need_target(message, uid,
                           "Ответь /trust на пользователя или укажи id/@ник (он будет мимо всех проверок)."):
         return
@@ -4057,10 +4197,14 @@ async def cmd_setrole(message: Message):
     elif mid is not None:                              # tap-упоминание: роль — первый аргумент
         uid, raw = mid, (parts[1] if len(parts) > 1 else "")
     elif len(parts) > 2 and _is_target_token(parts[1]):  # «/setrole <id|@ник> роль»
-        uid, raw = _resolve_target_token(parts[1]), parts[2]
-        if uid is None:
+        tok = _clean_target_token(parts[1])
+        uid = _resolve_target_token(tok)
+        if uid is None or uid == 0:
+            uid = await _async_resolve_target(message, 0)
+        if not uid:
             await message.answer(_UNKNOWN_UNAME)
             return
+        raw = parts[2]
     else:
         await message.answer("Использование: /setrole роль (ответом) или /setrole id роль.\n"
                              f"Роли: {_roles_hint()}")
@@ -4079,7 +4223,7 @@ async def cmd_setrole(message: Message):
 async def cmd_delrole(message: Message):
     if not (message.from_user and storage.is_owner(message.from_user.id)):
         return
-    uid = _target_id(message)
+    uid = await _resolve_target_id(message)
     if await _need_target(message, uid, "Ответь /delrole на пользователя или укажи id/@ник."):
         return
     storage.set_role(uid, None)
@@ -4468,7 +4612,7 @@ async def cmd_rep(message: Message):
     if not flag("REP_ENABLED"):
         return
     chat_id = message.chat.id
-    uid = _target_id(message)
+    uid = await _resolve_target_id(message)
     if not uid:
         uid = message.from_user.id if message.from_user else None
     if not uid:
@@ -4709,7 +4853,7 @@ async def cmd_log(message: Message):
 async def cmd_info(message: Message):
     if not await _staff_only(message):
         return
-    uid = _target_id(message)
+    uid = await _resolve_target_id(message)
     if await _need_target(message, uid, "Ответь /info на пользователя или укажи id/@ник."):
         return
     chat_id = message.chat.id
@@ -4780,6 +4924,8 @@ async def cmd_award(message: Message):
     if not await _staff_only(message, "manage"):
         return
     uid, text = _target_rest(message)
+    if uid == 0:
+        uid = await _async_resolve_target(message, uid)
     if await _need_target(message, uid,
                           "Ответь /award на сообщение или укажи id/@ник, "
                           "а после — текст награды."):
@@ -4807,6 +4953,8 @@ async def cmd_unward(message: Message):
     if not await _staff_only(message, "manage"):
         return
     uid, arg = _target_rest(message)
+    if uid == 0:
+        uid = await _async_resolve_target(message, uid)
     if await _need_target(message, uid,
                           "Ответь /unward на сообщение или укажи id/@ник."):
         return
@@ -4847,7 +4995,7 @@ async def cmd_history(message: Message):
     """История наказаний/действий по пользователю (из журнала). /history (ответом|id|@ник)."""
     if not await _staff_only(message):
         return
-    uid = _target_id(message)
+    uid = await _resolve_target_id(message)
     if await _need_target(message, uid, "Ответь /history на пользователя или укажи id/@ник."):
         return
     items = storage.get_audit_for(uid, 20)
@@ -5239,7 +5387,10 @@ async def duel_cmd(message: Message):
             rest = " ".join(rest.split())
 
     if uid == 0:
-        await message.reply("Этот пользователь ещё не писал в чате при боте (не могу определить его ID).")
+        uid = await _async_resolve_target(message, uid)
+
+    if uid == 0:
+        await message.reply("Этот пользователь ещё не писал в чате при боте (не могу определить его ID). Ответь командой на его сообщение.")
         return
     if uid == u1:
         await message.reply("Нельзя вызвать на дуэль самого себя! 😅")
@@ -5614,12 +5765,45 @@ def _holdem_board_text(game: dict) -> str:
     return "\n".join(lines)
 
 
-def _holdem_lobby_kb() -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup(inline_keyboard=[[ 
+def _holdem_lobby_kb(chat_id: int | None = None) -> InlineKeyboardMarkup:
+    rows = [[ 
         InlineKeyboardButton(text="🪑 Войти", callback_data="th:join"),
         InlineKeyboardButton(text="▶️ Начать", callback_data="th:start"),
         InlineKeyboardButton(text="❌ Отмена", callback_data="th:cancel"),
-    ]])
+    ]]
+    app_url = getattr(config, "WEBAPP_URL", "")
+    if app_url and chat_id:
+        full_url = f"{app_url.rstrip('/')}/?room=chat_{chat_id}"
+        rows.append([InlineKeyboardButton(text="🂡 Играть через WebApp", web_app=WebAppInfo(url=full_url))])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def _holdem_playing_kb(chat_id: int) -> InlineKeyboardMarkup:
+    rows = []
+    app_url = getattr(config, "WEBAPP_URL", "")
+    if app_url and chat_id:
+        full_url = f"{app_url.rstrip('/')}/?room=chat_{chat_id}"
+        rows.append([InlineKeyboardButton(text="🂡 Открыть 3D-стол в WebApp", web_app=WebAppInfo(url=full_url))])
+    rows.append([InlineKeyboardButton(text="❓ Комбинации", callback_data=f"thm:{chat_id}:0:help")])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+async def _on_webapp_action(chat_id: int, mtype: str, uid: int):
+    """Синхронизация действий из WebApp прямо в группу Telegram."""
+    game = holdem_games.get(chat_id)
+    if not game:
+        return
+    if mtype == "join":
+        holdem_player_chat[uid] = chat_id
+        await _holdem_refresh(chat_id)
+    elif mtype == "start":
+        await _holdem_announce_hole_cards(chat_id)
+        await _holdem_refresh(chat_id)
+        await _holdem_send_turn_prompt(chat_id)
+    elif mtype == "action":
+        await _holdem_cancel_timer(chat_id)
+        holdem_custom_wait.pop(uid, None)
+        await _holdem_after_action(chat_id)
 
 
 def _holdem_turn_kb(chat_id: int, uid: int, opts: dict) -> InlineKeyboardMarkup:
@@ -5663,16 +5847,23 @@ async def _holdem_dm(uid: int, text: str, kb: InlineKeyboardMarkup | None = None
         return False
 
 
+
 async def _holdem_refresh(chat_id: int):
     game = holdem_games.get(chat_id)
     if not game:
         return
     text = _holdem_board_text(game)
-    kb = _holdem_lobby_kb() if game["table"].get("phase") == "lobby" else None
+    is_lobby = (game["table"].get("phase") == "lobby")
+    kb = _holdem_lobby_kb(chat_id) if is_lobby else _holdem_playing_kb(chat_id)
     try:
         await bot.edit_message_text(text=text, chat_id=chat_id, message_id=game["msg_id"], reply_markup=kb)
     except TelegramBadRequest as e:
         log.warning("holdem refresh failed chat=%s: %s", chat_id, e)
+    try:
+        from webapp import server as webapp_server
+        webapp_server.notify_chat_update(chat_id)
+    except Exception:
+        pass
 
 
 async def _holdem_cancel_timer(chat_id: int):
@@ -5820,6 +6011,11 @@ async def _holdem_finish_if_needed(chat_id: int):
         if holdem_player_chat.get(uid) == chat_id:
             holdem_player_chat.pop(uid, None)
             holdem_custom_wait.pop(uid, None)
+    try:
+        from webapp import server as webapp_server
+        webapp_server.unbind_chat_table(chat_id)
+    except Exception:
+        pass
 
 
 @dp.message(Command("holdem", "poker"), F.chat.type.in_({"group", "supergroup"}))
@@ -5831,10 +6027,19 @@ async def holdem_open(message: Message):
     if chat_id in mafia_games or chat_id in dice_games:
         await message.reply("Сейчас в чате уже идёт другая игра. Сначала заверши её.")
         return
-    game = {"table": holdem.new_table(message.from_user.id), "msg_id": 0}
+    table = holdem.new_table(message.from_user.id)
+    table["chat_id"] = chat_id
+    table["chat_title"] = message.chat.title or f"Чат {chat_id}"
+    game = {"table": table, "msg_id": 0}
     holdem_games[chat_id] = game
-    sent = await message.answer(_holdem_board_text(game), reply_markup=_holdem_lobby_kb())
+    try:
+        from webapp import server as webapp_server
+        webapp_server.bind_chat_table(chat_id, game["table"], _on_webapp_action)
+    except Exception as e:
+        log.warning("Не удалось связать стол с webapp: %s", e)
+    sent = await message.answer(_holdem_board_text(game), reply_markup=_holdem_lobby_kb(chat_id))
     game["msg_id"] = sent.message_id
+
 
 
 @dp.callback_query(F.data.startswith("th:"))
@@ -5869,6 +6074,11 @@ async def holdem_lobby_cb(cb: CallbackQuery):
             if holdem_player_chat.get(uid2) == chat_id:
                 holdem_player_chat.pop(uid2, None)
                 holdem_custom_wait.pop(uid2, None)
+        try:
+            from webapp import server as webapp_server
+            webapp_server.unbind_chat_table(chat_id)
+        except Exception:
+            pass
         who = mention(cb.from_user)
         await cb.answer("Стол закрыт.")
         try:
@@ -6188,6 +6398,11 @@ async def holdem_stop_cmd(message: Message):
         if holdem_player_chat.get(uid) == chat_id:
             holdem_player_chat.pop(uid, None)
             holdem_custom_wait.pop(uid, None)
+    try:
+        from webapp import server as webapp_server
+        webapp_server.unbind_chat_table(chat_id)
+    except Exception:
+        pass
     who = mention(message.from_user) if message.from_user else "администратором"
     await message.reply(f"🛑 Стол Texas Hold'em остановлен: {who}.")
 
@@ -6198,8 +6413,11 @@ async def holdem_pokerapp_cmd(message: Message):
     url = getattr(config, "WEBAPP_URL", "")
     room = "lobby"
     parts = (message.text or "").strip().split()
+    is_group = message.chat.type in ("group", "supergroup")
     if len(parts) > 1:
         room = parts[1].strip()
+    elif is_group and message.chat.id in holdem_games:
+        room = f"chat_{message.chat.id}"
 
     if not url:
         await message.reply(
@@ -6214,12 +6432,14 @@ async def holdem_pokerapp_cmd(message: Message):
         return
 
     full_url = f"{url.rstrip('/')}/?room={room}"
+    btn_text = "🂡 Войти за стол чата в WebApp" if room.startswith("chat_") else "🂡 Открыть покер-стол"
     kb = InlineKeyboardMarkup(inline_keyboard=[[
-        InlineKeyboardButton(text="🂡 Открыть покер-стол", web_app=WebAppInfo(url=full_url))
+        InlineKeyboardButton(text=btn_text, web_app=WebAppInfo(url=full_url))
     ]])
+    room_desc = f"Стол этой группы (<code>{esc(room)}</code>)" if room.startswith("chat_") else f"Комната: <b>{esc(room)}</b>"
     await message.reply(
         f"🂡 <b>Покерный Mini App (Texas Hold'em)</b>\n\n"
-        f"Комната: <b>{esc(room)}</b>\n"
+        f"{room_desc}\n"
         f"Нажмите кнопку ниже, чтобы войти в игру:",
         reply_markup=kb,
     )
@@ -8365,6 +8585,15 @@ def acquire_single_instance_lock() -> None:
 async def main():
     acquire_single_instance_lock()  # ровно один процесс на токен -> нет TelegramConflictError
     storage.load()
+    try:
+        stored_names = storage.get_all_usernames()
+        for u_name, u_id in stored_names.items():
+            uname_cache[u_name] = u_id
+            uid_name_cache[u_id] = u_name
+        if stored_names:
+            log.info("Загружено сохранённых @ников: %d", len(stored_names))
+    except Exception as e:
+        log.warning("Не удалось загрузить @ники из хранилища: %s", e)
     stats.update(storage.load_stats())  # восстановить счётчики
     load_reference_hashes()
     load_nsfw_detector()

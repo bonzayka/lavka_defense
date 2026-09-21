@@ -51,8 +51,9 @@ from fastapi.staticfiles import StaticFiles  # noqa: E402
 STATIC_DIR = Path(__file__).resolve().parent / "static"
 
 # Разрешить «dev»-вход без Telegram (для локальной отладки в браузере).
-# На проде держи 0 — иначе кто угодно зайдёт под любым uid.
-WEBAPP_DEV = os.environ.get("WEBAPP_DEV", "0") not in ("0", "false", "False", "")
+WEBAPP_DEV = getattr(config, "WEBAPP_DEV", None)
+if WEBAPP_DEV is None:
+    WEBAPP_DEV = os.environ.get("WEBAPP_DEV", "0") not in ("0", "false", "False", "")
 # Максимальный возраст initData (секунды) — защита от переигрывания старой ссылки.
 INITDATA_MAX_AGE = int(os.environ.get("WEBAPP_INITDATA_MAX_AGE", "86400"))
 # Пауза между раздачами (сек), как в групповом боте.
@@ -104,11 +105,15 @@ def verify_init_data(init_data: str, bot_token: str, max_age: int = INITDATA_MAX
 
 # =============================== Комнаты/столы ==============================
 class Room:
-    def __init__(self, code: str, host_id: int):
+    def __init__(self, code: str, host_id: int, table: dict | None = None,
+                 on_action = None, chat_id: int | None = None):
         self.code = code
-        self.table = holdem.new_table(host_id=host_id)
+        self.table = table if table is not None else holdem.new_table(host_id=host_id)
+        self.table["code"] = code
         self.conns: dict[WebSocket, int] = {}   # соединение -> uid
         self.lock = asyncio.Lock()
+        self.on_action = on_action
+        self.chat_id = chat_id
 
     def add_conn(self, ws: WebSocket, uid: int):
         self.conns[ws] = uid
@@ -123,9 +128,50 @@ rooms: dict[str, Room] = {}
 def get_room(code: str, host_id: int) -> Room:
     room = rooms.get(code)
     if room is None:
+        if code.startswith("chat_"):
+            try:
+                cid = int(code[5:])
+                import bot
+                game = getattr(bot, "holdem_games", {}).get(cid)
+                if game and "table" in game:
+                    return bind_chat_table(cid, game["table"], getattr(bot, "_on_webapp_action", None))
+            except Exception:
+                pass
         room = Room(code, host_id)
         rooms[code] = room
     return room
+
+
+def bind_chat_table(chat_id: int, table: dict, on_action=None) -> Room:
+    """Привязать живой стол из группы Telegram к веб-комнате chat_{chat_id}."""
+    code = f"chat_{chat_id}"
+    table["code"] = code
+    room = rooms.get(code)
+    if room is None:
+        room = Room(code, host_id=table.get("host", 0), table=table, on_action=on_action, chat_id=chat_id)
+        rooms[code] = room
+    else:
+        room.table = table
+        room.on_action = on_action
+        room.chat_id = chat_id
+    return room
+
+
+def unbind_chat_table(chat_id: int):
+    """Отвязать стол при завершении игры в группе."""
+    code = f"chat_{chat_id}"
+    rooms.pop(code, None)
+
+
+def notify_chat_update(chat_id: int):
+    """Синхронизировать обновление из Telegram чата во все открытые WebApp стола."""
+    code = f"chat_{chat_id}"
+    room = rooms.get(code)
+    if room and room.conns:
+        try:
+            asyncio.create_task(broadcast(room))
+        except Exception:
+            pass
 
 
 # ============================ Сериализация вида =============================
@@ -159,14 +205,31 @@ def serialize(table: dict, viewer_uid: int) -> dict:
 
     me = players.get(viewer_uid)
     opts = holdem.allowed_actions(table, viewer_uid) if me else {}
+    combo_name = ""
+    if me and me.get("hole"):
+        try:
+            combo_name = holdem.eval_player_combination(me.get("hole", []), table.get("board", []))
+        except Exception:
+            pass
+
+    dealer_idx = table.get("dealer_index", -1)
+    seats_list = table.get("seats", [])
+    dealer_uid = seats_list[dealer_idx] if 0 <= dealer_idx < len(seats_list) else None
+
     return {
         "type": "state",
         "code": table.get("code", ""),
+        "chat_title": table.get("chat_title", ""),
+        "chat_id": table.get("chat_id"),
         "phase": table.get("phase"),
         "street": holdem.street_name(table.get("street")),
         "board": _card_list(table.get("board")),
         "pot": table.get("pot", 0),
         "hand_no": table.get("hand_no", 0),
+        "dealer_uid": dealer_uid,
+        "small_blind": table.get("small_blind", holdem.SMALL_BLIND),
+        "big_blind": table.get("big_blind", holdem.BIG_BLIND),
+        "min_raise": table.get("min_raise", holdem.BIG_BLIND),
         "current_turn": table.get("current_turn"),
         "current_bet": table.get("current_bet", 0),
         "last_event": table.get("last_event", ""),
@@ -175,6 +238,7 @@ def serialize(table: dict, viewer_uid: int) -> dict:
         "you": {
             "uid": viewer_uid,
             "seated": bool(me),
+            "combo": combo_name,
             "to_call": holdem.player_to_call(table, viewer_uid) if me else 0,
             "options": opts,
         },
@@ -210,6 +274,22 @@ async def maybe_next_hand(room: Room):
 @app.get("/health")
 async def health():
     return {"ok": True, "rooms": len(rooms)}
+
+
+@app.get("/api/rooms")
+async def list_rooms():
+    active = []
+    for code, room in list(rooms.items()):
+        tbl = room.table
+        active.append({
+            "code": code,
+            "chat_title": tbl.get("chat_title") or ("Групповой стол" if code.startswith("chat_") else "Публичный стол"),
+            "phase": tbl.get("phase", "lobby"),
+            "players_count": len(tbl.get("seats", [])),
+            "pot": tbl.get("pot", 0),
+            "hand_no": tbl.get("hand_no", 0),
+        })
+    return {"ok": True, "rooms": active}
 
 
 @app.get("/")
@@ -281,6 +361,16 @@ async def ws_endpoint(ws: WebSocket):
             await broadcast(room)
             if follow_up:
                 asyncio.create_task(maybe_next_hand(room))
+
+            # Если комната привязана к чату Telegram — синхронизируем изменения с группой!
+            if room and room.on_action and room.chat_id:
+                try:
+                    res = room.on_action(room.chat_id, mtype, uid)
+                    if asyncio.iscoroutine(res):
+                        asyncio.create_task(res)
+                except Exception:
+                    pass
+
 
     except WebSocketDisconnect:
         pass

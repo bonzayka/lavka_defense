@@ -187,6 +187,33 @@ async def scan_deleted(chat, *, kick: bool = True, limit: int | None = None) -> 
     return res
 
 
+async def resolve_chat_username(chat, username: str) -> int | None:
+    """Найти user_id участника по @username среди участников чата через Telethon."""
+    if not available():
+        return None
+    client = await _client()
+    try:
+        await client.connect()
+        if not await client.is_user_authorized():
+            return None
+        clean = username.lstrip("@").strip().lower()
+        entity = await client.get_entity(chat)
+        async for user in client.iter_participants(entity, search=clean):
+            uname = getattr(user, "username", None)
+            if uname and uname.lower() == clean:
+                return user.id
+            if str(user.id) == clean:
+                return user.id
+    except Exception as e:                        # noqa: BLE001
+        log.warning("userbot resolve_chat_username error: %s", e)
+    finally:
+        try:
+            await client.disconnect()
+        except Exception:
+            pass
+    return None
+
+
 async def _login():
     """Интерактивный первый вход — создаёт .session один раз."""
     if not _HAS_TELETHON:

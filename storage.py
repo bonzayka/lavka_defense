@@ -44,6 +44,8 @@ _DEFAULT = {
     "rep_quota": {},          # "chat:giver" -> {"day":"YYYY-MM-DD","count":N,"targets":[...]} — суточная квота выдач (сброс в 00:00 МСК)
     "awards": {},             # str(user_id) -> [{"text","by","ts"}] — награды (/наградить), текст свободный
     "flood_penalties": {},    # "chat:user" -> iso_timestamp_until — штраф за флуд (автоудаление сообщений)
+    "usernames": {},          # username.lower() -> user_id (для таргета по @нику)
+    "user_to_uname": {},      # str(user_id) -> username.lower()
 }
 
 AUDIT_LIMIT = 200
@@ -735,3 +737,45 @@ def clear_flood_penalty(chat_id: int, user_id: int) -> None:
     if fp and _key(chat_id, user_id) in fp:
         fp.pop(_key(chat_id, user_id), None)
         save()
+
+
+# --------------------------------------------------- база @никнеймов
+def save_username(username: str, user_id: int, full_name: str = "") -> None:
+    """Запомнить связку username <-> user_id в персистентное хранилище (переживает перезапуск)."""
+    if not username or not user_id:
+        return
+    uname = str(username).lstrip("@").strip().lower()
+    if not uname:
+        return
+    unames = _data.setdefault("usernames", {})
+    u2n = _data.setdefault("user_to_uname", {})
+    uid_str = str(user_id)
+    old_uname = u2n.get(uid_str)
+    changed = False
+    if old_uname and old_uname != uname:
+        unames.pop(old_uname, None)
+        changed = True
+    if unames.get(uname) != int(user_id) or u2n.get(uid_str) != uname:
+        unames[uname] = int(user_id)
+        u2n[uid_str] = uname
+        changed = True
+    if changed:
+        save()
+
+
+def resolve_username(username: str) -> int | None:
+    """Найти user_id по @никнейму (без учёта регистра)."""
+    if not username:
+        return None
+    uname = str(username).lstrip("@").strip().lower()
+    return _data.setdefault("usernames", {}).get(uname)
+
+
+def get_user_username(user_id: int) -> str | None:
+    """Найти последний известный @никнейм пользователя по его user_id."""
+    return _data.setdefault("user_to_uname", {}).get(str(user_id))
+
+
+def get_all_usernames() -> dict[str, int]:
+    """Все известные боту @никнеймы: {username.lower(): user_id}."""
+    return dict(_data.setdefault("usernames", {}))
