@@ -48,11 +48,35 @@ _DEFAULT = {
 
 AUDIT_LIMIT = 200
 
+import copy
+
 def _fresh() -> dict:
-    return {k: json.loads(json.dumps(v)) for k, v in _DEFAULT.items()}
+    return copy.deepcopy(_DEFAULT)
 
 
 _data: dict = _fresh()  # безопасно ещё до load()
+
+# Быстрые in-memory множества для O(1) проверок вместо линейного поиска по спискам
+_link_whitelist_set: set[str] = set()
+_trusted_set: set[str] = set()
+_owners_set: set[int] = set()
+_stopwords_set: set[str] = set()
+_hidden_words_set: set[str] = set()
+_sticker_packs_set: set[str] = set()
+
+
+def _rebuild_indices() -> None:
+    global _link_whitelist_set, _trusted_set, _owners_set
+    global _stopwords_set, _hidden_words_set, _sticker_packs_set
+    _link_whitelist_set = set(_data.get("link_whitelist", []))
+    _trusted_set = set(_data.get("trusted", []))
+    _owners_set = {int(u) for u in _data.get("owners", [])}
+    _stopwords_set = {w.lower() for w in _data.get("stopwords", [])}
+    _hidden_words_set = {w.lower() for w in _data.get("hidden_words", [])}
+    _sticker_packs_set = {(p or "").strip().lower() for p in _data.get("sticker_packs", []) if p}
+
+
+_rebuild_indices()
 
 
 def _key(chat_id: int, user_id: int) -> str:
@@ -67,7 +91,8 @@ def load() -> None:
     except (FileNotFoundError, json.JSONDecodeError):
         _data = {}
     for k, v in _DEFAULT.items():
-        _data.setdefault(k, json.loads(json.dumps(v)))
+        _data.setdefault(k, copy.deepcopy(v))
+    _rebuild_indices()
 
 
 def save() -> None:
@@ -86,11 +111,14 @@ def stopwords() -> list[str]:
 
 def del_stopword(word: str) -> bool:
     w = word.strip().lower()
-    if w in _data["stopwords"]:
-        _data["stopwords"].remove(w)
+    if w in _stopwords_set or w in _data["stopwords"]:
+        if w in _data["stopwords"]:
+            _data["stopwords"].remove(w)
+        _stopwords_set.discard(w)
         _data.setdefault("hidden_words", [])
         if w in _data["hidden_words"]:
             _data["hidden_words"].remove(w)
+        _hidden_words_set.discard(w)
         save()
         return True
     return False
@@ -103,21 +131,24 @@ def hidden_words() -> list[str]:
 
 
 def is_hidden_word(word: str) -> bool:
-    return (word or "").strip().lower() in _data.setdefault("hidden_words", [])
+    return (word or "").strip().lower() in _hidden_words_set
 
 
 def set_hidden_word(word: str, hidden: bool) -> bool:
     """Пометить стоп-слово скрытым/видимым. True — если состояние изменилось."""
     w = (word or "").strip().lower()
-    if not w or w not in _data["stopwords"]:
+    if not w or w not in _stopwords_set:
         return False
     h = _data.setdefault("hidden_words", [])
-    if hidden and w not in h:
+    if hidden and w not in _hidden_words_set:
         h.append(w)
+        _hidden_words_set.add(w)
         save()
         return True
-    if not hidden and w in h:
-        h.remove(w)
+    if not hidden and w in _hidden_words_set:
+        if w in h:
+            h.remove(w)
+        _hidden_words_set.discard(w)
         save()
         return True
     return False
@@ -125,11 +156,13 @@ def set_hidden_word(word: str, hidden: bool) -> bool:
 
 def add_stopword(word: str, hidden: bool = False) -> bool:
     w = word.strip().lower()
-    if not w or w in _data["stopwords"]:
+    if not w or w in _stopwords_set:
         return False
     _data["stopwords"].append(w)
+    _stopwords_set.add(w)
     if hidden:
         _data.setdefault("hidden_words", []).append(w)
+        _hidden_words_set.add(w)
     save()
     return True
 
@@ -156,22 +189,25 @@ def reset_warns(chat_id: int, user_id: int) -> None:
 # --- белый список ссылок ---
 
 def link_allowed(chat_id: int, user_id: int) -> bool:
-    return _key(chat_id, user_id) in _data["link_whitelist"]
+    return _key(chat_id, user_id) in _link_whitelist_set
 
 
 def allow_link(chat_id: int, user_id: int) -> bool:
     k = _key(chat_id, user_id)
-    if k in _data["link_whitelist"]:
+    if k in _link_whitelist_set:
         return False
     _data["link_whitelist"].append(k)
+    _link_whitelist_set.add(k)
     save()
     return True
 
 
 def disallow_link(chat_id: int, user_id: int) -> bool:
     k = _key(chat_id, user_id)
-    if k in _data["link_whitelist"]:
-        _data["link_whitelist"].remove(k)
+    if k in _link_whitelist_set or k in _data["link_whitelist"]:
+        if k in _data["link_whitelist"]:
+            _data["link_whitelist"].remove(k)
+        _link_whitelist_set.discard(k)
         save()
         return True
     return False
@@ -180,17 +216,20 @@ def disallow_link(chat_id: int, user_id: int) -> bool:
 # --- доверенные пользователи (мимо всех проверок) ---
 
 def is_trusted(chat_id: int, user_id: int) -> bool:
-    return _key(chat_id, user_id) in _data["trusted"]
+    return _key(chat_id, user_id) in _trusted_set
 
 
 def toggle_trusted(chat_id: int, user_id: int) -> bool:
     """Вернёт True если добавили, False если убрали."""
     k = _key(chat_id, user_id)
-    if k in _data["trusted"]:
-        _data["trusted"].remove(k)
+    if k in _trusted_set or k in _data["trusted"]:
+        if k in _data["trusted"]:
+            _data["trusted"].remove(k)
+        _trusted_set.discard(k)
         save()
         return False
     _data["trusted"].append(k)
+    _trusted_set.add(k)
     save()
     return True
 
@@ -370,16 +409,17 @@ def owners_all() -> list:
 
 def is_owner(user_id: int) -> bool:
     uid = int(user_id)
-    return uid in root_owners() or uid in _data.setdefault("owners", [])
+    return uid in root_owners() or uid in _owners_set
 
 
 def add_owner(user_id: int) -> bool:
     """True — добавили, False — уже был владельцем."""
     uid = int(user_id)
     o = _data.setdefault("owners", [])
-    if uid in root_owners() or uid in o:
+    if uid in root_owners() or uid in _owners_set or uid in o:
         return False
     o.append(uid)
+    _owners_set.add(uid)
     save()
     return True
 
@@ -390,8 +430,10 @@ def remove_owner(user_id: int) -> bool:
     if uid in root_owners():
         return False
     o = _data.setdefault("owners", [])
-    if uid in o:
-        o.remove(uid)
+    if uid in _owners_set or uid in o:
+        if uid in o:
+            o.remove(uid)
+        _owners_set.discard(uid)
         save()
         return True
     return False
@@ -441,7 +483,7 @@ def sticker_packs() -> list:
 def is_pack_allowed(set_name: str) -> bool:
     """True — стикерпак в белом списке (пропускать без NSFW-проверки)."""
     name = _norm_pack(set_name)
-    return bool(name) and name in _data.setdefault("sticker_packs", [])
+    return bool(name) and name in _sticker_packs_set
 
 
 def allow_pack(set_name: str) -> bool:
@@ -450,9 +492,10 @@ def allow_pack(set_name: str) -> bool:
     if not name:
         return False
     p = _data.setdefault("sticker_packs", [])
-    if name in p:
+    if name in _sticker_packs_set or name in p:
         return False
     p.append(name)
+    _sticker_packs_set.add(name)
     save()
     return True
 
@@ -461,8 +504,10 @@ def disallow_pack(set_name: str) -> bool:
     """True — убрали из белого списка, False — его там не было."""
     name = _norm_pack(set_name)
     p = _data.setdefault("sticker_packs", [])
-    if name in p:
-        p.remove(name)
+    if name in _sticker_packs_set or name in p:
+        if name in p:
+            p.remove(name)
+        _sticker_packs_set.discard(name)
         save()
         return True
     return False

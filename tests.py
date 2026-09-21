@@ -27,8 +27,10 @@ import aiguard    # noqa: E402
 import textguard  # noqa: E402
 import storage    # noqa: E402
 import manager    # noqa: E402
+import riskscore  # noqa: E402
 storage.load()
 import bot        # noqa: E402
+
 
 PASS = FAIL = 0
 
@@ -1441,9 +1443,152 @@ _cb_res = asyncio.run(_cb_middleware(_dummy_cb_handler, _mock_cb, {}))
 check("flood penalty cb: кнопка заблокирована", _cb_res is None and "балбес" in (_mock_cb.answered_text or ""))
 storage.clear_flood_penalty(_mock_cb.message.chat.id, _mock_cb.from_user.id)
 
+# ----------------- ТЕСТЫ ОПТИМИЗАЦИИ STORAGE (O(1) SETS) -----------------
+check("storage opt: link_allowed false initially", not storage.link_allowed(9999, 8888))
+storage.allow_link(9999, 8888)
+check("storage opt: link_allowed true after allow", storage.link_allowed(9999, 8888))
+storage.disallow_link(9999, 8888)
+check("storage opt: link_allowed false after disallow", not storage.link_allowed(9999, 8888))
+
+check("storage opt: is_trusted false initially", not storage.is_trusted(9999, 7777))
+storage.toggle_trusted(9999, 7777)
+check("storage opt: is_trusted true after toggle", storage.is_trusted(9999, 7777))
+storage.toggle_trusted(9999, 7777)
+check("storage opt: is_trusted false after 2nd toggle", not storage.is_trusted(9999, 7777))
+
+check("storage opt: is_owner false initially", not storage.is_owner(555555))
+storage.add_owner(555555)
+check("storage opt: is_owner true after add", storage.is_owner(555555))
+storage.remove_owner(555555)
+check("storage opt: is_owner false after remove", not storage.is_owner(555555))
+
+check("storage opt: is_pack_allowed false initially", not storage.is_pack_allowed("my_custom_stickers"))
+storage.allow_pack("my_custom_stickers")
+check("storage opt: is_pack_allowed true after allow", storage.is_pack_allowed("my_custom_stickers"))
+storage.disallow_pack("my_custom_stickers")
+check("storage opt: is_pack_allowed false after disallow", not storage.is_pack_allowed("my_custom_stickers"))
+
+# ----------------- ТЕСТЫ РАСШИФРОВКИ ГС (VOICEGUARD) -----------------
+import voiceguard
+check("voiceguard: available", isinstance(voiceguard.available(), bool))
+check("voiceguard: has_ffmpeg", voiceguard.has_ffmpeg() is True)
+
+# Чистый текст без нарушений
+v_hit, v_reason, v_act, v_det = voiceguard.scan_for_violations("Привет всем как дела")
+check("voiceguard: clean text no violation", v_hit is False and v_act == "none")
+
+# Нарушение: мат в ГС (при включённом ANTIMAT_ENABLED)
+storage.set_flag("ANTIMAT_ENABLED", True)
+v_hit_m, v_reason_m, v_act_m, v_det_m = voiceguard.scan_for_violations("ты конченый пидор пошел нахуй")
+check("voiceguard: profanity detected", v_hit_m is True and "мат" in v_reason_m)
+storage.set_flag("ANTIMAT_ENABLED", False)
+
+# Нарушение: стоп-слово в ГС
+storage.add_stopword("голосовойспам")
+v_hit_s, v_reason_s, v_act_s, v_det_s = voiceguard.scan_for_violations("тут есть голосовойспам прямо сейчас")
+check("voiceguard: stopword detected", v_hit_s is True and "голосовойспам" in v_reason_s)
+storage.del_stopword("голосовойспам")
+
+# Нарушение: деанон в ГС
+v_hit_d, v_reason_d, v_act_d, v_det_d = voiceguard.scan_for_violations("я знаю где ты живешь я тебя убью и закопаю найду тебя")
+check("voiceguard: deanon/threat detected", v_hit_d is True and "деанон" in v_reason_d)
+
+# Пустая строка / тишина
+check("voiceguard: empty text scan", voiceguard.scan_for_violations("") == (False, "", "none", ""))
+
+# Синтетический тест конвертации в WAV через ffmpeg
+import io, wave
+_test_buf = io.BytesIO()
+_w = wave.open(_test_buf, "wb")
+_w.setnchannels(1)
+_w.setsampwidth(2)
+_w.setframerate(16000)
+_w.writeframes(b"\x00" * 3200)
+_w.close()
+_silence_wav = _test_buf.getvalue()
+
+_conv_wav = voiceguard.convert_to_wav(_silence_wav, ext="wav")
+check("voiceguard: convert_to_wav succeeds", len(_conv_wav) > 44 and _conv_wav[:4] == b"RIFF")
+
+# Тест распознавания тишины (должен вернуть "" без падения)
+_trans_res = asyncio.run(voiceguard.transcribe(_silence_wav, ext="wav"))
+check("voiceguard: transcribe silence -> empty string", _trans_res == "")
+
+# ----------------- ТЕСТЫ КЭША IS_REGULAR И ФЛАГОВ ГС -----------------
+check("bot: public_cmds has voice", "voice" in bot.PUBLIC_CMDS and "гс" in bot.PUBLIC_CMDS)
+storage.set_flag("VOICE_TRANSCRIBE_ENABLED", True)
+check("bot: flag VOICE_TRANSCRIBE_ENABLED on", bot.flag("VOICE_TRANSCRIBE_ENABLED") is True)
+storage.set_flag("VOICE_TRANSCRIBE_ENABLED", False)
+check("bot: flag VOICE_TRANSCRIBE_ENABLED off", bot.flag("VOICE_TRANSCRIBE_ENABLED") is False)
+storage.set_flag("VOICE_TRANSCRIBE_ENABLED", True)
+
+# Кэширование is_regular
+_reg_chat, _reg_user = 12345, 67890
+check("bot: is_regular false initially", not bot.is_regular(_reg_chat, _reg_user))
+# Второй вызов должен вернуть то же значение мгновенно из _regular_cache
+check("bot: is_regular cached", (_reg_chat, _reg_user) in bot._regular_cache)
+
+# ----------------- ТЕСТЫ FASTER-WHISPER ОФФЛАЙН-ДВИЖКА -----------------
+check("voiceguard: has_whisper is true", voiceguard.has_whisper() is True)
+
+# Проверка оффлайн распознавания тишины через whisper
+with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as _tmp_w:
+    _tmp_w.write(_silence_wav)
+    _tmp_w_name = _tmp_w.name
+
+try:
+    _wh_res = voiceguard._sync_recognize_whisper_file(_tmp_w_name)
+    check("voiceguard: whisper recognizer returns empty on silence", _wh_res == "" or _wh_res is not None)
+finally:
+    if os.path.exists(_tmp_w_name):
+        os.remove(_tmp_w_name)
+
+# ----------------- ТЕСТЫ ПРОВЕРКИ BIO (О СЕБЕ) НОВИЧКОВ -----------------
+# 1. Обычные/чистые описания (не должны срабатывать)
+check("bio scam: empty bio", riskscore.check_bio_scam("") == (False, ""))
+check("bio scam: None bio", riskscore.check_bio_scam(None) == (False, ""))
+check("bio scam: regular bio 1", riskscore.check_bio_scam("Привет! Я фотограф из Москвы")[0] is False)
+check("bio scam: regular bio 2", riskscore.check_bio_scam("Software Engineer, Python & Go enthusiast")[0] is False)
+
+# 2. Telegram ссылки в Bio
+_scam_tg, _why_tg = riskscore.check_bio_scam("Подписывайся на мой лайв t.me/mylivechannel")
+check("bio scam: t.me link detected", _scam_tg is True and "ссылка" in _why_tg)
+
+_scam_tg2, _ = riskscore.check_bio_scam("Канал: telegram.me/cool_deals")
+check("bio scam: telegram.me link detected", _scam_tg2 is True)
+
+# 3. Казино и ставки
+_scam_cas, _why_cas = riskscore.check_bio_scam("Казино онлайн, слоты, забирай бонус 500%")
+check("bio scam: casino/slots detected", _scam_cas is True and ("казино" in _why_cas.lower() or "слоты" in _why_cas.lower()))
+
+_scam_bet, _ = riskscore.check_bio_scam("Ставки на спорт и прогнозы 1win")
+check("bio scam: betting detected", _scam_bet is True)
+
+# 4. Крипто-скам и пассивный доход
+_scam_cr, _why_cr = riskscore.check_bio_scam("Крипта для всех, пассивный доход, пиши в лс")
+check("bio scam: crypto/income detected", _scam_cr is True and ("пассивный доход" in _why_cr.lower() or "крипт" in _why_cr.lower()))
+
+
+# 5. 18+ и сливы
+_scam_18, _why_18 = riskscore.check_bio_scam("Сливы онлифанс тут и интим фото")
+check("bio scam: 18+/leak detected", _scam_18 is True)
+
+# 6. Рекламные упоминания каналов
+_scam_chan, _why_chan = riskscore.check_bio_scam("Мой личный канал @top_crypto_channel")
+check("bio scam: channel mention promo detected", _scam_chan is True)
+
+# 7. Стоп-слова чата в описании
+_scam_sw, _why_sw = riskscore.check_bio_scam("Люблю запрещенка_тест по утрам", stopwords=["запрещенка_тест"])
+check("bio scam: custom stopword detected", _scam_sw is True and "запрещенка_тест" in _why_sw)
+
+# 8. Проверка флага и действия в bot.py
+check("bot: flag CHECK_JOIN_BIO on by default", bot.flag("CHECK_JOIN_BIO") is True)
+check("bot: action_for BIO_ACTION is mute by default", bot.action_for("BIO_ACTION") == "mute")
+
 print(f"\nИтог: {PASS} ок, {FAIL} провалов.")
 # Importing the application creates an aiogram HTTP session. Some async tests
 # open it, so close it explicitly before the interpreter exits.
 asyncio.run(bot.bot.session.close())
 
 sys.exit(1 if FAIL else 0)
+

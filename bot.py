@@ -68,6 +68,7 @@ import riskscore
 import storage
 import textguard
 import userbot
+import voiceguard
 
 IS_CHILD = manager.is_child()  # дочерний бот не поднимает свой менеджер
 
@@ -491,17 +492,25 @@ def event_card(title: str, user, *, text: str = "", reason: str = "",
 
 # ----------------------------------------------------------------- админы
 
+_admins_locks: dict[int, asyncio.Lock] = {}
+
+
 async def get_admins(chat_id: int) -> set:
     entry = admins_cache.get(chat_id)
     if entry and (now() - entry[1]).total_seconds() < config.ADMIN_CACHE_TTL:
         return entry[0]
-    try:
-        members = await bot.get_chat_administrators(chat_id)
-        ids = {m.user.id for m in members}
-        admins_cache[chat_id] = (ids, now())
-        return ids
-    except TelegramBadRequest:
-        return entry[0] if entry else set()
+    lock = _admins_locks.setdefault(chat_id, asyncio.Lock())
+    async with lock:
+        entry = admins_cache.get(chat_id)
+        if entry and (now() - entry[1]).total_seconds() < config.ADMIN_CACHE_TTL:
+            return entry[0]
+        try:
+            members = await bot.get_chat_administrators(chat_id)
+            ids = {m.user.id for m in members}
+            admins_cache[chat_id] = (ids, now())
+            return ids
+        except TelegramBadRequest:
+            return entry[0] if entry else set()
 
 
 async def is_admin(chat_id: int, user_id: int) -> bool:
@@ -1265,7 +1274,8 @@ def antiflood_hit(chat_id: int, user_id: int) -> bool:
 # Команды, доступные ВСЕМ участникам (не считаются «чужой админ-командой»).
 PUBLIC_CMDS = {"rules", "report", "ping", "help", "vb", "start", "privacy",
                "kubik", "dice", "game", "mafia", "мафия", "holdem", "poker",
-               "holdemhelp", "pokerhelp", "duel", "дуэль", "bet", "raise", "ставка", "рейз"}
+               "holdemhelp", "pokerhelp", "duel", "дуэль", "bet", "raise", "ставка", "рейз",
+               "voice", "transcribe", "гс", "stt"}
 
 
 def _cmd_name(text: str) -> str | None:
@@ -1974,17 +1984,29 @@ def _parse_ts(ts):
     return dt
 
 
+_regular_cache: dict[tuple[int, int], tuple[bool, datetime]] = {}
+
+
 def is_regular(chat_id: int, user_id: int) -> bool:
     if not flag("REGULARS_ENABLED"):
         return False
+    key = (chat_id, user_id)
+    cached = _regular_cache.get(key)
+    n = now()
+    if cached and (n - cached[1]).total_seconds() < 300:
+        return cached[0]
     act = storage.get_activity(chat_id, user_id)
     if not act:
+        _regular_cache[key] = (False, n)
         return False
     first = _parse_ts(act.get("first_seen"))
     if not first:
+        _regular_cache[key] = (False, n)
         return False
-    return ((now() - first).days >= num("REGULAR_MIN_DAYS")
-            and act.get("msgs", 0) >= num("REGULAR_MIN_MSGS"))
+    res = ((n - first).days >= num("REGULAR_MIN_DAYS")
+           and act.get("msgs", 0) >= num("REGULAR_MIN_MSGS"))
+    _regular_cache[key] = (res, n)
+    return res
 
 
 def crisis_active(chat_id: int) -> bool:
@@ -2171,6 +2193,36 @@ async def challenge(chat_id: int, user) -> None:
                 await report(chat_id, f"🚫 {mention(user)} забанен на входе: {esc(public)}.")
                 return
 
+        # Проверка описания профиля (Bio / «О себе») и юзернейма на рекламу/скам.
+        if flag("CHECK_JOIN_BIO"):
+            bio = None
+            try:
+                chat_full = await bot.get_chat(user.id)
+                bio = getattr(chat_full, "bio", None)
+            except Exception:
+                pass
+            is_scam, scam_why = riskscore.check_bio_scam(
+                bio, user.full_name or "", user.username, storage.stopwords()
+            )
+            if is_scam:
+                pending.pop(key, None)
+                act = action_for("BIO_ACTION")
+                if act == "ban":
+                    await ban_user(chat_id, user.id)
+                    audit("bio-спам", f"бан входа ({scam_why})", user.id, user.full_name)
+                    await report(chat_id, f"🚫 {mention(user)} забанен на входе: {esc(scam_why)}.")
+                else:  # "mute" — не жесткий режим: мут с кнопками размута в админ-логе
+                    await mute_user(chat_id, user.id)
+                    audit("bio-спам", f"мут входа ({scam_why})", user.id, user.full_name)
+                    await report(
+                        chat_id,
+                        f"🔇 {mention(user)} ограничен: реклама в описании профиля ({esc(scam_why)}).",
+                        mod_keyboard(chat_id, user.id),
+                    )
+                    if flag("NOTIFY_VIOLATIONS") and not raid and not crisis_active(chat_id):
+                        await notify_panel(event_card("📢 Спам/скам в Bio", user, reason=scam_why))
+                return
+
         # Риск-скоринг профиля: иностранное имя, случайный ник, нет фото,
         # свежий аккаунт и т.п. Высокий скор -> жёсткое действие сразу;
         # средний -> берём «под наблюдение» (probation) на первые минуты.
@@ -2271,6 +2323,20 @@ async def on_join_request(req: ChatJoinRequest):
             else:
                 await _decline(f"отклонена по имени: {why}")
             await report(chat_id, f"🚫 Заявка отклонена: {mention(user)} — {esc(public)}.")
+            return
+    if flag("CHECK_JOIN_BIO"):
+        bio = None
+        try:
+            chat_full = await bot.get_chat(user.id)
+            bio = getattr(chat_full, "bio", None)
+        except Exception:
+            pass
+        is_scam, scam_why = riskscore.check_bio_scam(
+            bio, user.full_name or "", user.username, storage.stopwords()
+        )
+        if is_scam:
+            await _decline(f"отклонена по Bio: {scam_why}")
+            await report(chat_id, f"🚫 Заявка отклонена: у {mention(user)} реклама в «О себе» ({esc(scam_why)}).")
             return
     try:
         await bot.approve_chat_join_request(chat_id, user.id)
@@ -2574,6 +2640,78 @@ def _is_newcomer(chat_id: int, user_id: int) -> bool:
         return False
     hrs = num("NEWCOMER_MEDIA_HOURS") or 24
     return (now() - joined).total_seconds() < hrs * 3600
+
+
+async def process_voice_message(message: Message, manual_reply_to: Message | None = None):
+    """Расшифровка голосового сообщения (F.voice) или видеосообщения (F.video_note) с модерацией."""
+    file_obj = message.voice or message.video_note
+    if not file_obj:
+        return
+
+    duration = getattr(file_obj, "duration", 0)
+    max_sec = num("VOICE_MAX_SECONDS")
+    if manual_reply_to is None and max_sec > 0 and duration > max_sec:
+        return
+
+    if not voiceguard.available():
+        if manual_reply_to:
+            await manual_reply_to.reply("⚠️ Модуль расшифровки недоступен (требуется ffmpeg и speech_recognition).")
+        return
+
+    try:
+        file_info = await bot.get_file(file_obj.file_id)
+        if not file_info.file_path:
+            return
+        downloaded = await bot.download_file(file_info.file_path)
+        audio_bytes = downloaded.read()
+    except Exception as e:
+        log.warning("Не смог скачать аудиосообщение: %s", e)
+        if manual_reply_to:
+            await manual_reply_to.reply("⚠️ Не удалось скачать аудиофайл.")
+        return
+
+    ext = "ogg" if message.voice else "mp4"
+    text = await voiceguard.transcribe(audio_bytes, ext=ext)
+
+    if text is None:
+        if manual_reply_to:
+            await manual_reply_to.reply("⚠️ Ошибка распознавания речи.")
+        return
+
+    text = text.strip()
+    if not text:
+        if manual_reply_to:
+            await manual_reply_to.reply("🔇 В аудиозаписи не удалось разобрать слова.")
+        return
+
+    # Модерация распознанного текста
+    if flag("VOICE_MODERATION_ENABLED") and message.from_user:
+        is_staff = (await is_admin(message.chat.id, message.from_user.id)
+                    or storage.is_owner(message.from_user.id)
+                    or storage.is_trusted(message.chat.id, message.from_user.id))
+        if not is_staff:
+            violated, reason, action, audit_detail = voiceguard.scan_for_violations(text)
+            if violated:
+                await apply_punishment(message, reason, action, audit_reason=audit_detail)
+                return
+
+    # Отправка расшифровки в чат
+    if manual_reply_to or flag("VOICE_TRANSCRIBE_REPLY"):
+        kind = "Голосовое сообщение" if message.voice else "Видеосообщение"
+        author_name = message.from_user.full_name if message.from_user else "пользователь"
+        reply_text = f"🗣 <b>{kind}</b> ({duration}с) от {esc(author_name)}:\n«{esc(text)}»"
+        target_reply = manual_reply_to or message
+        try:
+            await target_reply.reply(reply_text)
+        except TelegramBadRequest:
+            pass
+
+
+@dp.message((F.voice | F.video_note) & F.chat.type.in_({"group", "supergroup", "private"}))
+async def on_voice(message: Message):
+    if not flag("VOICE_TRANSCRIBE_ENABLED"):
+        return
+    await process_voice_message(message)
 
 
 @dp.callback_query(F.data.startswith("mod:"))
@@ -4471,6 +4609,33 @@ async def cmd_antimat(message: Message):
         return
     storage.set_flag("ANTIMAT_ENABLED", v)
     await message.answer(f"🤬 Антимат: {'включён' if v else 'выключен'}.")
+
+
+@dp.message(Command("voice", "transcribe", "гс", "stt"))
+async def cmd_voice(message: Message):
+    """Управление авторасшифровкой ГС или расшифровка конкретного сообщения ответом."""
+    target_msg = message.reply_to_message
+    if target_msg and (target_msg.voice or target_msg.video_note):
+        await process_voice_message(target_msg, manual_reply_to=message)
+        return
+
+    v = _parse_onoff(message)
+    if v is None:
+        cur = "включена" if flag("VOICE_TRANSCRIBE_ENABLED") else "выключена"
+        await message.answer(
+            f"🎙️ <b>Расшифровка голосовых (ГС)</b>: <b>{cur}</b>.\n\n"
+            "• <code>/voice on</code> — включить авторасшифровку всех ГС и кружочков\n"
+            "• <code>/voice off</code> — отключить авторасшифровку\n"
+            "• Ответьте <code>/voice</code> на любое голосовое/кружочек для расшифровки."
+        )
+        return
+
+    if not await _staff_only(message, "manage"):
+        return
+
+    storage.set_flag("VOICE_TRANSCRIBE_ENABLED", v)
+    state_str = "включена" if v else "выключена"
+    await message.answer(f"🎙️ Автоматическая расшифровка голосовых (ГС): <b>{state_str}</b>.")
 
 
 @dp.message(Command("settings"))
@@ -6711,6 +6876,10 @@ PANEL_FLAGS = [
     ("AUTO_CLEAN_DELETED", "Автосвип удалёнок"),
     ("FUZZY_STOPWORDS", "Похожие слова"),
     ("REGULARS_ENABLED", "Мягко к старожилам"),
+    ("VOICE_TRANSCRIBE_ENABLED", "Расшифровка ГС"),
+    ("VOICE_TRANSCRIBE_REPLY", "Ответ текстом ГС"),
+    ("VOICE_MODERATION_ENABLED", "Модерация ГС"),
+    ("CHECK_JOIN_BIO", "Проверка Bio (О себе)"),
 ]
 
 # Числовые настройки, редактируемые из панели.
@@ -6733,6 +6902,7 @@ PANEL_NUMS = [
     ("RISK_BAN_THRESHOLD", "Риск: порог жёсткий"),
     ("PROBATION_MINUTES", "Наблюдение: минут"),
     ("CLEAN_DELETED_EVERY_HOURS", "Автосвип удалёнок (ч)"),
+    ("VOICE_MAX_SECONDS", "Макс. длина ГС (сек)"),
 ]
 
 # Действия за фильтры (циклически delete -> warn -> mute -> ban).
@@ -6746,6 +6916,7 @@ PANEL_ACTS = [
     ("WARN_ACTION", "Лимит варнов →"),
     ("RISK_ACTION", "Риск на входе"),
     ("PROBATION_ACTION", "Наблюдение"),
+    ("BIO_ACTION", "Реклама в Bio"),
 ]
 ACT_CYCLE = ["delete", "warn", "mute", "ban"]
 
@@ -6768,10 +6939,11 @@ PANEL_CATEGORIES = [
     ("spam", "🛡 Антиспам", ["ANTIMAT_ENABLED", "BLOCK_LINKS", "ALLOW_MENTIONS",
                              "BLOCK_FORWARDS", "BLOCK_CHANNEL_MESSAGES", "BLOCK_APK",
                              "BLOCK_PREMIUM_EMOJI", "GORE_ON", "DEANON_ENABLED",
-                             "TEXT_DEANON_ENABLED",
+                             "TEXT_DEANON_ENABLED", "VOICE_TRANSCRIBE_ENABLED",
+                             "VOICE_TRANSCRIBE_REPLY", "VOICE_MODERATION_ENABLED",
                              "ANTIFLOOD_ENABLED", "ANTIREPEAT_ENABLED", "TRIGGERS_ENABLED",
                              "FUZZY_STOPWORDS"]),
-    ("entry", "🚪 Вход и капча", ["CHECK_JOIN_NAMES", "CAPTCHA_IMAGE", "AUTO_ACCEPT",
+    ("entry", "🚪 Вход и капча", ["CHECK_JOIN_NAMES", "CHECK_JOIN_BIO", "CAPTCHA_IMAGE", "AUTO_ACCEPT",
                                   "DC_CHECK_JOIN", "LOCKDOWN", "WELCOME_ENABLED",
                                   "ANTIRAID_ENABLED", "AUTO_CRISIS_ENABLED",
                                   "PHONE_VERIFY_ENABLED"]),
@@ -6780,7 +6952,7 @@ PANEL_CATEGORIES = [
                             "VOTE_ANYONE", "ANON_ADMIN"]),
     ("notify", "🔔 Уведомления", ["NOTIFY_JOINS", "NOTIFY_VIOLATIONS", "NOTIFY_REPORTS",
                                   "REPORT_ENABLED"]),
-    ("profile", "🎯 Профиль-фильтр", ["RISK_ENABLED", "PROBATION_ENABLED",
+    ("profile", "🎯 Профиль-фильтр", ["RISK_ENABLED", "CHECK_JOIN_BIO", "PROBATION_ENABLED",
                                       "PROBATION_ON_MEDIA", "PROBATION_ON_LINK",
                                       "AUTO_CLEAN_DELETED", "REGULARS_ENABLED"]),
 ]

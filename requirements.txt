@@ -18,3 +18,7 @@ rapidocr-onnxruntime>=1.3.18
 # uvicorn[standard] тянет websockets/httptools. Нужны, только если WEBAPP_ENABLED=1.
 fastapi>=0.110
 uvicorn[standard]>=0.29
+# Расшифровка голосовых сообщений (voiceguard.py). Требует системный ffmpeg.
+SpeechRecognition>=3.10
+faster-whisper>=1.0.0
+

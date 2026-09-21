@@ -5,9 +5,10 @@ FROM python:3.12-slim
 # Системные библиотеки для opencv/onnxruntime в рантайме:
 #   libgl1, libglib2.0-0 — нужны OpenCV (тянется rapidocr-onnxruntime и nsfwvit);
 #   libgomp1            — OpenMP-рантайм, БЕЗ него не импортируется onnxruntime
-#                         (а значит не заведутся ни NSFW-детектор, ни деанон-OCR).
+#                         (а значит не заведутся ни NSFW-детектор, ни деанон-OCR);
+#   ffmpeg              — конвертация голосовых сообщений (voiceguard.py).
 RUN apt-get update && apt-get install -y --no-install-recommends \
-        libgl1 libglib2.0-0 libgomp1 \
+        libgl1 libglib2.0-0 libgomp1 ffmpeg \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
