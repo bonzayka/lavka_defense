@@ -703,6 +703,26 @@
       text-align: right;
     }
 
+    .raise-number-input {
+      font-family: var(--font-num);
+      font-weight: 700;
+      font-size: 13px;
+      color: var(--gold);
+      background: rgba(0, 0, 0, 0.75);
+      border: 1px solid rgba(245, 158, 11, 0.6);
+      border-radius: 8px;
+      padding: 4px 6px;
+      width: 82px;
+      text-align: right;
+      outline: none;
+      transition: border-color 0.2s, box-shadow 0.2s;
+    }
+
+    .raise-number-input:focus {
+      border-color: #fff;
+      box-shadow: 0 0 10px rgba(245, 158, 11, 0.5);
+    }
+
     .presets-row {
       display: flex;
       gap: 4px;
@@ -1577,15 +1597,32 @@
         triggerHaptic("light");
       };
 
-      const amountBadge = document.createElement("div");
-      amountBadge.className = "raise-amount-badge";
-      amountBadge.id = "raiseBadgeVal";
-      amountBadge.textContent = fmtChips(currentRaiseVal);
+      const amountInput = document.createElement("input");
+      amountInput.type = "number";
+      amountInput.className = "raise-number-input";
+      amountInput.id = "raiseBadgeVal";
+      amountInput.min = minRaise;
+      amountInput.max = maxRaise;
+      amountInput.step = state.big_blind;
+      amountInput.value = currentRaiseVal;
+      amountInput.title = "Нажмите, чтобы ввести свою сумму ставки";
+      amountInput.oninput = (e) => {
+        const val = parseInt(e.target.value, 10);
+        if (!isNaN(val)) {
+          currentRaiseVal = Math.max(minRaise, Math.min(maxRaise, val));
+          if (slider) slider.value = currentRaiseVal;
+          const raiseBtn = $("mainRaiseBtn");
+          if (raiseBtn) raiseBtn.innerHTML = `📈 Рейз<span class="btn-sub-txt">${fmtChips(currentRaiseVal)}</span>`;
+        }
+      };
+      amountInput.onblur = () => {
+        amountInput.value = currentRaiseVal;
+      };
 
       stepRow.appendChild(minusBtn);
       stepRow.appendChild(sliderWrap);
       stepRow.appendChild(plusBtn);
-      stepRow.appendChild(amountBadge);
+      stepRow.appendChild(amountInput);
       raiseBox.appendChild(stepRow);
 
       // Quick Preset Chips
@@ -1619,7 +1656,7 @@
 
     function updateRaiseSlider() {
       const b = $("raiseBadgeVal");
-      if (b) b.textContent = fmtChips(currentRaiseVal);
+      if (b) b.value = currentRaiseVal;
       const raiseBtn = $("mainRaiseBtn");
       if (raiseBtn) raiseBtn.innerHTML = `📈 Рейз<span class="btn-sub-txt">${fmtChips(currentRaiseVal)}</span>`;
     }
