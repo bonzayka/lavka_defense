@@ -1275,7 +1275,8 @@ def antiflood_hit(chat_id: int, user_id: int) -> bool:
 PUBLIC_CMDS = {"rules", "report", "ping", "help", "vb", "start", "privacy",
                "kubik", "dice", "game", "mafia", "мафия", "holdem", "poker",
                "holdemhelp", "pokerhelp", "duel", "дуэль", "bet", "raise", "ставка", "рейз",
-               "voice", "transcribe", "гс", "stt"}
+               "voice", "transcribe", "гс", "stt", "pokerapp", "app", "webapp"}
+
 
 
 def _cmd_name(text: str) -> str | None:
@@ -6189,6 +6190,40 @@ async def holdem_stop_cmd(message: Message):
             holdem_custom_wait.pop(uid, None)
     who = mention(message.from_user) if message.from_user else "администратором"
     await message.reply(f"🛑 Стол Texas Hold'em остановлен: {who}.")
+
+
+@dp.message(Command("pokerapp", "app", "webapp"))
+async def holdem_pokerapp_cmd(message: Message):
+    """Открытие веб-версии покера (Telegram Mini App)."""
+    url = getattr(config, "WEBAPP_URL", "")
+    room = "lobby"
+    parts = (message.text or "").strip().split()
+    if len(parts) > 1:
+        room = parts[1].strip()
+
+    if not url:
+        await message.reply(
+            "🂡 <b>Telegram Mini App (Texas Hold'em)</b>\n\n"
+            "⚠️ Публичный адрес приложения (<code>WEBAPP_URL</code>) ещё не задан в <code>config.py</code>.\n\n"
+            "<b>Инструкция по запуску:</b>\n"
+            "1. Запустите туннель или настройте SSL-домен (напр. ngrok: <code>ngrok http 8080</code>).\n"
+            "2. Пропишите полученный адрес в <code>config.py</code>: <code>WEBAPP_URL = \"https://...\"</code>\n"
+            "3. Включите <code>WEBAPP_ENABLED = True</code>.\n"
+            "4. В @BotFather настройте кнопку Web App (Menu Button или Mini App)."
+        )
+        return
+
+    full_url = f"{url.rstrip('/')}/?room={room}"
+    kb = InlineKeyboardMarkup(inline_keyboard=[[
+        InlineKeyboardButton(text="🂡 Открыть покер-стол", web_app=WebAppInfo(url=full_url))
+    ]])
+    await message.reply(
+        f"🂡 <b>Покерный Mini App (Texas Hold'em)</b>\n\n"
+        f"Комната: <b>{esc(room)}</b>\n"
+        f"Нажмите кнопку ниже, чтобы войти в игру:",
+        reply_markup=kb,
+    )
+
 
 
 # ============================== Игра «Мафия» ================================
