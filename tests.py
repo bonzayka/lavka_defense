@@ -1349,6 +1349,86 @@ _max_to = _p_cur["street_bet"] + _p_cur["stack"]
 _res_allin = _h.apply_action(_t, _cur, "raise", _max_to + 500)
 check("holdem raise >= max_to -> all-in", _res_allin.get("ok") is True and _p_cur.get("all_in") is True)
 
+# ---- Texas Hold'em: безопасность кнопок в группах, одновременные игры и жизненный цикл ----
+# 1. Безопасность клавиатур в группах (защита от BUTTON_TYPE_INVALID)
+_kb_grp = bot._holdem_lobby_kb(-1002345)
+_has_web_app_grp = any(getattr(btn, "web_app", None) is not None for row in _kb_grp.inline_keyboard for btn in row)
+check("holdem lobby kb: нет web_app в группе (защита от BUTTON_TYPE_INVALID)", not _has_web_app_grp)
+
+_texts_grp = [btn.text for row in _kb_grp.inline_keyboard for btn in row]
+check("holdem lobby kb: есть кнопка сесть за стол", any("Сесть за стол" in t for t in _texts_grp))
+check("holdem lobby kb: есть кнопка начать", any("Начать" in t for t in _texts_grp))
+check("holdem lobby kb: есть кнопка закрыть стол", any("Закрыть стол" in t for t in _texts_grp))
+
+_kb_play_grp = bot._holdem_playing_kb(-1002345, "playing")
+_has_web_app_play = any(getattr(btn, "web_app", None) is not None for row in _kb_play_grp.inline_keyboard for btn in row)
+check("holdem playing kb: нет web_app в группе", not _has_web_app_play)
+
+# 2. Одновременные игры в чате: покер + кубик + мафия
+class _MockMsgForCmd:
+    def __init__(self, chat_id, uid, text=""):
+        self.chat = types.SimpleNamespace(id=chat_id, type="supergroup", title="Test Group")
+        self.from_user = types.SimpleNamespace(id=uid, full_name="Player", username="player")
+        self.text = text
+        self.replies = []
+    async def answer(self, text, reply_markup=None, **kwargs):
+        self.replies.append((text, reply_markup))
+        return types.SimpleNamespace(message_id=len(self.replies))
+    async def reply(self, text, reply_markup=None, **kwargs):
+        return await self.answer(text, reply_markup=reply_markup, **kwargs)
+
+_c_sim = -100555
+bot.holdem_games[_c_sim] = {"table": _h.new_table(111), "msg_id": 55}
+_m_dice = _MockMsgForCmd(_c_sim, 222, "/dice")
+asyncio.run(bot.dice_start(_m_dice))
+check("concurrent: кубик запускается во время покера", _c_sim in bot.dice_games)
+
+_m_maf = _MockMsgForCmd(_c_sim, 333, "/mafia")
+asyncio.run(bot.mafia_open(_m_maf))
+check("concurrent: мафия запускается во время покера", _c_sim in bot.mafia_games)
+
+bot.dice_games.pop(_c_sim, None)
+bot.mafia_games.pop(_c_sim, None)
+bot.holdem_games.pop(_c_sim, None)
+
+# 3. Жизненный цикл стола: создание, остановка создателем (host) и повторное открытие
+_c_life = -100777
+_m_poker1 = _MockMsgForCmd(_c_life, 888, "/poker")
+asyncio.run(bot.holdem_open(_m_poker1))
+check("lifecycle: стол покера успешно создан", _c_life in bot.holdem_games)
+
+_m_stop = _MockMsgForCmd(_c_life, 888, "/stopholdem")
+asyncio.run(bot.holdem_stop_cmd(_m_stop))
+check("lifecycle: создатель (host) может остановить стол", _c_life not in bot.holdem_games)
+
+_m_poker2 = _MockMsgForCmd(_c_life, 888, "/poker")
+asyncio.run(bot.holdem_open(_m_poker2))
+check("lifecycle: повторное открытие стола после закрытия успешно", _c_life in bot.holdem_games)
+
+bot.holdem_games[_c_life]["table"]["phase"] = "finished"
+_m_poker3 = _MockMsgForCmd(_c_life, 999, "/poker")
+asyncio.run(bot.holdem_open(_m_poker3))
+check("lifecycle: авто-очистка завершенного стола и создание нового", _c_life in bot.holdem_games and bot.holdem_games[_c_life]["table"]["phase"] == "lobby")
+bot.holdem_games.pop(_c_life, None)
+
+# 4. WebApp /api/rooms возвращает столы чатов
+from webapp import server as _ws
+_t_room = _h.new_table(444)
+_t_room["chat_title"] = "VIP Покер Чат"
+_ws.bind_chat_table(-100888, _t_room)
+_rooms_data = asyncio.run(_ws.list_rooms())
+check("webapp api: столы чатов возвращаются в /api/rooms", any(r["code"] == "chat_-100888" and r["chat_title"] == "VIP Покер Чат" for r in _rooms_data.get("rooms", [])))
+_ws.unbind_chat_table(-100888)
+
+# 5. Deep-link /start poker_<chat_id>
+bot.holdem_games[-100999] = {"table": _h.new_table(555), "msg_id": 99}
+bot.holdem_games[-100999]["table"]["chat_title"] = "Турнирный Чат"
+_m_deep = _MockMsgForCmd(12345, 12345, "/start poker_-100999")
+_m_deep.chat.type = "private"
+asyncio.run(bot.panel_entry(_m_deep))
+check("deep-link: ответ на /start poker_<chat_id> содержит название чата", any("Турнирный Чат" in (r[0] or "") for r in _m_deep.replies))
+bot.holdem_games.pop(-100999, None)
+
 # ---- Антифлуд играми, командами и штраф за флуд ----
 # 1. Кулдаун на запуск игр (30 секунд)
 _u_game = 77001

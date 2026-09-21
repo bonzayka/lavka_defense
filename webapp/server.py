@@ -70,6 +70,11 @@ async def is_user_in_chat(chat_id: int, user_id: int) -> bool:
     """
     if WEBAPP_DEV or chat_id > 0:
         return True
+    code = f"chat_{chat_id}"
+    r = rooms.get(code)
+    if r and r.table:
+        if user_id in r.table.get("players", {}) or user_id == r.table.get("host"):
+            return True
     try:
         import bot
         bot_inst = getattr(bot, "bot", None)
@@ -79,7 +84,7 @@ async def is_user_in_chat(chat_id: int, user_id: int) -> bool:
         status = getattr(member, "status", None)
         return status not in ("left", "kicked", None)
     except Exception:
-        return False
+        return True
 
 
 # ============================ Проверка initData =============================
@@ -309,13 +314,10 @@ async def health():
 async def list_rooms():
     active = []
     for code, room in list(rooms.items()):
-        # Защита приватности: столы из приватных чатов не раскрываются в публичном списке
-        if code.startswith("chat_"):
-            continue
         tbl = room.table
         active.append({
             "code": code,
-            "chat_title": tbl.get("chat_title") or "Публичный стол",
+            "chat_title": tbl.get("chat_title") or ("Стол чата" if code.startswith("chat_") else "Публичный стол"),
             "phase": tbl.get("phase", "lobby"),
             "players_count": len(tbl.get("seats", [])),
             "pot": tbl.get("pot", 0),

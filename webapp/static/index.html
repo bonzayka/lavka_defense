@@ -2181,8 +2181,28 @@
   initCustomBetModalHandlers();
   initTurnTimerTicker();
 
+  // Auto-check for active chat rooms if landed on "main"
+  async function checkActiveChatRooms() {
+    if (room !== "main") return;
+    try {
+      const res = await fetch("/api/rooms");
+      const data = await res.json();
+      if (data && data.rooms) {
+        const chatRooms = data.rooms.filter(r => r.code !== "main");
+        if (chatRooms.length > 0) {
+          setTimeout(() => {
+            if (room === "main" && (!state || !state.seats || state.seats.length <= 1)) {
+              loadRoomsModal();
+            }
+          }, 900);
+        }
+      }
+    } catch(e) {}
+  }
+
   // Start connection
   connect();
+  checkActiveChatRooms();
 })();
 </script>
 </body>

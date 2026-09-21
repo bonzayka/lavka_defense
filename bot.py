@@ -5135,41 +5135,7 @@ async def cmd_holdem_help(message: Message):
     )
 
 
-@dp.message(Command("pokerapp", "webpoker"))
-async def cmd_poker_webapp(message: Message):
-    """Кнопка запуска веб-версии покера (Telegram Mini App).
-
-    Работает в ЛС бота: Telegram открывает Mini App только по HTTPS-URL,
-    заданному в config.WEBAPP_URL. Параметр ?room= позволяет играть за общим
-    столом (по коду комнаты); по умолчанию — комната «main».
-    """
-    if not getattr(config, "WEBAPP_URL", ""):
-        await message.answer(
-            "🌐 Веб-версия покера пока не настроена.\n"
-            "Админу: подними <code>webapp/server.py</code> по HTTPS и укажи адрес в "
-            "<code>config.WEBAPP_URL</code> (см. комментарии в config.py)."
-        )
-        return
-    if message.chat.type != "private":
-        # web_app-кнопки надёжнее всего открываются из личного чата.
-        me = bot_username or (await bot.get_me()).username
-        await message.reply(
-            "🂡 Открой веб-стол в личке бота: "
-            f'<a href="https://t.me/{me}?start=poker">открыть бота</a> и нажми /pokerapp.'
-        )
-        return
-    # Код комнаты — из аргумента команды (напр. «/pokerapp lobby7»), иначе main.
-    parts = (message.text or "").split(maxsplit=1)
-    room = re.sub(r"[^a-zA-Z0-9_-]", "", parts[1])[:32] if len(parts) > 1 else "main"
-    url = config.WEBAPP_URL + (f"?room={room}" if room else "")
-    kb = InlineKeyboardMarkup(inline_keyboard=[[
-        InlineKeyboardButton(text="🂡 Открыть покер-стол", web_app=WebAppInfo(url=url)),
-    ]])
-    await message.answer(
-        f"🂡 <b>Texas Hold'em — веб-стол</b>\nКомната: <code>{esc(room)}</code>\n"
-        "Нажми кнопку ниже, чтобы открыть игровой стол прямо в Telegram.",
-        reply_markup=kb,
-    )
+# Команды /pokerapp, /app, /webapp, /webpoker обрабатываются ниже в holdem_pokerapp_cmd
 
 
 # ------------------------------------------------------------- игра «кубик»
@@ -5212,10 +5178,6 @@ async def dice_start(message: Message):
             InlineKeyboardButton(text="❌ Отмена", callback_data="dg:cancel"),
         ]])
         await message.answer("🎲 Игра в кубик уже открыта. Жмите кнопки под ней или отмените:", reply_markup=kb)
-        return
-    if chat_id in holdem_games or chat_id in mafia_games:
-        other = "«Мафия» (/stopmafia)" if chat_id in mafia_games else "Texas Hold'em (/stopholdem)"
-        await message.answer(f"Сейчас в чате уже идёт {other}. Сначала завершите её командой остановки.")
         return
     game = {"players": {}, "host": message.from_user.id, "rolling": False, "msg_id": 0}
     dice_games[chat_id] = game
@@ -5703,6 +5665,42 @@ async def _duel_run(chat_id: int, duel: dict):
 # ============================ Texas Hold'em =================================
 
 
+async def _holdem_cleanup_table(chat_id: int):
+    """Полная очистка состояния стола в чате: таймеры, игроки, веб-комната."""
+    await _holdem_cancel_timer(chat_id)
+    holdem_games.pop(chat_id, None)
+    for uid in list(holdem_player_chat):
+        if holdem_player_chat.get(uid) == chat_id:
+            holdem_player_chat.pop(uid, None)
+            holdem_custom_wait.pop(uid, None)
+    try:
+        from webapp import server as webapp_server
+        webapp_server.unbind_chat_table(chat_id)
+    except Exception:
+        pass
+
+
+def _holdem_webapp_btn(chat_id: int | None, text: str = "🂡 Открыть WebApp") -> InlineKeyboardButton | None:
+    """Безопасное создание кнопки WebApp: в группах используется url=, в ЛС — web_app."""
+    app_url = getattr(config, "WEBAPP_URL", "")
+    if not app_url or not chat_id:
+        return None
+    full_url = f"{app_url.rstrip('/')}/?room=chat_{chat_id}"
+    if chat_id > 0:
+        return InlineKeyboardButton(text=text, web_app=WebAppInfo(url=full_url))
+    # В группах Telegram Bot API запрещает web_app=WebAppInfo (BUTTON_TYPE_INVALID)!
+    # Используем url кнопку:
+    short_name = getattr(config, "WEBAPP_SHORT_NAME", "")
+    if bot_username:
+        if short_name:
+            tlink = f"https://t.me/{bot_username}/{short_name}?startapp=chat_{chat_id}"
+        else:
+            tlink = f"https://t.me/{bot_username}?start=poker_{chat_id}"
+    else:
+        tlink = full_url
+    return InlineKeyboardButton(text=text, url=tlink)
+
+
 def _fmt_chips(n: int) -> str:
     """Форматирование фишек с разделителем тысяч (50 000 вместо 50000)."""
     return f"{n:,}".replace(",", " ")
@@ -5727,7 +5725,7 @@ def _holdem_board_text(game: dict) -> str:
         lines.append("━━━━━━━━━━━━━━━━━━━━━")
         lines.append(f"💵 Стартовый стек: <b>{_fmt_chips(holdem.STARTING_STACK)}</b> | Блайнды: <b>{holdem.SMALL_BLIND}/{holdem.BIG_BLIND}</b>")
         lines.append(f"⏱ Время на ход: <b>2 минуты (120 сек)</b> · <i>2 пропуска = выбывание</i>")
-        lines.append("🃏 <b>Для участия нажмите кнопку «🂡 Вступить через WebApp» ниже!</b>")
+        lines.append("🃏 <b>Для участия нажмите «🪑 Сесть за стол» ниже или откройте WebApp!</b>")
         return "\n".join(lines)
 
     street_desc = {
@@ -5795,12 +5793,11 @@ def _holdem_board_text(game: dict) -> str:
 
 def _holdem_lobby_kb(chat_id: int | None = None) -> InlineKeyboardMarkup:
     rows = []
-    app_url = getattr(config, "WEBAPP_URL", "")
-    if app_url and chat_id:
-        full_url = f"{app_url.rstrip('/')}/?room=chat_{chat_id}"
-        rows.append([InlineKeyboardButton(text="🂡 Вступить через WebApp", web_app=WebAppInfo(url=full_url))])
+    wb = _holdem_webapp_btn(chat_id, "🂡 Открыть WebApp")
+    if wb:
+        rows.append([wb])
     rows.append([ 
-        InlineKeyboardButton(text="🪑 Войти в чате", callback_data="th:join"),
+        InlineKeyboardButton(text="🪑 Сесть за стол", callback_data="th:join"),
         InlineKeyboardButton(text="▶️ Начать", callback_data="th:start"),
         InlineKeyboardButton(text="🛑 Закрыть стол", callback_data="th:cancel"),
     ])
@@ -5809,10 +5806,9 @@ def _holdem_lobby_kb(chat_id: int | None = None) -> InlineKeyboardMarkup:
 
 def _holdem_playing_kb(chat_id: int, phase: str = "playing") -> InlineKeyboardMarkup:
     rows = []
-    app_url = getattr(config, "WEBAPP_URL", "")
-    if app_url and chat_id:
-        full_url = f"{app_url.rstrip('/')}/?room=chat_{chat_id}"
-        rows.append([InlineKeyboardButton(text="🂡 Открыть 3D-стол в WebApp", web_app=WebAppInfo(url=full_url))])
+    wb = _holdem_webapp_btn(chat_id, "🂡 Открыть 3D-стол в WebApp")
+    if wb:
+        rows.append([wb])
     if phase == "finished":
         rows.append([
             InlineKeyboardButton(text="🛑 Закрыть стол", callback_data="th:cancel"),
@@ -5850,16 +5846,11 @@ async def holdem_close_from_webapp(chat_id: int, uid: int):
     game = holdem_games.get(chat_id)
     if not game:
         return
-    await _holdem_cancel_timer(chat_id)
-    holdem_games.pop(chat_id, None)
-    for u in list(holdem_player_chat):
-        if holdem_player_chat.get(u) == chat_id:
-            holdem_player_chat.pop(u, None)
-            holdem_custom_wait.pop(u, None)
     msg_id = game.get("msg_id")
+    await _holdem_cleanup_table(chat_id)
     if msg_id:
         try:
-            await bot.edit_message_text(f"🛑 Стол Texas Hold'em закрыт.", chat_id=chat_id, message_id=msg_id)
+            await bot.edit_message_text("🛑 Стол Texas Hold'em закрыт.", chat_id=chat_id, message_id=msg_id)
         except TelegramBadRequest:
             pass
 
@@ -6071,24 +6062,36 @@ async def _holdem_finish_if_needed(chat_id: int):
 async def holdem_open(message: Message):
     chat_id = message.chat.id
     if chat_id in holdem_games:
-        await message.answer("🂡 Холдем уже идёт — используй кнопки под сообщением стола или /stopholdem для остановки.")
-        return
-    if chat_id in mafia_games or chat_id in dice_games:
-        other = "«Мафия» (/stopmafia)" if chat_id in mafia_games else "в кубик (/stopdice)"
-        await message.answer(f"Сейчас в чате уже идёт игра {other}. Сначала завершите её командой остановки.")
-        return
+        cur_phase = holdem_games[chat_id].get("table", {}).get("phase")
+        if cur_phase == "finished":
+            await _holdem_cleanup_table(chat_id)
+        else:
+            await message.answer("🂡 Холдем уже идёт — используй кнопки под сообщением стола или /stopholdem для остановки.")
+            return
+
     table = holdem.new_table(message.from_user.id)
     table["chat_id"] = chat_id
     table["chat_title"] = message.chat.title or f"Чат {chat_id}"
     game = {"table": table, "msg_id": 0}
-    holdem_games[chat_id] = game
     try:
         from webapp import server as webapp_server
         webapp_server.bind_chat_table(chat_id, game["table"], _on_webapp_action)
     except Exception as e:
         log.warning("Не удалось связать стол с webapp: %s", e)
-    sent = await message.answer(_holdem_board_text(game), reply_markup=_holdem_lobby_kb(chat_id))
-    game["msg_id"] = sent.message_id
+
+    try:
+        sent = await message.answer(_holdem_board_text(game), reply_markup=_holdem_lobby_kb(chat_id))
+        game["msg_id"] = sent.message_id
+        holdem_games[chat_id] = game
+    except Exception as e:
+        log.error("Не удалось отправить сообщение стола holdem в чат %s: %s", chat_id, e)
+        try:
+            from webapp import server as webapp_server
+            webapp_server.unbind_chat_table(chat_id)
+        except Exception:
+            pass
+        await message.answer("❌ Не удалось открыть покерный стол. Попробуйте ещё раз.")
+        return
 
 
 
@@ -6118,17 +6121,7 @@ async def holdem_lobby_cb(cb: CallbackQuery):
         await cb.answer("Ты за столом! 🂡")
         await _holdem_refresh(chat_id)
     elif action == "cancel":
-        await _holdem_cancel_timer(chat_id)
-        holdem_games.pop(chat_id, None)
-        for uid2 in list(holdem_player_chat):
-            if holdem_player_chat.get(uid2) == chat_id:
-                holdem_player_chat.pop(uid2, None)
-                holdem_custom_wait.pop(uid2, None)
-        try:
-            from webapp import server as webapp_server
-            webapp_server.unbind_chat_table(chat_id)
-        except Exception:
-            pass
+        await _holdem_cleanup_table(chat_id)
         who = mention(cb.from_user)
         await cb.answer("Стол закрыт.")
         try:
@@ -6357,12 +6350,9 @@ async def holdem_move_cb(cb: CallbackQuery):
             InlineKeyboardButton(text="⬅️ Назад к кнопкам", callback_data=f"thm:{chat_id}:{uid}:back"),
         ])
 
-        app_url = getattr(config, "WEBAPP_URL", "")
-        if app_url:
-            full_url = f"{app_url.rstrip('/')}/?room=chat_{chat_id}"
-            preset_rows.append([
-                InlineKeyboardButton(text="🂡 Ввести точную сумму в WebApp", web_app=WebAppInfo(url=full_url))
-            ])
+        wb = _holdem_webapp_btn(chat_id, "🂡 Ввести точную сумму в WebApp")
+        if wb:
+            preset_rows.append([wb])
 
         prompt_text = (
             f"✍️ <b>Ввод своей ставки в Texas Hold'em</b>\n\n"
@@ -6490,24 +6480,17 @@ async def holdem_stop_cmd(message: Message):
     if chat_id not in holdem_games:
         await message.answer("Сейчас Texas Hold'em не идёт.")
         return
-    if not await _staff_only(message):
+    table = holdem_games[chat_id].get("table", {})
+    is_host = message.from_user and (message.from_user.id == table.get("host"))
+    if not is_host and not await _staff_only(message):
+        await message.answer("🛑 Остановить стол может только его создатель или администратор.")
         return
-    await _holdem_cancel_timer(chat_id)
-    holdem_games.pop(chat_id, None)
-    for uid in list(holdem_player_chat):
-        if holdem_player_chat.get(uid) == chat_id:
-            holdem_player_chat.pop(uid, None)
-            holdem_custom_wait.pop(uid, None)
-    try:
-        from webapp import server as webapp_server
-        webapp_server.unbind_chat_table(chat_id)
-    except Exception:
-        pass
+    await _holdem_cleanup_table(chat_id)
     who = mention(message.from_user) if message.from_user else "администратором"
     await message.answer(f"🛑 Стол Texas Hold'em остановлен: {who}.")
 
 
-@dp.message(Command("pokerapp", "app", "webapp"))
+@dp.message(Command("pokerapp", "app", "webapp", "webpoker"))
 async def holdem_pokerapp_cmd(message: Message):
     """Открытие веб-версии покера (Telegram Mini App)."""
     url = getattr(config, "WEBAPP_URL", "")
@@ -6533,9 +6516,13 @@ async def holdem_pokerapp_cmd(message: Message):
 
     full_url = f"{url.rstrip('/')}/?room={room}"
     btn_text = "🂡 Войти за стол чата в WebApp" if room.startswith("chat_") else "🂡 Открыть покер-стол"
-    kb = InlineKeyboardMarkup(inline_keyboard=[[
-        InlineKeyboardButton(text=btn_text, web_app=WebAppInfo(url=full_url))
-    ]])
+    if is_group:
+        wb = _holdem_webapp_btn(message.chat.id, btn_text)
+        kb = InlineKeyboardMarkup(inline_keyboard=[[wb]]) if wb else None
+    else:
+        kb = InlineKeyboardMarkup(inline_keyboard=[[
+            InlineKeyboardButton(text=btn_text, web_app=WebAppInfo(url=full_url))
+        ]])
     room_desc = f"Стол этой группы (<code>{esc(room)}</code>)" if room.startswith("chat_") else f"Комната: <b>{esc(room)}</b>"
     await message.reply(
         f"🂡 <b>Покерный Mini App (Texas Hold'em)</b>\n\n"
@@ -6668,10 +6655,6 @@ async def mafia_open(message: Message):
     chat_id = message.chat.id
     if chat_id in mafia_games:
         await message.answer("🎭 «Мафия» уже открыта — используй кнопки под её сообщением или /stopmafia для отмены.")
-        return
-    if chat_id in dice_games or chat_id in holdem_games:
-        other = "в кубик (/stopdice)" if chat_id in dice_games else "Texas Hold'em (/stopholdem)"
-        await message.answer(f"Сейчас в чате уже идёт игра {other}. Сначала завершите её (команды остановки указаны в скобках).")
         return
     game = {"phase": "lobby", "players": {}, "host": message.from_user.id,
             "msg_id": 0, "votes": {}, "round": 0, "token": 0, "night": {}}
@@ -7825,6 +7808,47 @@ async def panel_entry(message: Message):
     if payload.startswith("verify"):
         await begin_phone_verify(message)
         return
+    if payload.startswith(("poker", "chat_")):
+        cid_str = ""
+        if payload.startswith("poker_"):
+            cid_str = payload[6:]
+        elif payload.startswith("chat_"):
+            cid_str = payload[5:]
+        cid = None
+        if cid_str:
+            try:
+                cid = int(cid_str)
+            except ValueError:
+                cid = None
+
+        app_url = getattr(config, "WEBAPP_URL", "")
+        if cid and cid in holdem_games:
+            game = holdem_games[cid]
+            chat_title = game["table"].get("chat_title") or f"Чат {cid}"
+            full_url = f"{app_url.rstrip('/')}/?room=chat_{cid}" if app_url else ""
+            rows = []
+            if full_url:
+                rows.append([InlineKeyboardButton(text="🂡 Открыть 3D-стол в WebApp", web_app=WebAppInfo(url=full_url))])
+            kb = InlineKeyboardMarkup(inline_keyboard=rows) if rows else None
+            await message.answer(
+                f"🂡 <b>Texas Hold'em — стол чата {esc(chat_title)}</b>\n\n"
+                "Нажми кнопку ниже, чтобы запустить 3D-стол прямо в Telegram,\n"
+                "или возвращайся в чат и жми <b>«🪑 Сесть за стол»</b> под сообщением игры.",
+                reply_markup=kb,
+            )
+            return
+        elif app_url:
+            full_url = f"{app_url.rstrip('/')}/"
+            kb = InlineKeyboardMarkup(inline_keyboard=[[
+                InlineKeyboardButton(text="🂡 Открыть покер-стол", web_app=WebAppInfo(url=full_url))
+            ]])
+            await message.answer(
+                "🂡 <b>Texas Hold'em</b>\n\n"
+                "Нажми кнопку ниже, чтобы открыть покер в Telegram:",
+                reply_markup=kb,
+            )
+            return
+
     if uid in panel_auth:
         await open_panel(message.chat.id)
         return
