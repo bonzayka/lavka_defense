@@ -220,3 +220,74 @@ def verdict(score: int, watch_threshold: int, ban_threshold: int) -> str:
     if watch_threshold and score >= watch_threshold:
         return "watch"
     return "clear"
+
+
+# ---------------------------------------------------------------------------
+# Фильтрация рекламы и скама в описании профиля (Bio / «О себе») новичков
+# ---------------------------------------------------------------------------
+
+_BIO_SPAM_LINKS = re.compile(
+    r"(t\.me/|telegram\.me/|tg://|telega\.ph|teletype\.in)",
+    re.IGNORECASE,
+)
+
+_BIO_SPAM_KEYWORDS = re.compile(
+    r"(?:^|[^a-zа-яё0-9])("
+    r"казино|слоты|ставки|беттинг|1win|1xbet|"
+    r"крипт[аеыо]|инвестици|заработок|профит|пассивный\s+доход|схема\s+заработка|"
+    r"18\+|слив[ыа]|онлифанс|onlyfans|интим|знакомства\s*18\+|"
+    r"пробив|глаз\s+бога|взлом"
+    r")(?:$|[^a-zа-яё0-9])",
+    re.IGNORECASE,
+)
+
+_BIO_PROMO_MENTION = re.compile(
+    r"(?:канал|вход|переход|подпишись|слив|личка|пиши\s+сюда|админ).*?@[a-z0-9_]{4,}|@[a-z0-9_]{4,}.*?(?:канал|вход|переход|подпишись|слив|личка)",
+    re.IGNORECASE,
+)
+
+
+def check_bio_scam(
+    bio: str | None,
+    full_name: str = "",
+    username: str | None = None,
+    stopwords: list[str] | None = None,
+) -> tuple[bool, str]:
+    """
+    Проверяет описание профиля (Bio) на спам, ссылки на каналы и крипто/казино скам.
+    Не жесткий режим: срабатывает только на явные признаки рекламы.
+    Возвращает (is_scam: bool, reason: str).
+    """
+    if not bio:
+        return False, ""
+
+    text = bio.strip()
+    if not text:
+        return False, ""
+
+    # 1. Проверка Telegram-ссылок в описании профиля (t.me/...)
+    m_link = _BIO_SPAM_LINKS.search(text)
+    if m_link:
+        return True, f"ссылка в описании ({m_link.group(0)})"
+
+    # 2. Рекламные связки («мой канал @...», «переходи @...»)
+    m_promo = _BIO_PROMO_MENTION.search(text)
+    if m_promo:
+        return True, "реклама канала в описании"
+
+    # 3. Маркеры казино, крипты, 18+, заработка
+    m_scam = _BIO_SPAM_KEYWORDS.search(text)
+    if m_scam:
+        word = m_scam.group(1).strip()
+        return True, f"реклама/скам в описании («{word}»)"
+
+    # 4. Стоп-слова чата в описании
+    if stopwords:
+        low = text.lower()
+        for sw in stopwords:
+            s = sw.strip().lower()
+            if s and (s in low):
+                return True, f"стоп-слово «{sw}» в описании"
+
+    return False, ""
+
