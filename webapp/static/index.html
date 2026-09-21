@@ -469,6 +469,59 @@
       100% { box-shadow: 0 0 24px var(--gold-glow), 0 0 0 5px rgba(248, 200, 70, 0.8); }
     }
 
+    .turn-timer-svg {
+      position: absolute;
+      top: -6px;
+      left: -6px;
+      width: 56px;
+      height: 56px;
+      transform: rotate(-90deg);
+      pointer-events: none;
+      z-index: 5;
+    }
+
+    .turn-timer-bg {
+      stroke: rgba(255, 255, 255, 0.12);
+      stroke-width: 3.5;
+      fill: none;
+    }
+
+    .turn-timer-prog {
+      stroke: var(--gold);
+      stroke-width: 3.5;
+      stroke-linecap: round;
+      fill: none;
+      transition: stroke-dashoffset 0.4s linear, stroke 0.3s ease;
+    }
+
+    .turn-timer-badge {
+      position: absolute;
+      top: -10px;
+      right: -10px;
+      background: #0f172a;
+      border: 1.5px solid var(--gold);
+      border-radius: 10px;
+      padding: 1px 5px;
+      font-size: 10px;
+      font-weight: 800;
+      color: #fff;
+      font-family: var(--font-num);
+      box-shadow: 0 2px 6px rgba(0,0,0,0.8);
+      z-index: 10;
+    }
+
+    .seat-warning-pill {
+      font-size: 9px;
+      font-weight: 700;
+      color: #f59e0b;
+      background: rgba(245, 158, 11, 0.2);
+      border: 1px solid rgba(245, 158, 11, 0.4);
+      border-radius: 4px;
+      padding: 1px 4px;
+      margin-top: 2px;
+      text-align: center;
+    }
+
     .seat-node.is-me .seat-avatar-wrap {
       border-color: #38bdf8;
     }
@@ -1099,6 +1152,43 @@
     </div>
   </div>
 
+  <!-- Modal: Custom Bet Input -->
+  <div class="modal-overlay" id="customBetModal">
+    <div class="modal-card" style="max-width: 330px;">
+      <div class="modal-header">
+        <div class="modal-title">✍️ Своя ставка</div>
+        <button class="icon-btn" id="closeCustomBetModalBtn">✕</button>
+      </div>
+      <div class="modal-body" style="display:flex; flex-direction:column; gap:12px; padding: 16px 18px 20px;">
+        <div style="font-size:12px; color:var(--text-muted); display:flex; justify-content:space-between;">
+          <span>Мин: <b id="customBetMin" style="color:var(--gold);">0</b></span>
+          <span>Макс: <b id="customBetMax" style="color:var(--gold);">0</b></span>
+        </div>
+        <div>
+          <input type="number" id="customBetInput" class="raise-number-input" 
+                 style="width:100%; font-size:20px; padding:10px 12px; text-align:center; height:46px; border-radius:10px;" 
+                 placeholder="Сумма">
+        </div>
+        <div style="display:grid; grid-template-columns: repeat(3, 1fr); gap:6px;">
+          <button type="button" class="preset-chip" style="padding:8px 4px;" id="cbetAdd1k">+1k</button>
+          <button type="button" class="preset-chip" style="padding:8px 4px;" id="cbetAdd5k">+5k</button>
+          <button type="button" class="preset-chip" style="padding:8px 4px;" id="cbetAdd10k">+10k</button>
+          <button type="button" class="preset-chip" style="padding:8px 4px;" id="cbetHalf">½ Банка</button>
+          <button type="button" class="preset-chip" style="padding:8px 4px;" id="cbetPot">Банк</button>
+          <button type="button" class="preset-chip" style="padding:8px 4px;" id="cbetAllIn">All-In</button>
+        </div>
+        <div style="display:flex; gap:8px; margin-top:6px;">
+          <button type="button" class="btn-act btn-fold" style="flex:1;" id="cancelCustomBetBtn">
+            Отмена
+          </button>
+          <button type="button" class="btn-act btn-raise" style="flex:1.5;" id="confirmCustomBetBtn">
+            📈 Поставить
+          </button>
+        </div>
+      </div>
+    </div>
+  </div>
+
 <script>
 (function() {
   "use strict";
@@ -1392,6 +1482,38 @@
       const initials = (s.name || "P").slice(0, 2).toUpperCase();
       av.textContent = initials;
 
+      // Circular 2-Minute Turn Timer Ring
+      if (s.is_turn && state.phase === "playing") {
+        const svg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
+        svg.setAttribute("class", "turn-timer-svg");
+        svg.setAttribute("viewBox", "0 0 56 56");
+        
+        const circleBg = document.createElementNS("http://www.w3.org/2000/svg", "circle");
+        circleBg.setAttribute("class", "turn-timer-bg");
+        circleBg.setAttribute("cx", "28");
+        circleBg.setAttribute("cy", "28");
+        circleBg.setAttribute("r", "24");
+        
+        const circleProg = document.createElementNS("http://www.w3.org/2000/svg", "circle");
+        circleProg.setAttribute("class", "turn-timer-prog");
+        circleProg.setAttribute("id", "turnTimerProg");
+        circleProg.setAttribute("cx", "28");
+        circleProg.setAttribute("cy", "28");
+        circleProg.setAttribute("r", "24");
+        circleProg.setAttribute("stroke-dasharray", "150.8");
+        circleProg.setAttribute("stroke-dashoffset", "0");
+        
+        svg.appendChild(circleBg);
+        svg.appendChild(circleProg);
+        av.appendChild(svg);
+
+        const badge = document.createElement("div");
+        badge.className = "turn-timer-badge";
+        badge.id = "turnTimerBadge";
+        badge.textContent = "2:00";
+        av.appendChild(badge);
+      }
+
       // Dealer badge
       if (dealerUid && s.uid === dealerUid) {
         const dBtn = document.createElement("div");
@@ -1406,15 +1528,22 @@
       pill.className = "seat-info-pill";
       let statusTxt = "";
       if (!s.in_table && s.stack <= 0) statusTxt = "Выбыл";
+      else if (s.disqualified) statusTxt = "⛔ Выбыл (пропуск)";
       else if (s.folded) statusTxt = "Пас";
       else if (s.all_in) statusTxt = "ALL-IN";
       else if (s.showdown) statusTxt = s.showdown;
       else if (s.last_action) statusTxt = s.last_action;
 
+      let missBadgeHtml = "";
+      if (s.misses === 1 && s.in_table && !s.disqualified) {
+        missBadgeHtml = `<div class="seat-warning-pill">⚠️ 1 пропуск (ещё один = выбывание)</div>`;
+      }
+
       pill.innerHTML = `
-        <div class="seat-name">${escapeHtml(s.name)}${s.is_me ? " (ты)" : ""}</div>
+        <div class="seat-name">${escapeHtml(s.name)}${s.is_me ? " (ты)" : ""}${s.is_host ? " 👑" : ""}</div>
         <div class="seat-chips">🪙 ${fmtChips(s.stack)}</div>
         ${statusTxt ? `<div class="seat-action-text">${escapeHtml(statusTxt)}</div>` : ""}
+        ${missBadgeHtml}
       `;
       node.appendChild(pill);
 
@@ -1502,6 +1631,18 @@
       };
       btnRow.appendChild(startBtn);
 
+      if (state.is_host) {
+        const closeBtn = document.createElement("button");
+        closeBtn.className = "btn-act btn-fold";
+        closeBtn.textContent = "🛑 Закрыть стол";
+        closeBtn.style.maxWidth = "160px";
+        closeBtn.onclick = () => {
+          send("close_table");
+          showToast("Стол закрыт.");
+        };
+        btnRow.appendChild(closeBtn);
+      }
+
       lobby.appendChild(btnRow);
       box.appendChild(lobby);
       return;
@@ -1521,14 +1662,35 @@
     // 3. Finished
     if (phase === "finished") {
       box.innerHTML = `
-        <div class="turn-wait-banner">
-          <span>🏆 Игра завершена!</span>
+        <div class="turn-wait-banner" style="flex-direction:column; gap:12px; padding:16px;">
+          <span style="font-size:16px; font-weight:700; color:var(--gold);">🏆 Игра завершена!</span>
+          <button class="btn-act btn-fold" id="closeTableBtn" style="max-width:240px; margin:0 auto; padding:10px 20px;">
+            🛑 Закрыть стол
+          </button>
+        </div>
+      `;
+      const cBtn = $("closeTableBtn");
+      if (cBtn) {
+        cBtn.onclick = () => {
+          send("close_table");
+          showToast("Стол закрыт.");
+        };
+      }
+      return;
+    }
+
+    // 4. Closed State
+    if (phase === "closed") {
+      box.innerHTML = `
+        <div class="turn-wait-banner" style="flex-direction:column; gap:8px;">
+          <span style="font-size:16px; color:#ef4444; font-weight:700;">🛑 Стол закрыт</span>
+          <span style="font-size:12px; opacity:0.8;">Игра завершена организатором.</span>
         </div>
       `;
       return;
     }
 
-    // 4. Playing State: Check if it's My Turn
+    // 5. Playing State: Check if it's My Turn
     const isMyTurn = (state.current_turn === myUid) && Object.keys(you.options || {}).length > 0;
     if (!isMyTurn) {
       const curTurnSeat = (state.seats || []).find(s => s.uid === state.current_turn);
@@ -1545,8 +1707,8 @@
     // --- Active Turn Controls ---
     const opts = you.options || {};
     const toCall = you.to_call || 0;
-    const meSeat = (state.seats || []).find(s => s.is_me) || { stack: 0, street_bet: 0 };
-    const maxRaise = meSeat.street_bet + meSeat.stack;
+    const meSeat = (state.seats || []).find(s => s.is_me) || { stack: 0, bet: 0 };
+    const maxRaise = opts.max_raise_to || ((meSeat.stack || 0) + (meSeat.bet || 0));
     const minRaise = opts.min_raise_to || (state.current_bet + state.big_blind);
 
     if (currentRaiseVal < minRaise || currentRaiseVal > maxRaise) {
@@ -1554,7 +1716,7 @@
     }
 
     // Raise Slider Box (if raise is permitted)
-    if (opts.can_raise && maxRaise > minRaise) {
+    if (opts.can_raise && maxRaise >= minRaise) {
       const raiseBox = document.createElement("div");
       raiseBox.className = "raise-controller";
 
@@ -1634,14 +1796,23 @@
         { label: "2x", val: Math.min(maxRaise, state.current_bet * 2 || minRaise) },
         { label: "1/2 Банка", val: Math.min(maxRaise, Math.max(minRaise, Math.floor(state.pot / 2))) },
         { label: "Банк", val: Math.min(maxRaise, Math.max(minRaise, state.pot)) },
-        { label: "All-in", val: maxRaise }
+        { label: "All-in", val: maxRaise },
+        { label: "✍️ Своя сумма", isCustom: true }
       ];
 
       presets.forEach(pr => {
         const prBtn = document.createElement("button");
         prBtn.className = "preset-chip";
         prBtn.textContent = pr.label;
+        if (pr.isCustom) {
+          prBtn.style.color = "var(--gold)";
+          prBtn.style.borderColor = "var(--gold)";
+        }
         prBtn.onclick = () => {
+          if (pr.isCustom) {
+            openCustomBetModal(minRaise, maxRaise, currentRaiseVal, slider);
+            return;
+          }
           currentRaiseVal = pr.val;
           slider.value = pr.val;
           updateRaiseSlider();
@@ -1745,8 +1916,21 @@
         const msg = JSON.parse(ev.data);
         if (msg.type === "state") {
           state = msg;
+          if (state.turn_seconds_left !== undefined && state.turn_seconds_left !== null) {
+            currentTurnSec = state.turn_seconds_left;
+          } else {
+            currentTurnSec = 120;
+          }
           render();
+          updateTurnTimerVisual();
+        } else if (msg.type === "closed") {
+          showToast("🛑 Стол закрыт.");
         } else if (msg.type === "error") {
+          if (msg.error === "not_in_chat") {
+            clearTimeout(reconnectTimer);
+            showAccessDeniedScreen(msg.message || "Вы не состоите в этом чате.");
+            return;
+          }
           showToast("⚠️ " + (msg.error || "Ошибка"));
         }
       } catch(e) {}
@@ -1815,6 +1999,166 @@
     }
   }
 
+  // Turn Timer Countdown Visual & Ticker
+  let turnTimerTicker = null;
+  let currentTurnSec = 120;
+
+  function updateTurnTimerVisual() {
+    const progEl = $("turnTimerProg");
+    const badgeEl = $("turnTimerBadge");
+    if (!progEl && !badgeEl) return;
+    
+    const total = (state && state.turn_timeout_sec) ? state.turn_timeout_sec : 120;
+    const pct = Math.max(0, Math.min(1, currentTurnSec / total));
+    const circ = 150.8;
+    const offset = circ * (1 - pct);
+    
+    if (progEl) {
+      progEl.style.strokeDashoffset = offset;
+      if (currentTurnSec <= 10) {
+        progEl.style.stroke = "#ef4444";
+      } else if (currentTurnSec <= 30) {
+        progEl.style.stroke = "#f97316";
+      } else {
+        progEl.style.stroke = "var(--gold)";
+      }
+    }
+    
+    if (badgeEl) {
+      const m = Math.floor(currentTurnSec / 60);
+      const s = currentTurnSec % 60;
+      badgeEl.textContent = `${m}:${s < 10 ? '0' : ''}${s}`;
+      if (currentTurnSec <= 10) {
+        badgeEl.style.borderColor = "#ef4444";
+        badgeEl.style.color = "#f87171";
+      } else if (currentTurnSec <= 30) {
+        badgeEl.style.borderColor = "#f97316";
+        badgeEl.style.color = "#fb923c";
+      } else {
+        badgeEl.style.borderColor = "var(--gold)";
+        badgeEl.style.color = "#fff";
+      }
+    }
+  }
+
+  function initTurnTimerTicker() {
+    if (turnTimerTicker) clearInterval(turnTimerTicker);
+    turnTimerTicker = setInterval(() => {
+      if (state && state.phase === "playing" && state.current_turn) {
+        if (currentTurnSec > 0) {
+          currentTurnSec -= 1;
+        }
+        updateTurnTimerVisual();
+      }
+    }, 1000);
+  }
+
+  // Custom Bet Modal Logic
+  let customBetSliderRef = null;
+
+  function openCustomBetModal(minVal, maxVal, curVal, sliderRef) {
+    customBetSliderRef = sliderRef;
+    const modal = $("customBetModal");
+    if (!modal) return;
+    $("customBetMin").textContent = fmtChips(minVal);
+    $("customBetMax").textContent = fmtChips(maxVal);
+    const input = $("customBetInput");
+    input.min = minVal;
+    input.max = maxVal;
+    input.value = curVal || minVal;
+    modal.classList.add("open");
+    setTimeout(() => {
+      input.focus();
+      input.select();
+    }, 150);
+  }
+
+  function addCustomBet(addAmount) {
+    const input = $("customBetInput");
+    if (!input) return;
+    const meSeat = (state.seats || []).find(s => s.is_me) || { stack: 0, bet: 0 };
+    const opts = (state.you || {}).options || {};
+    const maxVal = opts.max_raise_to || ((meSeat.stack || 0) + (meSeat.bet || 0));
+    const minVal = opts.min_raise_to || (state.current_bet + state.big_blind);
+    let cur = parseInt(input.value, 10) || minVal;
+    cur = Math.min(maxVal, cur + addAmount);
+    input.value = cur;
+    SoundFX.chip();
+    triggerHaptic("light");
+  }
+
+  function setCustomBetPreset(type) {
+    const input = $("customBetInput");
+    if (!input) return;
+    const meSeat = (state.seats || []).find(s => s.is_me) || { stack: 0, bet: 0 };
+    const opts = (state.you || {}).options || {};
+    const maxVal = opts.max_raise_to || ((meSeat.stack || 0) + (meSeat.bet || 0));
+    const minVal = opts.min_raise_to || (state.current_bet + state.big_blind);
+    let val = minVal;
+    if (type === "half") {
+      val = Math.min(maxVal, Math.max(minVal, Math.floor(state.pot / 2)));
+    } else if (type === "pot") {
+      val = Math.min(maxVal, Math.max(minVal, state.pot));
+    } else if (type === "allin") {
+      val = maxVal;
+    }
+    input.value = val;
+    SoundFX.chip();
+    triggerHaptic("light");
+  }
+
+  function initCustomBetModalHandlers() {
+    const confirmBtn = $("confirmCustomBetBtn");
+    if (confirmBtn) {
+      confirmBtn.onclick = () => {
+        const input = $("customBetInput");
+        const meSeat = (state.seats || []).find(s => s.is_me) || { stack: 0, bet: 0 };
+        const opts = (state.you || {}).options || {};
+        const maxVal = opts.max_raise_to || ((meSeat.stack || 0) + (meSeat.bet || 0));
+        const minVal = opts.min_raise_to || (state.current_bet + state.big_blind);
+        let val = parseInt(input.value, 10);
+        if (isNaN(val) || val < minVal) val = minVal;
+        if (val > maxVal) val = maxVal;
+        currentRaiseVal = val;
+        updateRaiseSlider();
+        if (customBetSliderRef) customBetSliderRef.value = currentRaiseVal;
+        $("customBetModal").classList.remove("open");
+        SoundFX.chip();
+        triggerHaptic("heavy");
+        send("action", { action: "raise", amount: currentRaiseVal });
+      };
+    }
+    const closeBtn = $("closeCustomBetModalBtn");
+    if (closeBtn) closeBtn.onclick = () => $("customBetModal").classList.remove("open");
+    const cancelBtn = $("cancelCustomBetBtn");
+    if (cancelBtn) cancelBtn.onclick = () => $("customBetModal").classList.remove("open");
+
+    const b1k = $("cbetAdd1k"); if (b1k) b1k.onclick = () => addCustomBet(1000);
+    const b5k = $("cbetAdd5k"); if (b5k) b5k.onclick = () => addCustomBet(5000);
+    const b10k = $("cbetAdd10k"); if (b10k) b10k.onclick = () => addCustomBet(10000);
+    const bHalf = $("cbetHalf"); if (bHalf) bHalf.onclick = () => setCustomBetPreset("half");
+    const bPot = $("cbetPot"); if (bPot) bPot.onclick = () => setCustomBetPreset("pot");
+    const bAllIn = $("cbetAllIn"); if (bAllIn) bAllIn.onclick = () => setCustomBetPreset("allin");
+  }
+
+  // Access Denied (Private Chat Room) Screen
+  function showAccessDeniedScreen(msgText) {
+    const root = document.querySelector(".app-root") || document.body;
+    root.innerHTML = `
+      <div style="display:flex; flex-direction:column; align-items:center; justify-content:center; min-height:85vh; padding:24px; text-align:center;">
+        <div style="font-size:56px; margin-bottom:16px;">🔒</div>
+        <h2 style="font-family:var(--font-brand); color:var(--gold); margin-bottom:12px; font-size:22px;">Доступ ограничен</h2>
+        <p style="color:var(--text-muted); max-width:320px; line-height:1.5; font-size:14px; margin-bottom:24px;">
+          ${escapeHtml(msgText)}
+        </p>
+        <button onclick="if(window.Telegram&&Telegram.WebApp)Telegram.WebApp.close();else window.history.back();" 
+                style="background:linear-gradient(135deg, #d97706, #b45309); color:#fff; border:none; padding:12px 28px; border-radius:12px; font-weight:700; font-size:15px; cursor:pointer;">
+          Закрыть
+        </button>
+      </div>
+    `;
+  }
+
   // Header Button Handlers
   $("soundBtn").onclick = () => {
     const isEnabled = SoundFX.toggle();
@@ -1832,6 +2176,10 @@
   $("closeModalBtn").onclick = () => {
     $("roomsModal").classList.remove("open");
   };
+
+  // Initialize helper handlers and timers
+  initCustomBetModalHandlers();
+  initTurnTimerTicker();
 
   // Start connection
   connect();

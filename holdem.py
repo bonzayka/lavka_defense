@@ -12,10 +12,12 @@ import itertools
 import random
 from collections import Counter
 
+import time
+
 STARTING_STACK = 50_000
 SMALL_BLIND = 500
 BIG_BLIND = 1_000
-TURN_TIMEOUT_SEC = 60
+TURN_TIMEOUT_SEC = 120
 MAX_TIMEOUTS = 2
 MIN_PLAYERS = 2
 MAX_PLAYERS = 9
@@ -56,6 +58,7 @@ def new_table(host_id: int) -> dict:
         "big_blind": BIG_BLIND,
         "last_event": "",
         "turn_token": 0,
+        "turn_start_time": 0,
     }
 
 
@@ -201,6 +204,11 @@ def _post(table: dict, uid: int, amount: int) -> int:
     return paid
 
 
+def _set_turn(table: dict, uid: int | None) -> None:
+    table["current_turn"] = uid
+    table["turn_start_time"] = time.time() if uid is not None else 0
+
+
 def begin_hand(table: dict, seed: int | None = None) -> dict:
     players = table["players"]
     alive = _participants(table)
@@ -215,7 +223,7 @@ def begin_hand(table: dict, seed: int | None = None) -> dict:
     table["pot"] = 0
     table["current_bet"] = 0
     table["min_raise"] = BIG_BLIND
-    table["current_turn"] = None
+    _set_turn(table, None)
     table["deck"] = [r + s for r in RANKS for s in SUITS]
     random.Random(seed).shuffle(table["deck"])
 
@@ -251,7 +259,7 @@ def begin_hand(table: dict, seed: int | None = None) -> dict:
     players[sb_uid]["last_action"] = f"SB {sb_paid}"
     players[bb_uid]["last_action"] = f"BB {bb_paid}"
     table["current_bet"] = players[bb_uid]["street_bet"]
-    table["current_turn"] = _next_to_act(table, bb_uid)
+    _set_turn(table, _next_to_act(table, bb_uid))
     table["last_event"] = (
         f"🃏 Раздача #{table['hand_no']}. Блайнды: {players[sb_uid]['name']} SB {sb_paid}, "
         f"{players[bb_uid]['name']} BB {bb_paid}."
@@ -434,7 +442,7 @@ def _advance_state(table: dict, acted_uid: int) -> None:
             _next_street(table)
         return
 
-    table["current_turn"] = _next_to_act(table, acted_uid)
+    _set_turn(table, _next_to_act(table, acted_uid))
 
 
 def _next_street(table: dict) -> None:
@@ -460,7 +468,7 @@ def _next_street(table: dict) -> None:
     table["min_raise"] = BIG_BLIND
 
     dealer_uid = table["seats"][table["dealer_index"]]
-    table["current_turn"] = _next_to_act(table, dealer_uid)
+    _set_turn(table, _next_to_act(table, dealer_uid))
     table["last_event"] = f"🪄 Открыт {street_name(table['street'])}."
 
     if len(_actionable(table)) <= 1 and len(_not_folded(table)) > 1:
@@ -483,7 +491,7 @@ def _award_uncontested(table: dict, winner_uid: int) -> None:
     amount = table["pot"]
     winner["stack"] += amount
     table["pot"] = 0
-    table["current_turn"] = None
+    _set_turn(table, None)
     table["phase"] = "between_hands"
     table["last_event"] = f"🏆 {winner['name']} забрал банк {amount} без вскрытия."
     _post_hand_cleanup(table)
@@ -518,7 +526,7 @@ def _showdown(table: dict) -> None:
             table["players"][uid]["stack"] += amount
 
     table["pot"] = 0
-    table["current_turn"] = None
+    _set_turn(table, None)
     table["phase"] = "between_hands"
     table["last_event"] = "🏁 Вскрытие.\n" + "\n".join(lines)
     _post_hand_cleanup(table)
@@ -561,7 +569,7 @@ def _post_hand_cleanup(table: dict) -> None:
 
 def _finish_tournament(table: dict) -> None:
     left = _participants(table)
-    table["current_turn"] = None
+    _set_turn(table, None)
     table["phase"] = "finished"
     prev = table.get("last_event", "")
     if left:
@@ -583,7 +591,7 @@ def disqualify_player(table: dict, uid: int) -> bool:
     p["acted"] = True
     p["last_action"] = "dq"
     if table.get("current_turn") == uid:
-        table["current_turn"] = _next_to_act(table, uid)
+        _set_turn(table, _next_to_act(table, uid))
     contenders = _not_folded(table)
     if len(contenders) == 1:
         _award_uncontested(table, contenders[0])

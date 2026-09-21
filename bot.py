@@ -5712,21 +5712,22 @@ def _holdem_board_text(game: dict) -> str:
     table = game["table"]
     players = table["players"]
     seats = table["seats"]
-    lines = ["🂡 <b>Texas Hold'em</b>"]
+    lines = ["🂡 <b>Начало игры в Texas Hold'em!</b>"]
     phase = table.get("phase")
     if phase == "lobby":
         lines.append("━━━━━━━━━━━━━━━━━━━━━")
-        lines.append(f"👥 <b>Игроки за столом ({len(seats)} / {holdem.MAX_PLAYERS}):</b>")
+        lines.append(f"👥 <b>Участники ({len(seats)} / {holdem.MAX_PLAYERS}):</b>")
         roster = []
         for idx, uid in enumerate(seats, 1):
             p = players[uid]
             host_mark = " 👑" if uid == table.get("host") else ""
             roster.append(f"  {idx}. {id_mention(uid, p['name'])}{host_mark} — <b>{_fmt_chips(p['stack'])}</b> фишек")
-        who = "\n".join(roster) or "<i>  пока никого нет</i>"
+        who = "\n".join(roster) or "<i>  пока никого нет — будь первым!</i>"
         lines.append(who)
         lines.append("━━━━━━━━━━━━━━━━━━━━━")
         lines.append(f"💵 Стартовый стек: <b>{_fmt_chips(holdem.STARTING_STACK)}</b> | Блайнды: <b>{holdem.SMALL_BLIND}/{holdem.BIG_BLIND}</b>")
-        lines.append("🃏 Карты раздаются в ЛС. Нажмите «🪑 Войти», затем «▶️ Начать»!")
+        lines.append(f"⏱ Время на ход: <b>2 минуты (120 сек)</b> · <i>2 пропуска = выбывание</i>")
+        lines.append("🃏 <b>Для участия нажмите кнопку «🂡 Вступить через WebApp» ниже!</b>")
         return "\n".join(lines)
 
     street_desc = {
@@ -5758,18 +5759,21 @@ def _holdem_board_text(game: dict) -> str:
 
         if not p.get("in_table") and p.get("stack", 0) <= 0:
             status = "❌ выбыл"
+        elif p.get("disqualified"):
+            status = "⛔ дисквалифицирован"
         elif p.get("folded"):
             status = "↩️ пас"
         elif p.get("all_in"):
             status = f"🚨 ALL-IN ({_fmt_chips(p['street_bet'])})"
         elif table.get("current_turn") == uid:
             owe = holdem.player_to_call(table, uid)
-            status = f"⏳ <b>ДУМАЕТ</b> (нужно {_fmt_chips(owe)})"
+            status = f"⏳ <b>ДУМАЕТ (2 мин)</b> (нужно {_fmt_chips(owe)})"
         else:
             status = p.get("last_action") or f"в игре (ставка {_fmt_chips(p['street_bet'])})"
 
+        miss_tag = " ⚠️[пропуск 1/2]" if p.get("misses") == 1 else ""
         marker = "👉 " if table.get("current_turn") == uid else "• "
-        lines.append(f"{marker}{id_mention(uid, p['name'])}{pos_badge} — <b>{_fmt_chips(p['stack'])}</b> · {status}")
+        lines.append(f"{marker}{id_mention(uid, p['name'])}{pos_badge}{miss_tag} — <b>{_fmt_chips(p['stack'])}</b> · {status}")
 
     lines.append("━━━━━━━━━━━━━━━━━━━━━")
 
@@ -5790,25 +5794,34 @@ def _holdem_board_text(game: dict) -> str:
 
 
 def _holdem_lobby_kb(chat_id: int | None = None) -> InlineKeyboardMarkup:
-    rows = [[ 
-        InlineKeyboardButton(text="🪑 Войти", callback_data="th:join"),
-        InlineKeyboardButton(text="▶️ Начать", callback_data="th:start"),
-        InlineKeyboardButton(text="❌ Отмена", callback_data="th:cancel"),
-    ]]
+    rows = []
     app_url = getattr(config, "WEBAPP_URL", "")
     if app_url and chat_id:
         full_url = f"{app_url.rstrip('/')}/?room=chat_{chat_id}"
-        rows.append([InlineKeyboardButton(text="🂡 Играть через WebApp", web_app=WebAppInfo(url=full_url))])
+        rows.append([InlineKeyboardButton(text="🂡 Вступить через WebApp", web_app=WebAppInfo(url=full_url))])
+    rows.append([ 
+        InlineKeyboardButton(text="🪑 Войти в чате", callback_data="th:join"),
+        InlineKeyboardButton(text="▶️ Начать", callback_data="th:start"),
+        InlineKeyboardButton(text="🛑 Закрыть стол", callback_data="th:cancel"),
+    ])
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
-def _holdem_playing_kb(chat_id: int) -> InlineKeyboardMarkup:
+def _holdem_playing_kb(chat_id: int, phase: str = "playing") -> InlineKeyboardMarkup:
     rows = []
     app_url = getattr(config, "WEBAPP_URL", "")
     if app_url and chat_id:
         full_url = f"{app_url.rstrip('/')}/?room=chat_{chat_id}"
         rows.append([InlineKeyboardButton(text="🂡 Открыть 3D-стол в WebApp", web_app=WebAppInfo(url=full_url))])
-    rows.append([InlineKeyboardButton(text="❓ Комбинации", callback_data=f"thm:{chat_id}:0:help")])
+    if phase == "finished":
+        rows.append([
+            InlineKeyboardButton(text="🛑 Закрыть стол", callback_data="th:cancel"),
+        ])
+    else:
+        rows.append([
+            InlineKeyboardButton(text="❓ Комбинации", callback_data=f"thm:{chat_id}:0:help"),
+            InlineKeyboardButton(text="🛑 Закрыть стол", callback_data="th:cancel"),
+        ])
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
@@ -5828,6 +5841,27 @@ async def _on_webapp_action(chat_id: int, mtype: str, uid: int):
         await _holdem_cancel_timer(chat_id)
         holdem_custom_wait.pop(uid, None)
         await _holdem_after_action(chat_id)
+    elif mtype in ("close_table", "cancel"):
+        await holdem_close_from_webapp(chat_id, uid)
+
+
+async def holdem_close_from_webapp(chat_id: int, uid: int):
+    """Закрытие стола по запросу из WebApp."""
+    game = holdem_games.get(chat_id)
+    if not game:
+        return
+    await _holdem_cancel_timer(chat_id)
+    holdem_games.pop(chat_id, None)
+    for u in list(holdem_player_chat):
+        if holdem_player_chat.get(u) == chat_id:
+            holdem_player_chat.pop(u, None)
+            holdem_custom_wait.pop(u, None)
+    msg_id = game.get("msg_id")
+    if msg_id:
+        try:
+            await bot.edit_message_text(f"🛑 Стол Texas Hold'em закрыт.", chat_id=chat_id, message_id=msg_id)
+        except TelegramBadRequest:
+            pass
 
 
 def _holdem_turn_kb(chat_id: int, uid: int, opts: dict) -> InlineKeyboardMarkup:
@@ -5877,8 +5911,9 @@ async def _holdem_refresh(chat_id: int):
     if not game:
         return
     text = _holdem_board_text(game)
-    is_lobby = (game["table"].get("phase") == "lobby")
-    kb = _holdem_lobby_kb(chat_id) if is_lobby else _holdem_playing_kb(chat_id)
+    phase = game["table"].get("phase", "lobby")
+    is_lobby = (phase == "lobby")
+    kb = _holdem_lobby_kb(chat_id) if is_lobby else _holdem_playing_kb(chat_id, phase)
     try:
         await bot.edit_message_text(text=text, chat_id=chat_id, message_id=game["msg_id"], reply_markup=kb)
     except TelegramBadRequest as e:
@@ -5992,18 +6027,18 @@ async def _holdem_timeout_apply(chat_id: int, uid: int):
     p["misses"] = p.get("misses", 0) + 1
     if p["misses"] >= holdem.MAX_TIMEOUTS:
         holdem.disqualify_player(table, uid)
-        table["last_event"] = f"⛔ {p['name']} дисквалифицирован за повторный пропуск хода."
+        table["last_event"] = f"⛔ {p['name']} выбыл из игры за 2 пропуска хода."
     else:
         opts = holdem.allowed_actions(table, uid)
         if opts.get("check"):
             holdem.apply_action(table, uid, "check")
-            table["last_event"] = f"⏭ {p['name']} не ответил — авто-check."
+            table["last_event"] = f"⏭ {p['name']} не ответил за 2 мин — авто-check (предупреждение 1/2)."
         elif opts.get("call") and opts.get("call_amount", 0) == 0:
             holdem.apply_action(table, uid, "call")
-            table["last_event"] = f"⏭ {p['name']} не ответил — авто-check."
+            table["last_event"] = f"⏭ {p['name']} не ответил за 2 мин — авто-check (предупреждение 1/2)."
         else:
             holdem.apply_action(table, uid, "fold")
-            table["last_event"] = f"⏭ {p['name']} не ответил — авто-fold."
+            table["last_event"] = f"⏭ {p['name']} не ответил за 2 мин — авто-fold (предупреждение 1/2)."
     await _holdem_after_action(chat_id)
 
 
@@ -6030,16 +6065,6 @@ async def _holdem_finish_if_needed(chat_id: int):
         return
     await _holdem_cancel_timer(chat_id)
     await _holdem_refresh(chat_id)
-    holdem_games.pop(chat_id, None)
-    for uid in list(holdem_player_chat):
-        if holdem_player_chat.get(uid) == chat_id:
-            holdem_player_chat.pop(uid, None)
-            holdem_custom_wait.pop(uid, None)
-    try:
-        from webapp import server as webapp_server
-        webapp_server.unbind_chat_table(chat_id)
-    except Exception:
-        pass
 
 
 @dp.message(Command("holdem", "poker"), F.chat.type.in_({"group", "supergroup"}))

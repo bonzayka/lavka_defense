@@ -62,6 +62,26 @@ NEXT_HAND_DELAY = 4
 app = FastAPI(title="Poker Mini App")
 
 
+# ============================ Проверка доступа к чату =======================
+async def is_user_in_chat(chat_id: int, user_id: int) -> bool:
+    """
+    Проверка, состоит ли пользователь в Telegram-чате, к которому привязан стол.
+    Если пользователь не состоит (left / kicked), доступ к столу запрещается.
+    """
+    if WEBAPP_DEV or chat_id > 0:
+        return True
+    try:
+        import bot
+        bot_inst = getattr(bot, "bot", None)
+        if not bot_inst:
+            return True
+        member = await bot_inst.get_chat_member(chat_id, user_id)
+        status = getattr(member, "status", None)
+        return status not in ("left", "kicked", None)
+    except Exception:
+        return False
+
+
 # ============================ Проверка initData =============================
 def verify_init_data(init_data: str, bot_token: str, max_age: int = INITDATA_MAX_AGE) -> dict | None:
     """
@@ -198,6 +218,8 @@ def serialize(table: dict, viewer_uid: int) -> dict:
             "in_table": p.get("in_table", False),
             "is_turn": table.get("current_turn") == uid,
             "is_me": is_me,
+            "is_host": uid == table.get("host"),
+            "misses": p.get("misses", 0),
             "last_action": p.get("last_action", ""),
             "showdown": p.get("showdown_name", ""),
             "cards": _card_list(p.get("hole")) if show_cards else (["🂠", "🂠"] if p.get("hole") else []),
@@ -216,6 +238,10 @@ def serialize(table: dict, viewer_uid: int) -> dict:
     seats_list = table.get("seats", [])
     dealer_uid = seats_list[dealer_idx] if 0 <= dealer_idx < len(seats_list) else None
 
+    t_start = table.get("turn_start_time", 0)
+    now_t = time.time()
+    t_left = max(0, int(holdem.TURN_TIMEOUT_SEC - (now_t - t_start))) if (table.get("phase") == "playing" and table.get("current_turn") and t_start) else 0
+
     return {
         "type": "state",
         "code": table.get("code", ""),
@@ -232,8 +258,11 @@ def serialize(table: dict, viewer_uid: int) -> dict:
         "min_raise": table.get("min_raise", holdem.BIG_BLIND),
         "current_turn": table.get("current_turn"),
         "current_bet": table.get("current_bet", 0),
+        "turn_timeout_sec": holdem.TURN_TIMEOUT_SEC,
+        "turn_seconds_left": t_left,
         "last_event": table.get("last_event", ""),
         "min_players": holdem.MIN_PLAYERS,
+        "is_host": viewer_uid == table.get("host"),
         "seats": seats,
         "you": {
             "uid": viewer_uid,
@@ -280,10 +309,13 @@ async def health():
 async def list_rooms():
     active = []
     for code, room in list(rooms.items()):
+        # Защита приватности: столы из приватных чатов не раскрываются в публичном списке
+        if code.startswith("chat_"):
+            continue
         tbl = room.table
         active.append({
             "code": code,
-            "chat_title": tbl.get("chat_title") or ("Групповой стол" if code.startswith("chat_") else "Публичный стол"),
+            "chat_title": tbl.get("chat_title") or "Публичный стол",
             "phase": tbl.get("phase", "lobby"),
             "players_count": len(tbl.get("seats", [])),
             "pot": tbl.get("pot", 0),
@@ -325,6 +357,23 @@ async def ws_endpoint(ws: WebSocket):
             return
 
         uid, name = user["id"], user["name"]
+
+        # Защита приватности: если комната привязана к чату, проверяем членство
+        if code.startswith("chat_"):
+            try:
+                cid = int(code[5:])
+                in_chat = await is_user_in_chat(cid, uid)
+                if not in_chat:
+                    await ws.send_json({
+                        "type": "error",
+                        "error": "not_in_chat",
+                        "message": "🔒 Доступ ограничен: эта игра проводится в закрытом чате. Вы должны быть участником чата, чтобы присоединиться."
+                    })
+                    await ws.close()
+                    return
+            except ValueError:
+                pass
+
         room = get_room(code, host_id=uid)
         room.table["code"] = code
         room.add_conn(ws, uid)
@@ -355,6 +404,12 @@ async def ws_endpoint(ws: WebSocket):
                         amount = None
                     holdem.apply_action(table, uid, action, amount)
                     follow_up = table.get("phase") == "between_hands"
+                elif mtype in ("close_table", "cancel"):
+                    is_host = (uid == table.get("host"))
+                    is_fin = (table.get("phase") in ("finished", "lobby", "closed"))
+                    if is_host or is_fin:
+                        table["phase"] = "closed"
+                        table["last_event"] = f"🛑 Стол закрыт ({name})."
                 elif mtype == "ping":
                     pass
 
