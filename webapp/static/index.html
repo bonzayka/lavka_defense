@@ -234,25 +234,28 @@
        2. POKER ARENA & TABLE (ZONE 2) - Cyber Oval Table
        ========================================================================= */
     .arena-viewport {
-      flex: 1;
+      flex: 1 1 0;
+      min-height: 0;
+      width: 100%;
       position: relative;
       display: flex;
       align-items: center;
       justify-content: center;
+      padding: 4px 8px 6px;
       overflow: hidden;
-      perspective: 900px;
-      padding: 8px 10px;
     }
 
     .poker-table {
-      width: 96%;
-      height: 94%;
-      max-height: 480px;
-      border-radius: 170px / 240px;
+      width: auto;
+      height: 100%;
+      max-width: 98%;
+      max-height: 100%;
+      aspect-ratio: 0.73 / 1;
+      border-radius: min(150px, 40vw) / min(210px, 48vh);
       position: relative;
       /* Table Rail (Dark Leather & Metal Rim) */
       background: radial-gradient(ellipse at 50% 45%, var(--felt-center) 0%, var(--felt-mid) 58%, var(--felt-rim) 100%);
-      border: 8px solid var(--table-rail);
+      border: 7px solid var(--table-rail);
       box-shadow: 
         inset 0 0 35px rgba(0, 0, 0, 0.9),
         0 0 0 1.5px rgba(212, 175, 55, 0.5),
@@ -437,15 +440,15 @@
       filter: grayscale(1);
     }
 
-    /* 8 Balanced Radial Seat Positions (Spacious & Collision-Free) */
+    /* 8 Balanced Radial Seat Positions (Ergonomically Lifted for Zero Menu Overlap) */
     .player-pod[data-pos="0"] { top: 8%;  left: 50%; } /* Top Center */
-    .player-pod[data-pos="1"] { top: 16%; left: 83%; } /* Top Right */
-    .player-pod[data-pos="2"] { top: 38%; left: 91%; } /* Right Mid */
-    .player-pod[data-pos="3"] { top: 64%; left: 85%; } /* Bottom Right */
-    .player-pod[data-pos="4"] { top: 76%; left: 50%; } /* Bottom Center (Hero) */
-    .player-pod[data-pos="5"] { top: 64%; left: 15%; } /* Bottom Left */
-    .player-pod[data-pos="6"] { top: 38%; left: 9%;  } /* Left Mid */
-    .player-pod[data-pos="7"] { top: 16%; left: 17%; } /* Top Left */
+    .player-pod[data-pos="1"] { top: 17%; left: 83%; } /* Top Right */
+    .player-pod[data-pos="2"] { top: 36%; left: 90%; } /* Right Mid */
+    .player-pod[data-pos="3"] { top: 56%; left: 83%; } /* Bottom Right (Lifted well above dock) */
+    .player-pod[data-pos="4"] { top: 71%; left: 50%; } /* Bottom Center (Lifted to leave bottom 29% clear) */
+    .player-pod[data-pos="5"] { top: 56%; left: 17%; } /* Bottom Left (Lifted well above dock) */
+    .player-pod[data-pos="6"] { top: 36%; left: 10%; } /* Left Mid */
+    .player-pod[data-pos="7"] { top: 17%; left: 17%; } /* Top Left */
 
     /* Avatar Capsule & SVG Timer Ring */
     .avatar-wrapper {
@@ -665,20 +668,21 @@
       backdrop-filter: blur(18px);
       -webkit-backdrop-filter: blur(18px);
       border-top: 1px solid var(--glass-border);
-      padding: 6px 12px 14px;
+      padding: 6px 12px 10px;
       display: flex;
       flex-direction: column;
-      gap: 6px;
+      gap: 4px;
       z-index: 40;
       flex-shrink: 0;
       position: relative;
     }
 
     #heroActionPanel {
-      min-height: 124px;
+      min-height: 44px;
       display: flex;
       flex-direction: column;
       justify-content: center;
+      transition: all 0.25s ease;
     }
 
     /* Hero Pocket Cards Section (Fanned Out) */
@@ -687,11 +691,15 @@
       justify-content: center;
       align-items: flex-end;
       gap: 6px;
-      min-height: 84px;
-      margin-top: -20px;
+      min-height: 76px;
+      margin-top: -12px;
       margin-bottom: 2px;
       z-index: 30;
       position: relative;
+    }
+
+    .hero-cards-deck.spectator-hidden {
+      display: none !important;
     }
 
     .card-slot-placeholder.hero-slot {
@@ -1447,6 +1455,126 @@
       gap: 6px;
     }
 
+    /* Menu Drawer & Ranks Modal Styles */
+    .menu-drawer-card { max-width: 360px; }
+    .menu-drawer-body { padding: 14px 16px 18px; display: flex; flex-direction: column; gap: 12px; }
+    .menu-game-options { display: flex; flex-direction: column; gap: 8px; }
+    .menu-item-btn {
+      display: flex; align-items: center; gap: 12px;
+      background: rgba(255, 255, 255, 0.05); border: 1px solid rgba(255, 255, 255, 0.1);
+      border-radius: 14px; padding: 10px 14px; color: #fff; text-align: left; cursor: pointer;
+      transition: all 0.2s ease; width: 100%;
+    }
+    .menu-item-btn:hover, .menu-item-btn:active { background: rgba(212, 175, 55, 0.15); border-color: var(--cyber-gold); }
+    .menu-item-icon { font-size: 24px; }
+    .menu-item-text { display: flex; flex-direction: column; flex: 1; }
+    .menu-item-title { font-size: 14px; font-weight: 800; color: #fff; }
+    .menu-item-desc { font-size: 11px; color: var(--text-muted); }
+    .menu-item-badge { font-size: 10px; font-weight: 800; padding: 3px 8px; border-radius: 10px; background: rgba(255, 255, 255, 0.1); color: var(--text-muted); }
+    .menu-item-badge.active { background: var(--neon-cyan); color: #000; }
+    .menu-divider { height: 1px; background: rgba(255, 255, 255, 0.08); margin: 2px 0; }
+    .menu-extra-options { display: flex; flex-direction: column; gap: 6px; }
+    .menu-action-row {
+      display: flex; align-items: center; justify-content: space-between;
+      padding: 10px 14px; background: rgba(15, 23, 42, 0.6);
+      border: 1px solid rgba(255, 255, 255, 0.08); border-radius: 12px;
+      color: var(--text-main); font-size: 13px; font-weight: 600; cursor: pointer;
+      transition: all 0.2s ease; width: 100%;
+    }
+    .menu-action-row:hover, .menu-action-row:active { background: rgba(255, 255, 255, 0.1); border-color: rgba(255, 255, 255, 0.2); }
+
+    /* Hand Ranks Guide */
+    .ranks-guide-list { max-height: 420px; overflow-y: auto; padding: 12px 16px 16px; display: flex; flex-direction: column; gap: 8px; }
+    .rank-guide-item { background: rgba(255, 255, 255, 0.04); border: 1px solid rgba(255, 255, 255, 0.08); border-radius: 12px; padding: 8px 12px; }
+    .rank-guide-item.highlight-rule { border-color: var(--cyber-gold); background: rgba(212, 175, 55, 0.08); }
+    .rank-name { font-size: 13px; font-weight: 800; color: var(--cyber-gold); }
+    .rank-cards { font-family: var(--font-num); font-size: 13px; font-weight: 800; letter-spacing: 2px; color: #fff; margin: 2px 0; }
+    .rank-desc { font-size: 11px; color: var(--text-muted); line-height: 1.35; }
+
+    /* Default mobile view: hide inline game tabs to save header room */
+    .desktop-tabs { display: none; }
+
+    /* =========================================================================
+       RESPONSIVE DESIGN STANDARD: PHONES, TABLETS, MONITORS
+       ========================================================================= */
+
+    /* TABLETS & LANDSCAPE (681px to 1024px) */
+    @media (min-width: 681px) and (max-width: 1024px) {
+      .app-root {
+        max-width: 860px;
+        height: 100dvh;
+      }
+      .desktop-tabs {
+        display: flex !important;
+      }
+      .poker-table {
+        aspect-ratio: 1.65 / 1;
+        max-width: 800px;
+        max-height: min(440px, 100%);
+        border-radius: min(190px, 28vw) / min(140px, 34vh);
+      }
+      .hero-interactive-dock {
+        max-width: 620px;
+        width: 100%;
+        margin: 0 auto;
+        border-radius: 16px 16px 0 0;
+      }
+      /* Landscape Radial Positions */
+      .player-pod[data-pos="0"] { top: 12%; left: 50%; }
+      .player-pod[data-pos="1"] { top: 20%; left: 80%; }
+      .player-pod[data-pos="2"] { top: 50%; left: 92%; }
+      .player-pod[data-pos="3"] { top: 78%; left: 80%; }
+      .player-pod[data-pos="4"] { top: 82%; left: 50%; }
+      .player-pod[data-pos="5"] { top: 78%; left: 20%; }
+      .player-pod[data-pos="6"] { top: 50%; left: 8%;  }
+      .player-pod[data-pos="7"] { top: 20%; left: 20%; }
+      .player-pod[data-pos="2"] .pod-bet-badge { left: -46px; top: 10px; }
+      .player-pod[data-pos="6"] .pod-bet-badge { right: -46px; top: 10px; }
+    }
+
+    /* MONITORS & DESKTOPS (1025px and wider) */
+    @media (min-width: 1025px) {
+      body {
+        background: radial-gradient(circle at 50% 30%, #171b26 0%, #030508 100%);
+        display: flex;
+        align-items: center;
+        justify-content: center;
+      }
+      .app-root {
+        max-width: 1120px;
+        height: 96dvh;
+        max-height: 920px;
+        border-radius: 20px;
+        border: 1px solid rgba(212, 175, 55, 0.25);
+        box-shadow: 0 25px 80px rgba(0, 0, 0, 0.95), 0 0 40px rgba(79, 70, 229, 0.15);
+      }
+      .desktop-tabs {
+        display: flex !important;
+      }
+      .poker-table {
+        aspect-ratio: 1.82 / 1;
+        max-width: 960px;
+        max-height: min(500px, 100%);
+        border-radius: min(240px, 24vw) / min(170px, 32vh);
+      }
+      .hero-interactive-dock {
+        max-width: 720px;
+        width: 100%;
+        margin: 0 auto;
+        border-radius: 18px 18px 0 0;
+      }
+      /* Wide Championship Oval Positions */
+      .player-pod[data-pos="0"] { top: 12%; left: 50%; }
+      .player-pod[data-pos="1"] { top: 20%; left: 80%; }
+      .player-pod[data-pos="2"] { top: 50%; left: 93%; }
+      .player-pod[data-pos="3"] { top: 78%; left: 80%; }
+      .player-pod[data-pos="4"] { top: 82%; left: 50%; }
+      .player-pod[data-pos="5"] { top: 78%; left: 20%; }
+      .player-pod[data-pos="6"] { top: 50%; left: 7%;  }
+      .player-pod[data-pos="7"] { top: 20%; left: 20%; }
+      .player-pod[data-pos="2"] .pod-bet-badge { left: -46px; top: 10px; }
+      .player-pod[data-pos="6"] .pod-bet-badge { right: -46px; top: 10px; }
+    }
   </style>
 </head>
 <body>
@@ -1454,14 +1582,14 @@
     <!-- Zone 1: Top Status Bar (Header) -->
     <header class="app-header">
       <div class="header-left">
+        <button class="icon-btn" id="menuToggleBtn" title="Меню игр и столов" onclick="openGameMenu()">☰</button>
         <button class="icon-btn" id="soundBtn" title="Звук">🔊</button>
-        <button class="icon-btn" id="roomsListBtn" title="Комнаты">🗂</button>
-      </div>
-
-      <!-- Game Switcher Navigation -->
-      <div class="game-nav-bar">
-        <button type="button" class="game-nav-tab active" id="tabPoker" onclick="switchGameMode('poker')">🂡 Покер</button>
-        <button type="button" class="game-nav-tab" id="tabBlackjack" onclick="switchGameMode('blackjack')">🃏 Блэкджек</button>
+        <button class="icon-btn" id="roomsListBtn" title="Список столов" onclick="loadRoomsModal()">🗂</button>
+        <!-- Inline tabs for tablets and desktops -->
+        <div class="game-nav-bar desktop-tabs">
+          <button type="button" class="game-nav-tab active" id="tabPoker" onclick="switchGameMode('poker')">🂡 Покер</button>
+          <button type="button" class="game-nav-tab" id="tabBlackjack" onclick="switchGameMode('blackjack')">🃏 Блэкджек</button>
+        </div>
       </div>
 
       <div class="header-right">
@@ -1618,6 +1746,117 @@
           </div>
         </div>
       </footer>
+    </div>
+  </div>
+
+  <!-- Modal: Main Game Menu & Navigation -->
+  <div class="modal-overlay" id="gameMenuModal">
+    <div class="modal-card menu-drawer-card">
+      <div class="modal-header">
+        <div class="modal-title">🎮 Меню и столы</div>
+        <button class="icon-btn" id="closeMenuBtn" onclick="closeGameMenu()">✕</button>
+      </div>
+      <div class="menu-drawer-body">
+        <div class="menu-game-options">
+          <button type="button" class="menu-item-btn" id="menuItemPoker" onclick="switchGameMode('poker'); closeGameMenu();">
+            <span class="menu-item-icon">🂡</span>
+            <div class="menu-item-text">
+              <span class="menu-item-title">Texas Hold'em Poker</span>
+              <span class="menu-item-desc">Онлайн стол с игроками чата</span>
+            </div>
+            <span class="menu-item-badge active" id="pokerActiveBadge">Активно</span>
+          </button>
+          <button type="button" class="menu-item-btn" id="menuItemBJ" onclick="switchGameMode('blackjack'); closeGameMenu();">
+            <span class="menu-item-icon">🃏</span>
+            <div class="menu-item-text">
+              <span class="menu-item-title">Blackjack (21)</span>
+              <span class="menu-item-desc">Быстрая одиночная игра против дилера</span>
+            </div>
+            <span class="menu-item-badge">Мини-игра</span>
+          </button>
+        </div>
+        <div class="menu-divider"></div>
+        <div class="menu-extra-options">
+          <button type="button" class="menu-action-row" id="menuRoomsBtn" onclick="closeGameMenu(); openRoomsList();">
+            <span>🗂 Список активных столов</span>
+            <span>➔</span>
+          </button>
+          <button type="button" class="menu-action-row" id="menuRanksBtn" onclick="closeGameMenu(); openRanksModal();">
+            <span>❓ Комбинации и правила покера</span>
+            <span>➔</span>
+          </button>
+          <button type="button" class="menu-action-row" id="menuSoundToggle" onclick="toggleSoundFromMenu();">
+            <span id="menuSoundText">🔊 Звуковые эффекты: Включены</span>
+            <span>⚙️</span>
+          </button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Modal: Hand Ranks & Rules Guide -->
+  <div class="modal-overlay" id="handRanksModal">
+    <div class="modal-card" style="max-width: 380px;">
+      <div class="modal-header">
+        <div class="modal-title">🏆 Комбинации покера</div>
+        <button class="icon-btn" id="closeRanksModalBtn" onclick="closeRanksModal()">✕</button>
+      </div>
+      <div class="ranks-guide-list">
+        <div class="rank-guide-item">
+          <div class="rank-name">1. Роял-флеш (Royal Flush)</div>
+          <div class="rank-cards">10♥ J♥ Q♥ K♥ A♥</div>
+          <div class="rank-desc">Туз-король-дама-валет-десять одной масти. Непобедима!</div>
+        </div>
+        <div class="rank-guide-item">
+          <div class="rank-name">2. Стрит-флеш (Straight Flush)</div>
+          <div class="rank-cards">5♠ 6♠ 7♠ 8♠ 9♠</div>
+          <div class="rank-desc">Пять карт по порядку одной масти.</div>
+        </div>
+        <div class="rank-guide-item">
+          <div class="rank-name">3. Каре (Four of a Kind)</div>
+          <div class="rank-cards">8♠ 8♥ 8♦ 8♣ K♠</div>
+          <div class="rank-desc">Четыре карты одного ранга.</div>
+        </div>
+        <div class="rank-guide-item">
+          <div class="rank-name">4. Фулл-хаус (Full House)</div>
+          <div class="rank-cards">K♠ K♥ K♦ 9♣ 9♦</div>
+          <div class="rank-desc">Сет плюс пара (три карты одного достоинства + две другого).</div>
+        </div>
+        <div class="rank-guide-item">
+          <div class="rank-name">5. Флеш (Flush)</div>
+          <div class="rank-cards">2♦ 5♦ 9♦ J♦ A♦</div>
+          <div class="rank-desc">Любые пять карт одинаковой масти.</div>
+        </div>
+        <div class="rank-guide-item highlight-rule">
+          <div class="rank-name">6. Стрит (Straight)</div>
+          <div class="rank-cards">9♣ 10♦ J♠ Q♥ K♣</div>
+          <div class="rank-desc">Пять карт по порядку любых мастей.<br>
+            • <b>Туз-старший ("Бродвей"):</b> 10-J-Q-K-A (сильнейший стрит).<br>
+            • <b>Туз-младший ("Колесо"):</b> A-2-3-4-5 (Туз равен 1).<br>
+            • <i>Круговой стрит (K-A-2-3-4) — не считается!</i>
+          </div>
+        </div>
+        <div class="rank-guide-item">
+          <div class="rank-name">7. Сет / Тройка (Three of a Kind)</div>
+          <div class="rank-cards">7♠ 7♥ 7♦ A♣ K♠</div>
+          <div class="rank-desc">Три карты одного достоинства.</div>
+        </div>
+        <div class="rank-guide-item">
+          <div class="rank-name">8. Две пары (Two Pair)</div>
+          <div class="rank-cards">J♠ J♥ 4♦ 4♣ A♠</div>
+          <div class="rank-desc">Две разные пары.</div>
+        </div>
+        <div class="rank-guide-item">
+          <div class="rank-name">9. Пара (One Pair)</div>
+          <div class="rank-cards">A♠ A♥ 10♦ 7♣ 3♠</div>
+          <div class="rank-desc">Две карты одинакового достоинства.</div>
+        </div>
+        <div class="rank-guide-item">
+          <div class="rank-name">10. Старшая карта (High Card)</div>
+          <div class="rank-cards">A♠ K♦ 9♣ 5♥ 2♠</div>
+          <div class="rank-desc">Никаких комбинаций, сила руки определяется старшей картой.</div>
+        </div>
+      </div>
     </div>
   </div>
 
@@ -2139,17 +2378,12 @@
     const comboBadge = $("handComboBadge");
 
     if (!state.you || !state.you.seated) {
-      deck.innerHTML = `
-        <div class="spectator-hero-banner">
-          <span style="font-size: 13px; font-weight: 700; color: var(--neon-cyan); display: flex; align-items: center; gap: 6px;">
-            <span class="pulse-dot"></span> 👀 Режим зрителя
-          </span>
-          <span style="font-size: 11px; color: var(--text-muted);">Карты игроков скрыты до шоудауна</span>
-        </div>
-      `;
+      deck.classList.add("spectator-hidden");
+      deck.innerHTML = "";
       comboBadge.style.display = "none";
       return;
     }
+    deck.classList.remove("spectator-hidden");
 
     // Read cards from state.you.hole with fallback to meSeat.cards for full compatibility
     const meSeat = (state.seats || []).find(s => s.is_me);
@@ -2714,7 +2948,9 @@
       ws.send(JSON.stringify({
         type: "auth",
         initData: initData,
-        room: room
+        room: room,
+        dev_uid: params.get("dev_uid") || undefined,
+        dev_name: params.get("dev_name") || undefined
       }));
     };
 
@@ -2809,7 +3045,7 @@
       $("tabBlackjack").classList.add("active");
       $("pokerScreen").style.display = "none";
       $("blackjackScreen").style.display = "flex";
-      $("roomsListBtn").style.display = "none";
+      if ($("roomsListBtn")) $("roomsListBtn").style.display = "none";
       $("specPill").style.display = "none";
       BJ.init();
     } else {
@@ -2817,8 +3053,8 @@
       $("tabPoker").classList.add("active");
       $("blackjackScreen").style.display = "none";
       $("pokerScreen").style.display = "flex";
-      $("roomsListBtn").style.display = "flex";
-      renderTable();
+      if ($("roomsListBtn")) $("roomsListBtn").style.display = "flex";
+      render();
     }
   };
 
@@ -3201,6 +3437,69 @@
   window.bjStand = () => BJ.stand();
   window.bjDouble = () => BJ.double();
   window.bjRefillChips = () => BJ.refillChips();
+
+  // Desktop Monitor Keyboard Hotkeys
+  window.addEventListener("keydown", (e) => {
+    if (e.target.tagName === "INPUT" || e.target.tagName === "TEXTAREA") return;
+    const key = e.key.toLowerCase();
+    if (key === "m") {
+      const menu = $("gameMenuModal");
+      if (menu.classList.contains("open")) closeGameMenu();
+      else openGameMenu();
+      return;
+    }
+    if (key === "escape") {
+      closeGameMenu();
+      closeRanksModal();
+      $("roomsModal").classList.remove("open");
+      return;
+    }
+    // Only process table hotkeys if it's my turn
+    if (activeGameMode !== "poker" || !state || state.current_turn !== myUid) return;
+    const you = state.you || {};
+    const opts = you.options || {};
+    if (key === "f" && opts.can_fold) {
+      triggerHaptic("medium");
+      send("fold");
+    } else if ((key === " " || key === "c")) {
+      e.preventDefault();
+      if (opts.can_check) {
+        triggerHaptic("light");
+        send("check");
+      } else if (opts.can_call) {
+        triggerHaptic("medium");
+        send("call");
+      }
+    } else if (key === "r" && opts.can_raise) {
+      triggerHaptic("heavy");
+      send("raise", { amount: currentRaiseVal });
+    }
+  });
+
+  // Game Menu & Hand Ranks Modal Controls
+  window.openGameMenu = () => {
+    $("gameMenuModal").classList.add("open");
+    const isPoker = (activeGameMode === "poker");
+    $("pokerActiveBadge").textContent = isPoker ? "Активно" : "";
+    $("pokerActiveBadge").className = "menu-item-badge" + (isPoker ? " active" : "");
+    $("menuSoundText").textContent = SoundFX.enabled ? "🔊 Звуковые эффекты: Включены" : "🔇 Звуковые эффекты: Выключены";
+  };
+  window.closeGameMenu = () => {
+    $("gameMenuModal").classList.remove("open");
+  };
+  window.openRanksModal = () => {
+    $("handRanksModal").classList.add("open");
+  };
+  window.closeRanksModal = () => {
+    $("handRanksModal").classList.remove("open");
+  };
+  window.toggleSoundFromMenu = () => {
+    const isEnabled = SoundFX.toggle();
+    $("soundBtn").textContent = isEnabled ? "🔊" : "🔇";
+    $("menuSoundText").textContent = isEnabled ? "🔊 Звуковые эффекты: Включены" : "🔇 Звуковые эффекты: Выключены";
+    triggerHaptic("light");
+    if (isEnabled) SoundFX.chip();
+  };
 
   connect();
   checkActiveChatRooms();

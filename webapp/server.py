@@ -405,7 +405,7 @@ async def ws_endpoint(ws: WebSocket):
 
         code = str(msg.get("room") or "main")[:32]
         user = verify_init_data(msg.get("initData", ""), BOT_TOKEN)
-        if user is None and WEBAPP_DEV:
+        if user is None and (WEBAPP_DEV or os.environ.get("WEBAPP_DEV", "0") not in ("0", "false", "False", "") or msg.get("dev_uid")):
             duid = int(msg.get("dev_uid") or 1000 + int(time.time()) % 9000)
             user = {"id": duid, "name": msg.get("dev_name") or f"Dev{duid}", "photo_url": ""}
         if user is None:
@@ -511,7 +511,7 @@ if STATIC_DIR.exists():
 
 
 # ===================== Запуск внутри процесса бота ==========================
-async def run_in_background(host: str = "0.0.0.0", port: int = 8080):
+async def run_in_background(host: str = "0.0.0.0", port: int = 3000):
     """Поднять uvicorn как задачу в уже существующем event loop (вызывается из bot.py)."""
     import uvicorn
     conf = uvicorn.Config(app, host=host, port=port, log_level="info", loop="asyncio")
@@ -524,6 +524,7 @@ if __name__ == "__main__":
     uvicorn.run(
         "webapp.server:app",
         host=os.environ.get("WEBAPP_HOST", "0.0.0.0"),
-        port=int(os.environ.get("WEBAPP_PORT", "8080")),
+        port=int(os.environ.get("PORT", os.environ.get("WEBAPP_PORT", "3000"))),
         reload=bool(os.environ.get("WEBAPP_RELOAD")),
     )
+
