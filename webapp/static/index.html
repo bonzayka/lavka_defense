@@ -3,37 +3,65 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover" />
-  <title>Texas Hold'em Poker</title>
+  <title>CyberPoker Club · Telegram Mini App</title>
   <script src="https://telegram.org/js/telegram-web-app.js"></script>
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-  <link href="https://fonts.googleapis.com/css2?family=Cinzel:wght@600;700;900&family=Outfit:wght@400;500;600;700;800&family=Space+Grotesk:wght@600;700&display=swap" rel="stylesheet">
+  <link href="https://fonts.googleapis.com/css2?family=Cinzel:wght@600;700;800;900&family=Outfit:wght@400;500;600;700;800&family=Space+Grotesk:wght@600;700&display=swap" rel="stylesheet">
   <style>
     :root {
-      --bg-dark: #070b10;
-      --bg-gradient: radial-gradient(circle at 50% 30%, #101c26 0%, #060a0f 100%);
-      --felt-center: #1a6f44;
-      --felt-mid: #104e2e;
-      --felt-rim: #072615;
-      --rail-rim: #1f130d;
-      --rail-border: #52341b;
-      --gold: #f8c846;
-      --gold-dark: #b8860b;
-      --gold-glow: rgba(248, 200, 70, 0.45);
-      --emerald: #10b981;
-      --emerald-glow: rgba(16, 185, 129, 0.35);
-      --crimson: #ef4444;
-      --crimson-glow: rgba(239, 68, 68, 0.4);
-      --card-bg: #ffffff;
+      /* Deep Matte Cyberpunk Palette */
+      --bg-dark: #090c10;
+      --felt-center: #121820;
+      --felt-mid: #0f141c;
+      --felt-rim: #090c10;
+      --table-rail: #161b22;
+      --table-border: #21262d;
+      
+      /* Neon Accents */
+      --cyber-gold: #d4af37;
+      --cyber-gold-glow: rgba(212, 175, 55, 0.45);
+      --neon-cyan: #38bdf8;
+      --neon-cyan-glow: rgba(56, 189, 248, 0.4);
+      --neon-purple: #4f46e5;
+      --neon-emerald: #22c55e;
+      --neon-crimson: #ef4444;
+      --neon-crimson-glow: rgba(239, 68, 68, 0.5);
+
+      /* 4-Color High Contrast Deck */
+      --suit-spade: #f8fafc;
+      --suit-heart: #ef4444;
+      --suit-diamond: #38bdf8;
+      --suit-club: #22c55e;
+      --card-bg: #111620;
+      --card-face: #f8fafc;
+
+      /* UI Surfaces & Glassmorphism */
+      --glass-panel: rgba(15, 20, 28, 0.88);
+      --glass-border: rgba(212, 175, 55, 0.18);
+      --glass-glow: rgba(56, 189, 248, 0.12);
       --text-main: #f8fafc;
-      --text-muted: #94a3b8;
-      --glass-panel: rgba(15, 23, 42, 0.78);
-      --glass-border: rgba(255, 255, 255, 0.1);
+      --text-muted: #8b949e;
+      
+      /* Action Buttons */
+      --btn-fold-bg: #161c24;
+      --btn-fold-border: #991b1b;
+      --btn-fold-text: #fca5a5;
+      
+      --btn-call-bg: linear-gradient(135deg, #1d4ed8, #2563eb);
+      --btn-call-border: #3b82f6;
+      --btn-call-text: #ffffff;
+
+      --btn-raise-bg: linear-gradient(135deg, #d97706 0%, #dc2626 100%);
+      --btn-raise-border: #f59e0b;
+      --btn-raise-text: #ffffff;
+
+      /* Dimensions & Fonts */
       --radius-sm: 8px;
       --radius-md: 14px;
-      --radius-lg: 20px;
+      --radius-lg: 22px;
       --font-main: 'Outfit', -apple-system, BlinkMacSystemFont, sans-serif;
-      --font-casino: 'Cinzel', serif;
+      --font-brand: 'Cinzel', serif;
       --font-num: 'Space Grotesk', sans-serif;
     }
 
@@ -51,7 +79,6 @@
       height: 100%;
       overflow: hidden;
       background: var(--bg-dark);
-      background-image: var(--bg-gradient);
       color: var(--text-main);
       font-family: var(--font-main);
       font-size: 14px;
@@ -62,24 +89,25 @@
       flex-direction: column;
       height: 100dvh;
       width: 100%;
-      max-width: 520px;
+      max-width: 480px;
       margin: 0 auto;
       position: relative;
       overflow: hidden;
-      box-shadow: 0 0 50px rgba(0,0,0,0.8);
+      background: radial-gradient(circle at 50% 30%, #131a24 0%, #070a0e 100%);
+      box-shadow: 0 0 60px rgba(0, 0, 0, 0.95);
     }
 
     /* =========================================================================
-       1. HEADER BAR
+       1. TOP STATUS BAR (HEADER) - Translucent Backdrop Blur
        ========================================================================= */
     .app-header {
       display: flex;
       align-items: center;
       justify-content: space-between;
-      padding: 8px 12px;
-      background: rgba(8, 14, 22, 0.85);
-      backdrop-filter: blur(12px);
-      -webkit-backdrop-filter: blur(12px);
+      padding: 10px 14px;
+      background: var(--glass-panel);
+      backdrop-filter: blur(16px);
+      -webkit-backdrop-filter: blur(16px);
       border-bottom: 1px solid var(--glass-border);
       z-index: 50;
       flex-shrink: 0;
@@ -89,1053 +117,1065 @@
       display: flex;
       align-items: center;
       gap: 8px;
-      min-width: 0;
-    }
-
-    .casino-logo {
-      font-size: 20px;
-      line-height: 1;
-      filter: drop-shadow(0 0 8px var(--gold-glow));
-    }
-
-    .room-badge-group {
-      display: flex;
-      flex-direction: column;
-      min-width: 0;
-    }
-
-    .room-title {
-      font-size: 13px;
-      font-weight: 700;
-      color: var(--text-main);
-      white-space: nowrap;
-      overflow: hidden;
-      text-overflow: ellipsis;
-      display: flex;
-      align-items: center;
-      gap: 5px;
-    }
-
-    .chat-pill {
-      font-size: 9px;
-      text-transform: uppercase;
-      font-weight: 800;
-      letter-spacing: 0.5px;
-      background: linear-gradient(135deg, #0ea5e9, #2563eb);
-      color: #fff;
-      padding: 2px 6px;
-      border-radius: 6px;
-    }
-
-    .room-sub {
-      font-size: 11px;
-      color: var(--text-muted);
-      white-space: nowrap;
     }
 
     .header-right {
       display: flex;
       align-items: center;
-      gap: 6px;
-      flex-shrink: 0;
+      gap: 8px;
     }
 
     .icon-btn {
-      background: rgba(255, 255, 255, 0.08);
-      border: 1px solid var(--glass-border);
+      background: rgba(255, 255, 255, 0.06);
+      border: 1px solid rgba(255, 255, 255, 0.12);
       color: var(--text-main);
-      width: 34px;
-      height: 34px;
-      border-radius: 10px;
+      width: 38px;
+      height: 38px;
+      border-radius: 12px;
       display: flex;
       align-items: center;
       justify-content: center;
+      font-size: 17px;
       cursor: pointer;
-      font-size: 15px;
-      transition: all 0.2s ease;
+      transition: all 0.2s cubic-bezier(0.4, 0, 0.2, 1);
     }
 
     .icon-btn:active {
       transform: scale(0.92);
-      background: rgba(255, 255, 255, 0.16);
+      background: rgba(212, 175, 55, 0.2);
+      border-color: var(--cyber-gold);
     }
 
-    .status-dot {
-      width: 8px;
-      height: 8px;
+    .header-center-info {
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      text-align: center;
+      min-width: 0;
+    }
+
+    .round-indicator {
+      font-size: 11px;
+      text-transform: uppercase;
+      letter-spacing: 1.2px;
+      color: var(--neon-cyan);
+      font-weight: 700;
+      display: flex;
+      align-items: center;
+      gap: 5px;
+    }
+
+    .round-dot {
+      width: 6px;
+      height: 6px;
       border-radius: 50%;
-      background: #22c55e;
-      box-shadow: 0 0 8px #22c55e;
-      margin-left: 2px;
+      background: var(--neon-cyan);
+      box-shadow: 0 0 8px var(--neon-cyan);
+      animation: pulse-dot 2s infinite ease-in-out;
     }
 
-    .status-dot.offline {
-      background: #ef4444;
-      box-shadow: 0 0 8px #ef4444;
+    @keyframes pulse-dot {
+      0%, 100% { opacity: 0.4; transform: scale(0.9); }
+      50% { opacity: 1; transform: scale(1.2); }
+    }
+
+    .header-pot-wrap {
+      display: flex;
+      align-items: baseline;
+      gap: 4px;
+    }
+
+    .header-pot-label {
+      font-size: 10px;
+      font-weight: 700;
+      letter-spacing: 1px;
+      color: var(--text-muted);
+    }
+
+    .header-pot-val {
+      font-family: var(--font-num);
+      font-size: 20px;
+      font-weight: 800;
+      color: var(--cyber-gold);
+      text-shadow: 0 0 12px var(--cyber-gold-glow);
+    }
+
+    .hero-balance-badge {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      background: rgba(212, 175, 55, 0.1);
+      border: 1px solid rgba(212, 175, 55, 0.3);
+      padding: 6px 10px;
+      border-radius: 20px;
+      font-family: var(--font-num);
+      font-weight: 700;
+      font-size: 13px;
+      color: var(--cyber-gold);
+      box-shadow: inset 0 0 10px rgba(212, 175, 55, 0.08);
+      transition: all 0.3s ease;
+    }
+
+    .hero-balance-badge.glow-inc {
+      background: rgba(34, 197, 94, 0.25);
+      border-color: #22c55e;
+      color: #86efac;
+      transform: scale(1.06);
+    }
+
+    .hero-balance-badge.glow-dec {
+      background: rgba(239, 68, 68, 0.25);
+      border-color: #ef4444;
+      color: #fca5a5;
+      transform: scale(0.96);
     }
 
     /* =========================================================================
-       2. POKER TABLE (3D ARENA)
+       2. POKER ARENA & TABLE (ZONE 2) - Cyber Oval Table
        ========================================================================= */
-    .table-viewport {
+    .arena-viewport {
       flex: 1;
       position: relative;
       display: flex;
       align-items: center;
       justify-content: center;
-      padding: 10px 8px;
-      perspective: 900px;
       overflow: hidden;
+      perspective: 900px;
+      padding: 8px 10px;
     }
 
     .poker-table {
-      width: 100%;
-      height: 98%;
+      width: 96%;
+      height: 94%;
       max-height: 480px;
+      border-radius: 170px / 240px;
       position: relative;
-      border-radius: 130px;
-      background: radial-gradient(ellipse at 50% 45%, var(--felt-center) 0%, var(--felt-mid) 60%, var(--felt-rim) 100%);
-      border: 8px solid var(--rail-rim);
-      outline: 2px solid var(--rail-border);
+      /* Table Rail (Dark Leather & Metal Rim) */
+      background: radial-gradient(ellipse at 50% 45%, var(--felt-center) 0%, var(--felt-mid) 58%, var(--felt-rim) 100%);
+      border: 8px solid var(--table-rail);
       box-shadow: 
-        inset 0 0 45px rgba(0, 0, 0, 0.85),
-        0 16px 40px rgba(0, 0, 0, 0.9),
-        0 0 25px rgba(16, 185, 129, 0.15);
-      display: flex;
-      align-items: center;
-      justify-content: center;
-      transform: rotateX(16deg);
-      transform-origin: center 55%;
-    }
-
-    /* Felt Inner Gold Stitched Line */
-    .poker-table::before {
-      content: '';
-      position: absolute;
-      inset: 12px;
-      border-radius: 110px;
-      border: 1px dashed rgba(248, 200, 70, 0.28);
-      pointer-events: none;
-    }
-
-    /* Table Watermark Pattern */
-    .table-watermark {
-      position: absolute;
-      top: 50%;
-      left: 50%;
-      transform: translate(-50%, -50%);
-      font-family: var(--font-casino);
-      font-size: 32px;
-      font-weight: 900;
-      color: rgba(255, 255, 255, 0.04);
-      letter-spacing: 4px;
-      pointer-events: none;
-      text-transform: uppercase;
-      white-space: nowrap;
-    }
-
-    /* Center Board & Pot Area */
-    .board-center {
-      position: absolute;
+        inset 0 0 35px rgba(0, 0, 0, 0.9),
+        0 0 0 1.5px rgba(212, 175, 55, 0.5),
+        0 0 25px rgba(79, 70, 229, 0.25),
+        0 16px 45px rgba(0, 0, 0, 0.9);
       display: flex;
       flex-direction: column;
       align-items: center;
       justify-content: center;
-      gap: 6px;
-      z-index: 10;
-      width: 86%;
-      max-width: 290px;
     }
 
-    .pot-display {
-      display: flex;
-      align-items: center;
-      gap: 8px;
-      background: rgba(0, 0, 0, 0.72);
-      border: 1px solid rgba(248, 200, 70, 0.35);
-      border-radius: 20px;
-      padding: 4px 14px;
-      box-shadow: 0 4px 15px rgba(0, 0, 0, 0.5), 0 0 12px var(--gold-glow);
+    /* Inner Neon Rim Outline */
+    .poker-table::before {
+      content: "";
+      position: absolute;
+      inset: 6px;
+      border-radius: 160px / 230px;
+      border: 1px dashed rgba(212, 175, 55, 0.25);
+      pointer-events: none;
+      box-shadow: inset 0 0 16px rgba(0, 0, 0, 0.6);
     }
 
-    .pot-icon {
-      font-size: 15px;
-      animation: coinFloat 2s ease-in-out infinite;
-    }
-
-    @keyframes coinFloat {
-      0%, 100% { transform: translateY(0); }
-      50% { transform: translateY(-2px); }
-    }
-
-    .pot-amount {
-      font-family: var(--font-num);
-      font-size: 14px;
-      font-weight: 700;
-      color: var(--gold);
-      letter-spacing: 0.5px;
-    }
-
-    .street-pill {
-      font-size: 9px;
+    .table-logo-watermark {
+      position: absolute;
+      top: 26%;
+      font-family: var(--font-brand);
+      font-size: 11px;
+      letter-spacing: 4px;
+      color: rgba(212, 175, 55, 0.14);
       font-weight: 800;
       text-transform: uppercase;
-      letter-spacing: 1px;
-      background: rgba(255, 255, 255, 0.12);
-      color: #e2e8f0;
-      padding: 2px 8px;
-      border-radius: 10px;
+      pointer-events: none;
     }
 
-    /* Community Cards */
-    .community-cards {
+    /* Table Center: Community Cards & Pot */
+    .table-center-hub {
+      position: absolute;
+      top: 48%;
+      left: 50%;
+      transform: translate(-50%, -50%);
       display: flex;
-      gap: 5px;
-      justify-content: center;
-      min-height: 58px;
+      flex-direction: column;
       align-items: center;
-      perspective: 600px;
+      gap: 10px;
+      z-index: 10;
+      width: 100%;
     }
 
-    .card-slot {
-      width: 38px;
-      height: 54px;
-      border-radius: 6px;
-      border: 1px dashed rgba(255, 255, 255, 0.2);
-      background: rgba(0, 0, 0, 0.18);
+    .center-pot-plate {
       display: flex;
       align-items: center;
-      justify-content: center;
+      gap: 6px;
+      background: rgba(9, 12, 16, 0.85);
+      border: 1px solid rgba(212, 175, 55, 0.4);
+      padding: 5px 14px;
+      border-radius: 20px;
+      box-shadow: 0 4px 16px rgba(0, 0, 0, 0.7), 0 0 14px var(--cyber-gold-glow);
     }
 
-    /* =========================================================================
-       3. PLAYING CARDS DESIGN
-       ========================================================================= */
+    .center-pot-plate .chip-icon {
+      font-size: 14px;
+    }
+
+    .center-pot-plate .pot-sum {
+      font-family: var(--font-num);
+      font-size: 16px;
+      font-weight: 800;
+      color: var(--cyber-gold);
+    }
+
+    /* Community Cards (Board) */
+    .community-cards-row {
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      gap: 6px;
+    }
+
+    .card-slot-placeholder {
+      width: 44px;
+      height: 62px;
+      border-radius: var(--radius-sm);
+      border: 1px dashed rgba(255, 255, 255, 0.12);
+      background: rgba(0, 0, 0, 0.25);
+    }
+
+    /* High-Contrast 4-Color Cards */
     .p-card {
-      width: 38px;
-      height: 54px;
-      border-radius: 6px;
-      background: var(--card-bg);
-      box-shadow: 0 3px 8px rgba(0,0,0,0.45), 0 0 2px rgba(0,0,0,0.3);
+      width: 44px;
+      height: 62px;
+      border-radius: var(--radius-sm);
+      background: var(--card-face);
+      border: 1px solid rgba(0, 0, 0, 0.35);
+      box-shadow: 0 4px 12px rgba(0, 0, 0, 0.65), 0 1px 3px rgba(0, 0, 0, 0.4);
       display: flex;
       flex-direction: column;
       justify-content: space-between;
       padding: 3px 4px;
       position: relative;
       font-family: var(--font-num);
-      font-weight: 700;
-      line-height: 1;
-      transform-style: preserve-3d;
-      animation: cardDeal 0.3s cubic-bezier(0.18, 0.89, 0.32, 1.28) forwards;
-    }
-
-    @keyframes cardDeal {
-      from { transform: translateY(-20px) scale(0.7) rotate(-8deg); opacity: 0; }
-      to { transform: translateY(0) scale(1) rotate(0deg); opacity: 1; }
-    }
-
-    .p-card .rank {
-      font-size: 13px;
       font-weight: 800;
+      animation: card-appear 0.28s cubic-bezier(0.18, 0.89, 0.32, 1.28) backwards;
     }
 
-    .p-card .suit-center {
-      font-size: 16px;
-      text-align: center;
+    @keyframes card-appear {
+      0% { opacity: 0; transform: scale(0.6) translateY(-14px) rotate(-8deg); }
+      100% { opacity: 1; transform: scale(1) translateY(0) rotate(0deg); }
+    }
+
+    .p-card.suit-spade { color: #0f172a; }
+    .p-card.suit-heart { color: var(--suit-heart); }
+    .p-card.suit-diamond { color: #0284c7; }
+    .p-card.suit-club { color: #15803d; }
+
+    .p-card .card-rank-top {
+      font-size: 13px;
       line-height: 1;
-      margin: auto 0;
     }
 
-    .p-card .rank-bot {
-      font-size: 9px;
-      text-align: right;
-      opacity: 0.8;
-    }
-
-    .p-card.red {
-      color: #dc2626;
-    }
-
-    .p-card.black {
-      color: #0f172a;
-    }
-
-    .p-card.back {
-      background: linear-gradient(135deg, #1e3a8a 0%, #172554 100%);
-      border: 1px solid #3b82f6;
-      box-shadow: 0 2px 6px rgba(0,0,0,0.5);
-      display: flex;
-      align-items: center;
-      justify-content: center;
-    }
-
-    .p-card.back::after {
-      content: '🂠';
-      color: #93c5fd;
-      font-size: 22px;
-      opacity: 0.9;
-    }
-
-    /* Big Hero Cards in Player Hand */
-    .hero-cards-wrap {
-      display: flex;
-      gap: 10px;
-      justify-content: center;
-      align-items: center;
-      margin: 4px 0;
-    }
-
-    .hero-card {
-      width: 58px;
-      height: 82px;
-      border-radius: 9px;
-      padding: 5px 6px;
-      box-shadow: 0 6px 18px rgba(0,0,0,0.6), 0 0 10px rgba(248, 200, 70, 0.2);
-      transition: transform 0.2s ease;
-    }
-
-    .hero-card:hover, .hero-card:active {
-      transform: translateY(-4px) scale(1.04);
-    }
-
-    .hero-card .rank {
+    .p-card .card-suit-mid {
       font-size: 18px;
+      line-height: 1;
+      align-self: center;
     }
 
-    .hero-card .suit-center {
-      font-size: 26px;
+    .p-card .card-rank-bot {
+      font-size: 11px;
+      line-height: 1;
+      align-self: flex-end;
+      transform: rotate(180deg);
     }
 
-    .hero-card .rank-bot {
-      font-size: 12px;
+    /* Back of Card */
+    .p-card.card-back {
+      background: linear-gradient(135deg, #1e1b4b 0%, #0f172a 100%);
+      border: 1px solid rgba(212, 175, 55, 0.35);
+      position: relative;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+    }
+
+    .p-card.card-back::after {
+      content: "♦";
+      font-size: 20px;
+      color: rgba(212, 175, 55, 0.45);
+      filter: drop-shadow(0 0 4px var(--cyber-gold-glow));
     }
 
     /* =========================================================================
-       4. PLAYER SEATS (RADIAL / OVAL LAYOUT)
+       SEATS & PLAYER PODS (Radial Arrangement)
        ========================================================================= */
-    .seats-layer {
+    .seats-container {
       position: absolute;
       inset: 0;
       pointer-events: none;
     }
 
-    .seat-node {
+    .player-pod {
       position: absolute;
       transform: translate(-50%, -50%);
       display: flex;
       flex-direction: column;
       align-items: center;
-      gap: 3px;
       pointer-events: auto;
-      transition: all 0.3s ease;
       z-index: 20;
+      transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
     }
 
-    /* Standard radial seat coordinates (8 seats around table) */
-    .seat-node[data-pos="0"] { top: 12%; left: 50%; }   /* Top Center */
-    .seat-node[data-pos="1"] { top: 22%; left: 82%; }   /* Top Right */
-    .seat-node[data-pos="2"] { top: 50%; left: 89%; }   /* Mid Right */
-    .seat-node[data-pos="3"] { top: 78%; left: 80%; }   /* Bottom Right */
-    .seat-node[data-pos="4"] { top: 88%; left: 50%; }   /* Bottom Center (Hero Spotlight) */
-    .seat-node[data-pos="5"] { top: 78%; left: 20%; }   /* Bottom Left */
-    .seat-node[data-pos="6"] { top: 50%; left: 11%; }   /* Mid Left */
-    .seat-node[data-pos="7"] { top: 22%; left: 18%; }   /* Top Left */
+    .player-pod.folded {
+      opacity: 0.38;
+      filter: grayscale(0.5);
+    }
 
-    .seat-avatar-wrap {
+    .player-pod.busted {
+      opacity: 0.25;
+      filter: grayscale(1);
+    }
+
+    /* 8 Radial Seat Positions */
+    .player-pod[data-pos="0"] { top: 7%;  left: 50%; } /* Top Center */
+    .player-pod[data-pos="1"] { top: 18%; left: 83%; } /* Top Right */
+    .player-pod[data-pos="2"] { top: 48%; left: 91%; } /* Right Middle */
+    .player-pod[data-pos="3"] { top: 78%; left: 81%; } /* Bottom Right */
+    .player-pod[data-pos="4"] { top: 88%; left: 50%; } /* Bottom Center (Hero Pod Anchor) */
+    .player-pod[data-pos="5"] { top: 78%; left: 19%; } /* Bottom Left */
+    .player-pod[data-pos="6"] { top: 48%; left: 9%;  } /* Left Middle */
+    .player-pod[data-pos="7"] { top: 18%; left: 17%; } /* Top Left */
+
+    /* Avatar Capsule & SVG Timer Ring */
+    .avatar-wrapper {
       position: relative;
-      width: 44px;
-      height: 44px;
+      width: 50px;
+      height: 50px;
       border-radius: 50%;
-      background: #1e293b;
-      border: 2px solid rgba(255, 255, 255, 0.2);
-      box-shadow: 0 4px 10px rgba(0,0,0,0.6);
       display: flex;
       align-items: center;
       justify-content: center;
-      font-weight: 700;
+    }
+
+    .avatar-inner {
+      width: 44px;
+      height: 44px;
+      border-radius: 50%;
+      background: linear-gradient(135deg, #1e293b, #0f172a);
+      border: 1.5px solid rgba(255, 255, 255, 0.15);
+      color: #f8fafc;
+      font-weight: 800;
       font-size: 14px;
-      color: #f1f5f9;
-      transition: all 0.25s ease;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      box-shadow: 0 4px 10px rgba(0, 0, 0, 0.8);
+      overflow: hidden;
     }
 
-    .seat-node.is-turn .seat-avatar-wrap {
-      border-color: var(--gold);
-      box-shadow: 0 0 18px var(--gold-glow), 0 0 0 3px rgba(248, 200, 70, 0.4);
-      animation: turnPulse 1.4s infinite alternate ease-in-out;
+    .player-pod.is-me .avatar-inner {
+      border-color: var(--cyber-gold);
+      box-shadow: 0 0 12px var(--cyber-gold-glow);
     }
 
-    @keyframes turnPulse {
-      0% { box-shadow: 0 0 10px var(--gold-glow), 0 0 0 2px rgba(248, 200, 70, 0.4); }
-      100% { box-shadow: 0 0 24px var(--gold-glow), 0 0 0 5px rgba(248, 200, 70, 0.8); }
-    }
-
-    .turn-timer-svg {
+    .timer-ring-svg {
       position: absolute;
-      top: -6px;
-      left: -6px;
+      inset: -3px;
       width: 56px;
       height: 56px;
       transform: rotate(-90deg);
       pointer-events: none;
-      z-index: 5;
     }
 
-    .turn-timer-bg {
-      stroke: rgba(255, 255, 255, 0.12);
-      stroke-width: 3.5;
+    .timer-ring-bg {
       fill: none;
+      stroke: rgba(255, 255, 255, 0.08);
+      stroke-width: 3.5;
     }
 
-    .turn-timer-prog {
-      stroke: var(--gold);
+    .timer-ring-prog {
+      fill: none;
+      stroke: var(--neon-cyan);
       stroke-width: 3.5;
       stroke-linecap: round;
-      fill: none;
-      transition: stroke-dashoffset 0.4s linear, stroke 0.3s ease;
+      stroke-dasharray: 157;
+      stroke-dashoffset: 0;
+      transition: stroke-dashoffset 0.8s linear, stroke 0.3s ease;
     }
 
-    .turn-timer-badge {
+    .timer-ring-prog.danger {
+      stroke: var(--neon-crimson);
+      filter: drop-shadow(0 0 8px var(--neon-crimson-glow));
+      animation: pulse-danger 0.8s infinite alternate;
+    }
+
+    @keyframes pulse-danger {
+      0% { opacity: 0.7; }
+      100% { opacity: 1; }
+    }
+
+    /* Dealer Button 'D' */
+    .dealer-chip {
       position: absolute;
-      top: -10px;
-      right: -10px;
-      background: #0f172a;
-      border: 1.5px solid var(--gold);
-      border-radius: 10px;
-      padding: 1px 5px;
-      font-size: 10px;
-      font-weight: 800;
-      color: #fff;
-      font-family: var(--font-num);
-      box-shadow: 0 2px 6px rgba(0,0,0,0.8);
-      z-index: 10;
-    }
-
-    .seat-warning-pill {
-      font-size: 9px;
-      font-weight: 700;
-      color: #f59e0b;
-      background: rgba(245, 158, 11, 0.2);
-      border: 1px solid rgba(245, 158, 11, 0.4);
-      border-radius: 4px;
-      padding: 1px 4px;
-      margin-top: 2px;
-      text-align: center;
-    }
-
-    .seat-node.is-me .seat-avatar-wrap {
-      border-color: #38bdf8;
-    }
-
-    .seat-node.folded {
-      opacity: 0.4;
-      filter: grayscale(0.8);
-    }
-
-    .dealer-btn {
-      position: absolute;
-      bottom: -3px;
-      right: -5px;
-      width: 17px;
-      height: 17px;
+      top: -4px;
+      right: -4px;
+      width: 19px;
+      height: 19px;
       border-radius: 50%;
-      background: #facc15;
-      color: #78350f;
-      font-size: 10px;
+      background: radial-gradient(circle, #fde047 0%, #ca8a04 100%);
+      border: 1px solid #ffffff;
+      color: #000;
       font-weight: 900;
+      font-size: 11px;
       display: flex;
       align-items: center;
       justify-content: center;
-      border: 1px solid #b45309;
-      box-shadow: 0 2px 4px rgba(0,0,0,0.5);
+      box-shadow: 0 0 8px var(--cyber-gold-glow);
+      z-index: 10;
     }
 
-    .seat-info-pill {
-      background: rgba(15, 23, 42, 0.85);
-      border: 1px solid rgba(255, 255, 255, 0.14);
+    /* Player Info Capsule */
+    .pod-info-capsule {
+      margin-top: 3px;
+      background: rgba(10, 14, 22, 0.92);
+      border: 1px solid rgba(255, 255, 255, 0.12);
       border-radius: 12px;
-      padding: 2px 7px;
-      display: flex;
-      flex-direction: column;
-      align-items: center;
-      min-width: 68px;
+      padding: 3px 8px;
+      text-align: center;
+      box-shadow: 0 4px 10px rgba(0, 0, 0, 0.85);
       max-width: 90px;
-      box-shadow: 0 2px 6px rgba(0,0,0,0.4);
     }
 
-    .seat-name {
-      font-size: 10px;
+    .pod-nickname {
+      font-size: 10.5px;
       font-weight: 700;
-      color: #f8fafc;
+      color: var(--text-main);
       white-space: nowrap;
       overflow: hidden;
       text-overflow: ellipsis;
-      max-width: 100%;
     }
 
-    .seat-chips {
+    .pod-stack {
       font-family: var(--font-num);
-      font-size: 10px;
-      font-weight: 700;
-      color: var(--gold);
-    }
-
-    .seat-cards-mini {
-      display: flex;
-      gap: 2px;
-      position: absolute;
-      top: -12px;
-      z-index: 5;
-    }
-
-    .seat-cards-mini .p-card {
-      width: 20px;
-      height: 28px;
-      padding: 1px;
-      border-radius: 3px;
-    }
-
-    .seat-cards-mini .p-card .rank { font-size: 8px; }
-    .seat-cards-mini .p-card .suit-center { font-size: 10px; }
-    .seat-cards-mini .p-card .rank-bot { display: none; }
-
-    .seat-bet-badge {
-      position: absolute;
-      background: rgba(0, 0, 0, 0.8);
-      border: 1px solid var(--gold);
-      color: var(--gold);
-      font-family: var(--font-num);
-      font-size: 9px;
+      font-size: 11px;
       font-weight: 800;
-      padding: 1px 5px;
-      border-radius: 8px;
-      white-space: nowrap;
-      box-shadow: 0 2px 5px rgba(0,0,0,0.5);
+      color: var(--cyber-gold);
     }
 
-    /* Placement of bet badges relative to avatar */
-    .seat-node[data-pos="0"] .seat-bet-badge { bottom: -22px; }
-    .seat-node[data-pos="1"] .seat-bet-badge { bottom: -12px; left: -32px; }
-    .seat-node[data-pos="2"] .seat-bet-badge { left: -36px; }
-    .seat-node[data-pos="3"] .seat-bet-badge { top: -14px; left: -32px; }
-    .seat-node[data-pos="4"] .seat-bet-badge { top: -20px; }
-    .seat-node[data-pos="5"] .seat-bet-badge { top: -14px; right: -32px; }
-    .seat-node[data-pos="6"] .seat-bet-badge { right: -36px; }
-    .seat-node[data-pos="7"] .seat-bet-badge { bottom: -12px; right: -32px; }
-
-    .seat-action-text {
-      font-size: 9px;
-      color: #38bdf8;
-      font-weight: 600;
-      white-space: nowrap;
+    .pod-status-text {
+      font-size: 9.5px;
+      color: var(--neon-cyan);
+      font-weight: 700;
+      margin-top: 1px;
     }
+
+    /* Floating Street Bet Badge */
+    .pod-bet-badge {
+      position: absolute;
+      background: rgba(15, 23, 42, 0.95);
+      border: 1px solid var(--cyber-gold);
+      color: var(--cyber-gold);
+      font-family: var(--font-num);
+      font-weight: 800;
+      font-size: 11px;
+      padding: 2px 7px;
+      border-radius: 10px;
+      box-shadow: 0 2px 8px rgba(0, 0, 0, 0.8), 0 0 8px var(--cyber-gold-glow);
+      white-space: nowrap;
+      z-index: 25;
+      animation: bet-pop 0.25s cubic-bezier(0.18, 0.89, 0.32, 1.28);
+    }
+
+    @keyframes bet-pop {
+      0% { transform: scale(0.4); opacity: 0; }
+      100% { transform: scale(1); opacity: 1; }
+    }
+
+    .player-pod[data-pos="0"] .pod-bet-badge { top: 58px; }
+    .player-pod[data-pos="1"] .pod-bet-badge { top: 52px; left: -24px; }
+    .player-pod[data-pos="2"] .pod-bet-badge { left: -42px; top: 12px; }
+    .player-pod[data-pos="3"] .pod-bet-badge { top: -20px; left: -24px; }
+    .player-pod[data-pos="4"] .pod-bet-badge { top: -24px; }
+    .player-pod[data-pos="5"] .pod-bet-badge { top: -20px; right: -24px; }
+    .player-pod[data-pos="6"] .pod-bet-badge { right: -42px; top: 12px; }
+    .player-pod[data-pos="7"] .pod-bet-badge { top: 52px; right: -24px; }
+
+    /* Floating Winning Chips Animation Badge (+3,400) */
+    .pod-win-floater {
+      position: absolute;
+      top: -18px;
+      background: linear-gradient(135deg, #15803d, #22c55e);
+      border: 1px solid #86efac;
+      color: #ffffff;
+      font-family: var(--font-num);
+      font-weight: 900;
+      font-size: 13px;
+      padding: 3px 9px;
+      border-radius: 12px;
+      box-shadow: 0 0 16px rgba(34, 197, 94, 0.7);
+      animation: float-win 2.4s ease-out forwards;
+      pointer-events: none;
+      z-index: 60;
+    }
+
+    @keyframes float-win {
+      0% { opacity: 0; transform: translateY(8px) scale(0.6); }
+      20% { opacity: 1; transform: translateY(-10px) scale(1.15); }
+      75% { opacity: 1; transform: translateY(-24px) scale(1); }
+      100% { opacity: 0; transform: translateY(-38px) scale(0.9); }
+    }
+
+    /* Opponent Mini Cards */
+    .opponent-mini-cards {
+      display: flex;
+      gap: 3px;
+      position: absolute;
+      top: -24px;
+      z-index: 15;
+    }
+
+    .opponent-mini-cards .p-card {
+      width: 26px;
+      height: 36px;
+      padding: 1px 2px;
+      border-radius: 4px;
+    }
+
+    .opponent-mini-cards .p-card .card-rank-top { font-size: 8px; }
+    .opponent-mini-cards .p-card .card-suit-mid { font-size: 11px; }
+    .opponent-mini-cards .p-card .card-rank-bot { display: none; }
 
     /* =========================================================================
-       5. HERO SECTION & CONTROLS (BOTTOM BAR)
+       3. HERO INTERACTIVE PANEL (ZONE 3) - THUMB ZONE ERGONOMICS
        ========================================================================= */
-    .hero-station {
-      background: rgba(10, 16, 26, 0.92);
-      backdrop-filter: blur(16px);
-      -webkit-backdrop-filter: blur(16px);
+    .hero-interactive-dock {
+      background: var(--glass-panel);
+      backdrop-filter: blur(18px);
+      -webkit-backdrop-filter: blur(18px);
       border-top: 1px solid var(--glass-border);
       padding: 8px 12px 14px;
       display: flex;
       flex-direction: column;
-      gap: 6px;
+      gap: 8px;
       z-index: 40;
       flex-shrink: 0;
+      position: relative;
     }
 
-    /* Combination Glow Banner */
-    .combo-banner {
+    /* Hero Pocket Cards Section (Fanned Out) */
+    .hero-cards-deck {
       display: flex;
-      align-items: center;
       justify-content: center;
-      gap: 6px;
-      background: linear-gradient(90deg, rgba(248, 200, 70, 0.08) 0%, rgba(248, 200, 70, 0.18) 50%, rgba(248, 200, 70, 0.08) 100%);
-      border: 1px solid rgba(248, 200, 70, 0.35);
-      border-radius: 12px;
-      padding: 4px 10px;
-      font-size: 12px;
-      font-weight: 700;
-      color: var(--gold);
-      box-shadow: 0 0 12px rgba(248, 200, 70, 0.15);
-      animation: comboGlow 2.5s infinite ease-in-out;
-    }
-
-    @keyframes comboGlow {
-      0%, 100% { border-color: rgba(248, 200, 70, 0.3); }
-      50% { border-color: rgba(248, 200, 70, 0.7); box-shadow: 0 0 16px rgba(248, 200, 70, 0.3); }
-    }
-
-    .hero-status-bar {
-      display: flex;
-      align-items: center;
-      justify-content: space-between;
-      font-size: 12px;
-      color: var(--text-muted);
-      padding: 0 4px;
-    }
-
-    .hero-stack-info {
-      font-family: var(--font-num);
-      font-weight: 700;
-      color: var(--gold);
-      display: flex;
-      align-items: center;
+      align-items: flex-end;
       gap: 4px;
+      margin-top: -34px;
+      margin-bottom: 2px;
+      z-index: 30;
+      position: relative;
     }
 
-    /* Raise Slider & Presets */
-    .raise-controller {
+    .hero-pocket-card {
+      width: 58px;
+      height: 82px;
+      border-radius: 10px;
+      background: var(--card-face);
+      border: 1.5px solid rgba(0, 0, 0, 0.4);
+      box-shadow: 0 8px 24px rgba(0, 0, 0, 0.8), 0 2px 6px rgba(0, 0, 0, 0.6);
       display: flex;
       flex-direction: column;
-      gap: 5px;
+      justify-content: space-between;
+      padding: 5px 6px;
+      font-family: var(--font-num);
+      font-weight: 800;
+      transition: transform 0.25s ease, box-shadow 0.25s ease;
+    }
+
+    .hero-pocket-card:first-child {
+      transform: rotate(-5deg) translateY(-2px);
+    }
+
+    .hero-pocket-card:last-child {
+      transform: rotate(5deg) translateY(-2px);
+    }
+
+    .hero-pocket-card.winning-highlight {
+      border-color: var(--cyber-gold);
+      box-shadow: 0 0 20px var(--cyber-gold-glow), 0 6px 16px rgba(0, 0, 0, 0.8);
+      animation: win-glow 1.5s infinite alternate ease-in-out;
+    }
+
+    @keyframes win-glow {
+      0% { box-shadow: 0 0 12px var(--cyber-gold-glow); }
+      100% { box-shadow: 0 0 24px rgba(212, 175, 55, 0.85); }
+    }
+
+    .hero-pocket-card .card-rank-top { font-size: 16px; line-height: 1; }
+    .hero-pocket-card .card-suit-mid { font-size: 26px; line-height: 1; align-self: center; }
+    .hero-pocket-card .card-rank-bot { font-size: 14px; line-height: 1; align-self: flex-end; transform: rotate(180deg); }
+
+    /* Hand Combo Badge */
+    .hand-combo-badge {
+      align-self: center;
+      background: rgba(15, 23, 42, 0.95);
+      border: 1px solid var(--cyber-gold);
+      padding: 4px 14px;
+      border-radius: 20px;
+      font-size: 12px;
+      font-weight: 700;
+      color: var(--cyber-gold);
+      box-shadow: 0 2px 10px rgba(0, 0, 0, 0.7), 0 0 10px var(--cyber-gold-glow);
+      display: flex;
+      align-items: center;
+      gap: 6px;
+    }
+
+    /* Pre-Actions Row (Before Hero's Turn) */
+    .preactions-row {
+      display: flex;
+      align-items: center;
+      justify-content: space-around;
+      gap: 6px;
       background: rgba(15, 23, 42, 0.7);
-      border: 1px solid var(--glass-border);
-      border-radius: 14px;
+      border: 1px solid rgba(255, 255, 255, 0.08);
+      border-radius: 12px;
       padding: 6px 10px;
     }
 
-    .raise-stepper-row {
+    .preaction-toggle {
       display: flex;
       align-items: center;
-      justify-content: space-between;
-      gap: 10px;
+      gap: 6px;
+      font-size: 12px;
+      font-weight: 600;
+      color: var(--text-muted);
+      cursor: pointer;
+    }
+
+    .preaction-toggle input[type="checkbox"] {
+      appearance: none;
+      -webkit-appearance: none;
+      width: 17px;
+      height: 17px;
+      border-radius: 5px;
+      border: 1.5px solid rgba(255, 255, 255, 0.25);
+      background: rgba(0, 0, 0, 0.4);
+      cursor: pointer;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      transition: all 0.2s ease;
+    }
+
+    .preaction-toggle input[type="checkbox"]:checked {
+      background: var(--neon-cyan);
+      border-color: var(--neon-cyan);
+      box-shadow: 0 0 8px var(--neon-cyan-glow);
+    }
+
+    .preaction-toggle input[type="checkbox"]:checked::after {
+      content: "✓";
+      color: #000;
+      font-size: 12px;
+      font-weight: 900;
+    }
+
+    /* Bet Slider & Multiplier Buttons */
+    .raise-control-box {
+      display: flex;
+      flex-direction: column;
+      gap: 6px;
+      background: rgba(10, 14, 22, 0.85);
+      border: 1px solid rgba(212, 175, 55, 0.2);
+      border-radius: 14px;
+      padding: 8px 10px;
+    }
+
+    .multipliers-row {
+      display: grid;
+      grid-template-columns: repeat(5, 1fr);
+      gap: 5px;
+    }
+
+    .multiplier-chip {
+      background: rgba(255, 255, 255, 0.07);
+      border: 1px solid rgba(255, 255, 255, 0.12);
+      color: var(--text-main);
+      font-family: var(--font-num);
+      font-size: 11px;
+      font-weight: 700;
+      padding: 6px 2px;
+      border-radius: 8px;
+      cursor: pointer;
+      text-align: center;
+      transition: all 0.18s ease;
+    }
+
+    .multiplier-chip:active {
+      transform: scale(0.94);
+      background: rgba(212, 175, 55, 0.2);
+      border-color: var(--cyber-gold);
+      color: var(--cyber-gold);
+    }
+
+    /* Slider Row with Steppers */
+    .slider-row {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      position: relative;
     }
 
     .stepper-btn {
-      width: 32px;
-      height: 30px;
-      border-radius: 8px;
-      background: rgba(255, 255, 255, 0.1);
-      border: 1px solid var(--glass-border);
-      color: #fff;
-      font-size: 16px;
+      width: 38px;
+      height: 38px;
+      flex-shrink: 0;
+      border-radius: 10px;
+      background: rgba(255, 255, 255, 0.08);
+      border: 1px solid rgba(255, 255, 255, 0.15);
+      color: var(--text-main);
+      font-size: 20px;
       font-weight: 800;
       display: flex;
       align-items: center;
       justify-content: center;
       cursor: pointer;
+      transition: all 0.15s ease;
     }
 
-    .stepper-btn:active { background: rgba(255, 255, 255, 0.2); }
+    .stepper-btn:active {
+      transform: scale(0.9);
+      background: rgba(212, 175, 55, 0.25);
+      border-color: var(--cyber-gold);
+    }
 
-    .raise-slider-wrap {
+    .slider-track-wrap {
       flex: 1;
+      position: relative;
       display: flex;
       align-items: center;
     }
 
-    input[type="range"].poker-slider {
-      width: 100%;
-      height: 6px;
-      -webkit-appearance: none;
-      background: #1e293b;
+    /* Floating Tooltip directly above Thumb */
+    .slider-tooltip {
+      position: absolute;
+      top: -28px;
+      left: 0;
+      transform: translateX(-50%);
+      background: var(--cyber-gold);
+      color: #000;
+      font-family: var(--font-num);
+      font-weight: 900;
+      font-size: 12px;
+      padding: 2px 7px;
       border-radius: 6px;
-      outline: none;
-      cursor: pointer;
+      white-space: nowrap;
+      pointer-events: none;
+      box-shadow: 0 2px 8px rgba(0, 0, 0, 0.6);
+      transition: opacity 0.15s ease;
     }
 
-    input[type="range"].poker-slider::-webkit-slider-thumb {
+    .slider-tooltip::after {
+      content: "";
+      position: absolute;
+      top: 100%;
+      left: 50%;
+      transform: translateX(-50%);
+      border: 4px solid transparent;
+      border-top-color: var(--cyber-gold);
+    }
+
+    /* Custom Cyberpunk Range Slider */
+    .poker-range-slider {
+      width: 100%;
+      appearance: none;
       -webkit-appearance: none;
-      width: 20px;
-      height: 20px;
-      border-radius: 50%;
-      background: var(--gold);
-      box-shadow: 0 0 10px var(--gold-glow);
-      cursor: pointer;
-      border: 2px solid #fff;
-    }
-
-    .raise-amount-badge {
-      font-family: var(--font-num);
-      font-weight: 700;
-      font-size: 13px;
-      color: var(--gold);
-      min-width: 65px;
-      text-align: right;
-    }
-
-    .raise-number-input {
-      font-family: var(--font-num);
-      font-weight: 700;
-      font-size: 13px;
-      color: var(--gold);
-      background: rgba(0, 0, 0, 0.75);
-      border: 1px solid rgba(245, 158, 11, 0.6);
-      border-radius: 8px;
-      padding: 4px 6px;
-      width: 82px;
-      text-align: right;
+      height: 8px;
+      border-radius: 4px;
+      background: linear-gradient(to right, var(--cyber-gold) var(--slider-pct, 0%), rgba(255, 255, 255, 0.12) var(--slider-pct, 0%));
       outline: none;
-      transition: border-color 0.2s, box-shadow 0.2s;
-    }
-
-    .raise-number-input:focus {
-      border-color: #fff;
-      box-shadow: 0 0 10px rgba(245, 158, 11, 0.5);
-    }
-
-    .presets-row {
-      display: flex;
-      gap: 4px;
-      justify-content: space-between;
-    }
-
-    .preset-chip {
-      flex: 1;
-      background: rgba(255, 255, 255, 0.06);
-      border: 1px solid rgba(255, 255, 255, 0.08);
-      color: #cbd5e1;
-      font-size: 11px;
-      font-weight: 700;
-      padding: 4px 0;
-      border-radius: 8px;
       cursor: pointer;
-      text-align: center;
-      transition: all 0.15s ease;
     }
 
-    .preset-chip:active {
-      background: var(--gold);
-      color: #111;
+    .poker-range-slider::-webkit-slider-thumb {
+      appearance: none;
+      -webkit-appearance: none;
+      width: 26px;
+      height: 26px;
+      border-radius: 50%;
+      background: radial-gradient(circle, #fde047 20%, #ca8a04 100%);
+      border: 2.5px solid #ffffff;
+      box-shadow: 0 0 10px var(--cyber-gold-glow), 0 2px 6px rgba(0, 0, 0, 0.6);
+      cursor: pointer;
+      transition: transform 0.1s ease;
     }
 
-    /* Action Buttons Grid */
+    .poker-range-slider::-webkit-slider-thumb:active {
+      transform: scale(1.18);
+    }
+
+    /* Main Action Buttons Grid (Thumb Zone - 48-56px height) */
     .actions-grid {
       display: grid;
-      grid-template-columns: 1fr 1fr 1fr;
+      grid-template-columns: 1fr 1.2fr 1.2fr;
       gap: 8px;
     }
 
     .btn-act {
+      height: 52px;
+      border-radius: 14px;
       border: none;
-      border-radius: 12px;
-      padding: 12px 6px;
-      font-family: var(--font-main);
-      font-size: 14px;
-      font-weight: 800;
-      cursor: pointer;
       display: flex;
       flex-direction: column;
       align-items: center;
       justify-content: center;
-      gap: 2px;
-      color: #fff;
-      transition: transform 0.1s ease, filter 0.2s ease;
-      box-shadow: 0 4px 12px rgba(0,0,0,0.3);
+      font-family: var(--font-main);
+      font-size: 15px;
+      font-weight: 800;
+      letter-spacing: 0.3px;
+      cursor: pointer;
+      transition: all 0.18s cubic-bezier(0.4, 0, 0.2, 1);
+      box-shadow: 0 4px 12px rgba(0, 0, 0, 0.5);
     }
 
     .btn-act:active {
-      transform: scale(0.96);
+      transform: scale(0.95);
     }
 
     .btn-act:disabled {
       opacity: 0.35;
       cursor: not-allowed;
-      filter: grayscale(0.8);
       transform: none !important;
     }
 
-    .btn-fold {
-      background: linear-gradient(135deg, #ef4444 0%, #b91c1c 100%);
-      border: 1px solid rgba(239, 68, 68, 0.5);
-    }
-
-    .btn-check-call {
-      background: linear-gradient(135deg, #10b981 0%, #047857 100%);
-      border: 1px solid rgba(16, 185, 129, 0.5);
-    }
-
-    .btn-raise {
-      background: linear-gradient(135deg, #f59e0b 0%, #d97706 100%);
-      border: 1px solid rgba(245, 158, 11, 0.5);
-    }
-
-    .btn-allin {
-      grid-column: span 3;
-      background: linear-gradient(135deg, #dc2626 0%, #7f1d1d 50%, #ea580c 100%);
-      border: 1px solid rgba(234, 88, 12, 0.7);
-      box-shadow: 0 0 16px rgba(234, 88, 12, 0.3);
-      padding: 10px;
-    }
-
-    .btn-sub-txt {
-      font-size: 10px;
-      opacity: 0.88;
+    .btn-sub-label {
+      font-family: var(--font-num);
+      font-size: 11px;
       font-weight: 600;
+      opacity: 0.85;
+      margin-top: 1px;
     }
 
-    /* Turn Wait State */
-    .turn-wait-banner {
+    /* Fold Button */
+    .btn-fold {
+      background: var(--btn-fold-bg);
+      border: 1.5px solid var(--btn-fold-border);
+      color: var(--btn-fold-text);
+    }
+
+    /* Check / Call Button */
+    .btn-call {
+      background: var(--btn-call-bg);
+      border: 1.5px solid var(--btn-call-border);
+      color: var(--btn-call-text);
+      box-shadow: 0 4px 16px rgba(37, 99, 235, 0.4);
+    }
+
+    /* Raise Button */
+    .btn-raise {
+      background: var(--btn-raise-bg);
+      border: 1.5px solid var(--btn-raise-border);
+      color: var(--btn-raise-text);
+      box-shadow: 0 4px 16px rgba(220, 38, 38, 0.4);
+    }
+
+    /* All-In Pulsing Button */
+    .btn-allin-bar {
+      height: 48px;
+      background: linear-gradient(135deg, #b91c1c, #dc2626);
+      border: 1.5px solid #f87171;
+      color: #ffffff;
+      font-family: var(--font-main);
+      font-weight: 900;
+      font-size: 15px;
+      border-radius: 12px;
       display: flex;
       align-items: center;
       justify-content: center;
       gap: 8px;
+      box-shadow: 0 0 16px var(--neon-crimson-glow);
+      cursor: pointer;
+    }
+
+    /* Waiting Status Banner */
+    .turn-wait-banner {
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      gap: 10px;
       padding: 14px;
-      background: rgba(15, 23, 42, 0.6);
-      border: 1px dashed rgba(255, 255, 255, 0.15);
+      background: rgba(15, 23, 42, 0.8);
+      border: 1px solid rgba(255, 255, 255, 0.08);
       border-radius: 14px;
       color: var(--text-muted);
       font-size: 13px;
       font-weight: 600;
     }
 
-    .turn-wait-dot {
-      width: 8px;
-      height: 8px;
+    .turn-wait-spinner {
+      width: 10px;
+      height: 10px;
       border-radius: 50%;
-      background: #38bdf8;
-      animation: waitDot 1.2s infinite ease-in-out;
+      background: var(--neon-cyan);
+      box-shadow: 0 0 10px var(--neon-cyan);
+      animation: pulse-dot 1.4s infinite ease-in-out;
     }
 
-    @keyframes waitDot {
-      0%, 100% { opacity: 0.3; transform: scale(0.8); }
-      50% { opacity: 1; transform: scale(1.2); }
-    }
-
-    /* Lobby State Controls */
-    .lobby-panel {
-      display: flex;
-      flex-direction: column;
-      gap: 8px;
-      padding: 6px 0;
-    }
-
-    .lobby-sync-badge {
-      display: flex;
-      align-items: center;
-      gap: 6px;
-      background: rgba(14, 165, 233, 0.12);
-      border: 1px solid rgba(14, 165, 233, 0.3);
-      color: #7dd3fc;
-      border-radius: 10px;
-      padding: 6px 10px;
-      font-size: 11px;
-      line-height: 1.3;
-    }
-
-    .lobby-btns-row {
-      display: flex;
-      gap: 8px;
-    }
-
-    .lobby-btns-row button {
-      flex: 1;
-      padding: 12px;
-      border-radius: 12px;
-      font-size: 14px;
-      font-weight: 800;
-      border: none;
-      cursor: pointer;
-      color: #fff;
-    }
-
-    .btn-join {
-      background: linear-gradient(135deg, #2563eb, #1d4ed8);
-      box-shadow: 0 4px 14px rgba(37, 99, 235, 0.4);
-    }
-
-    .btn-start {
-      background: linear-gradient(135deg, #10b981, #059669);
-      box-shadow: 0 4px 14px rgba(16, 185, 129, 0.4);
-    }
-
-    .btn-start:disabled {
-      opacity: 0.4;
-      cursor: not-allowed;
-      box-shadow: none;
-    }
-
-    /* =========================================================================
-       6. LIVE EVENT TOAST NOTIFIER
-       ========================================================================= */
+    /* Event Notification Toast */
     .event-toast {
       position: absolute;
-      top: 54px;
+      top: 58px;
       left: 50%;
-      transform: translateX(-50%);
-      background: rgba(15, 23, 42, 0.9);
-      border: 1px solid var(--glass-border);
-      backdrop-filter: blur(8px);
-      padding: 5px 14px;
+      transform: translateX(-50%) translateY(-20px);
+      background: rgba(15, 23, 42, 0.95);
+      border: 1px solid var(--cyber-gold);
+      color: var(--text-main);
+      padding: 8px 16px;
       border-radius: 20px;
-      font-size: 12px;
-      color: #e2e8f0;
-      white-space: nowrap;
-      box-shadow: 0 6px 20px rgba(0,0,0,0.5);
-      z-index: 60;
-      pointer-events: none;
-      transition: all 0.3s ease;
+      font-size: 12.5px;
+      font-weight: 700;
+      box-shadow: 0 8px 24px rgba(0, 0, 0, 0.9), 0 0 14px var(--cyber-gold-glow);
       opacity: 0;
+      pointer-events: none;
+      transition: all 0.3s cubic-bezier(0.18, 0.89, 0.32, 1.28);
+      z-index: 80;
+      white-space: pre-line;
+      text-align: center;
+      max-width: 90%;
     }
 
     .event-toast.show {
       opacity: 1;
-      transform: translateX(-50%) translateY(4px);
+      transform: translateX(-50%) translateY(0);
     }
 
-    /* =========================================================================
-       7. ACTIVE ROOMS MODAL
-       ========================================================================= */
+    /* Modals */
     .modal-overlay {
       position: fixed;
       inset: 0;
-      background: rgba(0, 0, 0, 0.75);
-      backdrop-filter: blur(6px);
-      display: none;
+      background: rgba(0, 0, 0, 0.85);
+      backdrop-filter: blur(8px);
+      display: flex;
       align-items: center;
       justify-content: center;
-      padding: 16px;
       z-index: 100;
+      opacity: 0;
+      pointer-events: none;
+      transition: opacity 0.25s ease;
+      padding: 16px;
     }
 
     .modal-overlay.open {
-      display: flex;
+      opacity: 1;
+      pointer-events: auto;
     }
 
     .modal-card {
-      background: #0f172a;
-      border: 1px solid var(--glass-border);
-      border-radius: 20px;
       width: 100%;
-      max-width: 420px;
-      max-height: 80vh;
+      max-width: 360px;
+      background: #0f141c;
+      border: 1px solid var(--glass-border);
+      border-radius: var(--radius-lg);
+      box-shadow: 0 20px 50px rgba(0, 0, 0, 0.95), 0 0 30px rgba(212, 175, 55, 0.15);
+      overflow: hidden;
       display: flex;
       flex-direction: column;
-      overflow: hidden;
-      box-shadow: 0 20px 40px rgba(0,0,0,0.8);
     }
 
     .modal-header {
+      padding: 14px 18px;
+      border-bottom: 1px solid rgba(255, 255, 255, 0.08);
       display: flex;
       align-items: center;
       justify-content: space-between;
-      padding: 14px 18px;
-      border-bottom: 1px solid var(--glass-border);
     }
 
     .modal-title {
+      font-family: var(--font-brand);
       font-size: 16px;
       font-weight: 700;
-      color: var(--text-main);
-    }
-
-    .modal-body {
-      padding: 14px 18px;
-      overflow-y: auto;
-      display: flex;
-      flex-direction: column;
-      gap: 10px;
+      color: var(--cyber-gold);
     }
 
     .room-item-card {
+      padding: 12px 14px;
+      border-bottom: 1px solid rgba(255, 255, 255, 0.06);
       display: flex;
       align-items: center;
       justify-content: space-between;
-      background: rgba(255, 255, 255, 0.05);
-      border: 1px solid rgba(255, 255, 255, 0.08);
-      padding: 10px 14px;
-      border-radius: 12px;
       cursor: pointer;
-      transition: all 0.2s ease;
     }
 
     .room-item-card:hover {
-      background: rgba(255, 255, 255, 0.1);
-      border-color: var(--gold);
-    }
-
-    .room-item-info {
-      display: flex;
-      flex-direction: column;
-      gap: 2px;
-    }
-
-    .room-item-title {
-      font-size: 14px;
-      font-weight: 700;
-      color: #fff;
-    }
-
-    .room-item-sub {
-      font-size: 12px;
-      color: var(--text-muted);
+      background: rgba(255, 255, 255, 0.04);
     }
   </style>
 </head>
 <body>
   <div class="app-root">
-    <!-- Header Bar -->
+    <!-- Zone 1: Top Status Bar (Header) -->
     <header class="app-header">
       <div class="header-left">
-        <span class="casino-logo">🂡</span>
-        <div class="room-badge-group">
-          <div class="room-title">
-            <span id="roomNameLabel">Загрузка...</span>
-            <span class="chat-pill" id="chatPill">ЧАТ</span>
-          </div>
-          <div class="room-sub" id="headerSub">Подключение...</div>
+        <button class="icon-btn" id="soundBtn" title="Звук">🔊</button>
+        <button class="icon-btn" id="roomsListBtn" title="Комнаты">🗂</button>
+      </div>
+
+      <div class="header-center-info">
+        <div class="round-indicator">
+          <div class="round-dot"></div>
+          <span id="headerRoundText">РАЗДАЧА #1</span>
+        </div>
+        <div class="header-pot-wrap">
+          <span class="header-pot-label">БАНК:</span>
+          <span class="header-pot-val" id="headerPotVal">0</span>
         </div>
       </div>
+
       <div class="header-right">
-        <button class="icon-btn" id="soundBtn" title="Звук">🔊</button>
-        <button class="icon-btn" id="roomsListBtn" title="Активные столы">🗂</button>
-        <div class="status-dot" id="onlineDot" title="Статус сети"></div>
+        <div class="hero-balance-badge" id="heroHeaderBalance">
+          <span>🪙</span>
+          <span id="heroBalanceText">50 000</span>
+        </div>
       </div>
     </header>
 
-    <!-- Event Notification Toast -->
+    <!-- Event Toast -->
     <div class="event-toast" id="eventToast"></div>
 
-    <!-- 3D Poker Arena -->
-    <div class="table-viewport">
+    <!-- Zone 2: Poker Arena (Oval Table & Player Pods) -->
+    <main class="arena-viewport">
       <div class="poker-table">
-        <div class="table-watermark">TEXAS HOLD'EM</div>
+        <div class="table-logo-watermark">CYBER POKER CLUB</div>
 
-        <!-- Center Pot & Board Cards -->
-        <div class="board-center">
-          <div class="pot-display" id="potDisplay">
-            <span class="pot-icon">🪙</span>
-            <span class="pot-amount" id="potText">БАНК: 0</span>
+        <!-- Center Hub: Board Cards & Pot -->
+        <div class="table-center-hub">
+          <div class="center-pot-plate">
+            <span class="chip-icon">🪙</span>
+            <span class="pot-sum" id="centerPotSum">0</span>
           </div>
-          <div class="street-pill" id="streetPill">ОЖИДАНИЕ</div>
-          <div class="community-cards" id="boardCards">
-            <div class="card-slot"></div>
-            <div class="card-slot"></div>
-            <div class="card-slot"></div>
-            <div class="card-slot"></div>
-            <div class="card-slot"></div>
+
+          <div class="community-cards-row" id="boardCardsRow">
+            <div class="card-slot-placeholder"></div>
+            <div class="card-slot-placeholder"></div>
+            <div class="card-slot-placeholder"></div>
+            <div class="card-slot-placeholder"></div>
+            <div class="card-slot-placeholder"></div>
           </div>
         </div>
 
-        <!-- Dynamic Seats around Table -->
-        <div class="seats-layer" id="seatsLayer"></div>
+        <!-- Dynamic Radial Player Pods -->
+        <div class="seats-container" id="seatsContainer"></div>
       </div>
-    </div>
+    </main>
 
-    <!-- Hero Station & Actions (Bottom) -->
-    <footer class="hero-station">
-      <!-- Player Combination Badge -->
-      <div class="combo-banner" id="comboBanner" style="display: none;">
-        <span>💡</span>
-        <span id="comboText">Твоя комбинация</span>
-      </div>
+    <!-- Zone 3: Hero Interactive Dock (Bottom Thumb Zone) -->
+    <footer class="hero-interactive-dock">
+      <!-- Pocket Cards of Hero -->
+      <div class="hero-cards-deck" id="heroCardsDeck"></div>
 
-      <!-- Hero Hand Cards -->
-      <div class="hero-cards-wrap" id="heroCardsWrap"></div>
-
-      <!-- Hero Balance & Info -->
-      <div class="hero-status-bar">
-        <div class="hero-stack-info">
-          <span>Стек:</span>
-          <span id="heroStack">🪙 0</span>
-        </div>
-        <div id="heroToCall">К уравниванию: 0</div>
+      <!-- Winning Hand Combination Badge -->
+      <div class="hand-combo-badge" id="handComboBadge" style="display: none;">
+        <span>🏆</span>
+        <span id="handComboText">Две пары</span>
       </div>
 
-      <!-- Dynamic Action Controls -->
-      <div id="actionControls"></div>
+      <!-- Action Panel Content (Turn / Pre-actions / Lobby) -->
+      <div id="heroActionPanel"></div>
     </footer>
   </div>
 
@@ -1146,44 +1186,36 @@
         <div class="modal-title">🂡 Покерные столы</div>
         <button class="icon-btn" id="closeModalBtn">✕</button>
       </div>
-      <div class="modal-body" id="roomsModalList">
-        <div style="text-align:center; color: var(--text-muted); padding: 20px;">Загрузка списка столов...</div>
-      </div>
+      <div class="modal-body" id="roomsModalList" style="max-height: 380px; overflow-y: auto;"></div>
     </div>
   </div>
 
   <!-- Modal: Custom Bet Input -->
   <div class="modal-overlay" id="customBetModal">
-    <div class="modal-card" style="max-width: 330px;">
+    <div class="modal-card" style="max-width: 320px;">
       <div class="modal-header">
         <div class="modal-title">✍️ Своя ставка</div>
         <button class="icon-btn" id="closeCustomBetModalBtn">✕</button>
       </div>
-      <div class="modal-body" style="display:flex; flex-direction:column; gap:12px; padding: 16px 18px 20px;">
-        <div style="font-size:12px; color:var(--text-muted); display:flex; justify-content:space-between;">
-          <span>Мин: <b id="customBetMin" style="color:var(--gold);">0</b></span>
-          <span>Макс: <b id="customBetMax" style="color:var(--gold);">0</b></span>
+      <div style="padding: 14px 16px; display: flex; flex-direction: column; gap: 10px;">
+        <div style="font-size: 11px; color: var(--text-muted); display: flex; justify-content: space-between;">
+          <span>Мин: <b id="cbetMinLabel" style="color:var(--cyber-gold);">0</b></span>
+          <span>Макс: <b id="cbetMaxLabel" style="color:var(--cyber-gold);">0</b></span>
         </div>
-        <div>
-          <input type="number" id="customBetInput" class="raise-number-input" 
-                 style="width:100%; font-size:20px; padding:10px 12px; text-align:center; height:46px; border-radius:10px;" 
-                 placeholder="Сумма">
+        <input type="number" id="customBetInput" 
+               style="width: 100%; height: 46px; background: rgba(0,0,0,0.5); border: 1.5px solid var(--cyber-gold); border-radius: 12px; color: #fff; font-family: var(--font-num); font-size: 20px; font-weight: 800; text-align: center; outline: none;" 
+               placeholder="Сумма" />
+        <div style="display: grid; grid-template-columns: repeat(3, 1fr); gap: 6px;">
+          <button type="button" class="multiplier-chip" id="cbAdd1k">+1k</button>
+          <button type="button" class="multiplier-chip" id="cbAdd5k">+5k</button>
+          <button type="button" class="multiplier-chip" id="cbAdd10k">+10k</button>
+          <button type="button" class="multiplier-chip" id="cbHalf">½ Банка</button>
+          <button type="button" class="multiplier-chip" id="cbPot">Банк</button>
+          <button type="button" class="multiplier-chip" id="cbAllin">All-in</button>
         </div>
-        <div style="display:grid; grid-template-columns: repeat(3, 1fr); gap:6px;">
-          <button type="button" class="preset-chip" style="padding:8px 4px;" id="cbetAdd1k">+1k</button>
-          <button type="button" class="preset-chip" style="padding:8px 4px;" id="cbetAdd5k">+5k</button>
-          <button type="button" class="preset-chip" style="padding:8px 4px;" id="cbetAdd10k">+10k</button>
-          <button type="button" class="preset-chip" style="padding:8px 4px;" id="cbetHalf">½ Банка</button>
-          <button type="button" class="preset-chip" style="padding:8px 4px;" id="cbetPot">Банк</button>
-          <button type="button" class="preset-chip" style="padding:8px 4px;" id="cbetAllIn">All-In</button>
-        </div>
-        <div style="display:flex; gap:8px; margin-top:6px;">
-          <button type="button" class="btn-act btn-fold" style="flex:1;" id="cancelCustomBetBtn">
-            Отмена
-          </button>
-          <button type="button" class="btn-act btn-raise" style="flex:1.5;" id="confirmCustomBetBtn">
-            📈 Поставить
-          </button>
+        <div style="display: flex; gap: 8px; margin-top: 6px;">
+          <button type="button" class="btn-act btn-fold" style="flex: 1; height: 44px;" id="cancelCustomBetBtn">Отмена</button>
+          <button type="button" class="btn-act btn-raise" style="flex: 1.5; height: 44px;" id="confirmCustomBetBtn">📈 Поставить</button>
         </div>
       </div>
     </div>
@@ -1203,7 +1235,7 @@
     } catch(e) {}
   }
 
-  // Sound Synthesizer (Native Web Audio API - Zero External Assets)
+  // Sound Synthesizer (Zero External Audio Assets)
   const SoundFX = {
     ctx: null,
     enabled: localStorage.getItem("poker_sound") !== "0",
@@ -1227,13 +1259,13 @@
       const gain = this.ctx.createGain();
       osc.type = "sine";
       osc.frequency.setValueAtTime(2200, t);
-      osc.frequency.exponentialRampToValueAtTime(1400, t + 0.06);
-      gain.gain.setValueAtTime(0.3, t);
-      gain.gain.exponentialRampToValueAtTime(0.001, t + 0.07);
+      osc.frequency.exponentialRampToValueAtTime(1400, t + 0.05);
+      gain.gain.setValueAtTime(0.25, t);
+      gain.gain.exponentialRampToValueAtTime(0.001, t + 0.06);
       osc.connect(gain);
       gain.connect(this.ctx.destination);
       osc.start(t);
-      osc.stop(t + 0.08);
+      osc.stop(t + 0.07);
     },
     deal() {
       if (!this.enabled) return;
@@ -1243,51 +1275,32 @@
       const osc = this.ctx.createOscillator();
       const gain = this.ctx.createGain();
       osc.type = "triangle";
-      osc.frequency.setValueAtTime(450, t);
-      osc.frequency.exponentialRampToValueAtTime(120, t + 0.09);
+      osc.frequency.setValueAtTime(400, t);
+      osc.frequency.exponentialRampToValueAtTime(110, t + 0.08);
       gain.gain.setValueAtTime(0.2, t);
-      gain.gain.exponentialRampToValueAtTime(0.01, t + 0.09);
+      gain.gain.exponentialRampToValueAtTime(0.01, t + 0.08);
       osc.connect(gain);
       gain.connect(this.ctx.destination);
       osc.start(t);
-      osc.stop(t + 0.1);
-    },
-    knock() {
-      if (!this.enabled) return;
-      this.init();
-      if (!this.ctx) return;
-      const t = this.ctx.currentTime;
-      [0, 0.07].forEach((delay) => {
-        const osc = this.ctx.createOscillator();
-        const gain = this.ctx.createGain();
-        osc.type = "sine";
-        osc.frequency.setValueAtTime(120, t + delay);
-        osc.frequency.exponentialRampToValueAtTime(50, t + delay + 0.05);
-        gain.gain.setValueAtTime(0.4, t + delay);
-        gain.gain.exponentialRampToValueAtTime(0.01, t + delay + 0.05);
-        osc.connect(gain);
-        gain.connect(this.ctx.destination);
-        osc.start(t + delay);
-        osc.stop(t + delay + 0.06);
-      });
+      osc.stop(t + 0.09);
     },
     fanfare() {
       if (!this.enabled) return;
       this.init();
       if (!this.ctx) return;
       const t = this.ctx.currentTime;
-      const notes = [523.25, 659.25, 783.99, 1046.50]; // C5, E5, G5, C6
+      const notes = [523.25, 659.25, 783.99, 1046.50];
       notes.forEach((freq, idx) => {
         const osc = this.ctx.createOscillator();
         const gain = this.ctx.createGain();
         osc.type = "triangle";
-        osc.frequency.setValueAtTime(freq, t + idx * 0.1);
-        gain.gain.setValueAtTime(0.25, t + idx * 0.1);
-        gain.gain.exponentialRampToValueAtTime(0.001, t + idx * 0.1 + 0.35);
+        osc.frequency.setValueAtTime(freq, t + idx * 0.09);
+        gain.gain.setValueAtTime(0.22, t + idx * 0.09);
+        gain.gain.exponentialRampToValueAtTime(0.001, t + idx * 0.09 + 0.3);
         osc.connect(gain);
         gain.connect(this.ctx.destination);
-        osc.start(t + idx * 0.1);
-        osc.stop(t + idx * 0.1 + 0.36);
+        osc.start(t + idx * 0.09);
+        osc.stop(t + idx * 0.09 + 0.32);
       });
     },
     turnAlert() {
@@ -1299,17 +1312,17 @@
       const gain = this.ctx.createGain();
       osc.type = "sine";
       osc.frequency.setValueAtTime(880, t);
-      osc.frequency.setValueAtTime(1174.66, t + 0.1);
+      osc.frequency.setValueAtTime(1174, t + 0.08);
       gain.gain.setValueAtTime(0.25, t);
-      gain.gain.exponentialRampToValueAtTime(0.001, t + 0.28);
+      gain.gain.exponentialRampToValueAtTime(0.001, t + 0.25);
       osc.connect(gain);
       gain.connect(this.ctx.destination);
       osc.start(t);
-      osc.stop(t + 0.3);
+      osc.stop(t + 0.26);
     }
   };
 
-  // Haptic feedback helper
+  // Telegram Haptic Feedback
   function triggerHaptic(type = "light") {
     if (tg && tg.HapticFeedback) {
       try {
@@ -1322,15 +1335,13 @@
     }
   }
 
-  // Query and room resolution
+  // Room & WebSocket URL
   const params = new URLSearchParams(location.search);
   const startParam = (tg && tg.initDataUnsafe && tg.initDataUnsafe.start_param) || "";
   const room = (params.get("room") || startParam || "main").slice(0, 48);
   const initData = (tg && tg.initData) || "";
 
-  // DOM Elements
   const $ = (id) => document.getElementById(id);
-  const RED_SUITS = new Set(["♦", "♥", "d", "h"]);
 
   let ws = null;
   let state = null;
@@ -1339,36 +1350,55 @@
   let lastEventMsg = "";
   let currentRaiseVal = 0;
   let lastTurnUid = null;
+  let displayedHeroStack = 0;
+  let turnTimerTicker = null;
+  let currentTurnSec = 120;
+
+  // Pre-action checkbox states
+  const preactions = {
+    checkFold: false,
+    callAny: false,
+    autoFold: false
+  };
 
   // Format chip numbers with spaces
   function fmtChips(n) {
-    return Number(n || 0).toLocaleString("ru-RU").replace(/\u00A0/g, " ");
+    const num = Number(n || 0);
+    return num.toLocaleString("ru-RU").replace(/\u00A0/g, " ");
   }
 
-  // Parse card string into {rank, suit, isRed, isBack}
+  // 4-Color Deck Parsing (Spades: White, Hearts: Red, Diamonds: Sky Cyan, Clubs: Emerald)
   function parseCard(c) {
     if (!c || c === "🂠") return { isBack: true };
     const clean = c.trim();
     const lastChar = clean.slice(-1);
-    const suit = lastChar;
     const rank = clean.slice(0, -1);
-    const isRed = RED_SUITS.has(suit);
-    return { rank, suit, isRed, isBack: false };
+    let suitClass = "suit-spade";
+    let icon = "♠";
+    if (lastChar === "♥" || lastChar === "h") {
+      suitClass = "suit-heart"; icon = "♥";
+    } else if (lastChar === "♦" || lastChar === "d") {
+      suitClass = "suit-diamond"; icon = "♦";
+    } else if (lastChar === "♣" || lastChar === "c") {
+      suitClass = "suit-club"; icon = "♣";
+    } else {
+      suitClass = "suit-spade"; icon = "♠";
+    }
+    return { rank, icon, suitClass, isBack: false };
   }
 
-  // Create card DOM element
   function createCardEl(cardStr, isHero = false) {
     const info = parseCard(cardStr);
     const el = document.createElement("div");
     if (info.isBack) {
-      el.className = `p-card back ${isHero ? "hero-card" : ""}`;
+      el.className = `p-card card-back ${isHero ? "hero-pocket-card" : ""}`;
       return el;
     }
-    el.className = `p-card ${info.isRed ? "red" : "black"} ${isHero ? "hero-card" : ""}`;
+    el.className = `p-card ${info.suitClass} ${isHero ? "hero-pocket-card" : ""}`;
     el.innerHTML = `
-      <div class="rank">${escapeHtml(info.rank)}</div>
-      <div class="suit-center">${escapeHtml(info.suit)}</div>
-      <div class="rank-bot">${escapeHtml(info.rank)}</div>
+      <div class="card-rank-top">${escapeHtml(info.rank)}</div>
+      <div class="card-suit-mid">${info.icon}</div>
+      <div class="card-rank-bot">${escapeHtml(info.rank)}</div>
     `;
     return el;
   }
@@ -1377,54 +1407,48 @@
     return String(s || "").replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
   }
 
-  // Show Toast
   function showToast(text) {
     if (!text) return;
     const t = $("eventToast");
     t.textContent = text;
     t.classList.add("show");
     clearTimeout(t._timer);
-    t._timer = setTimeout(() => t.classList.remove("show"), 3200);
+    t._timer = setTimeout(() => t.classList.remove("show"), 3000);
   }
 
-  // Render Whole Game Screen
+  // Render Full Screen
   function render() {
     if (!state) return;
     myUid = state.you ? state.you.uid : null;
 
-    // 1. Header Information
-    const isChat = state.code.startsWith("chat_");
-    $("chatPill").style.display = isChat ? "inline-block" : "none";
-    $("roomNameLabel").textContent = state.chat_title || (isChat ? "Стол чата" : `Комната «${state.code}»`);
-    
-    if (state.phase === "lobby") {
-      $("headerSub").textContent = `Лобби · Мин. ${state.min_players} игрока · Блайнды: ${fmtChips(state.small_blind)} / ${fmtChips(state.big_blind)}`;
-    } else {
-      $("headerSub").textContent = `Раздача #${state.hand_no} · ${state.street || "Игра"} · Блайнды: ${fmtChips(state.small_blind)}/${fmtChips(state.big_blind)}`;
-    }
+    // 1. Zone 1: Header Bar & Pot
+    const roundTxt = state.phase === "lobby" ? "ЛОББИ СТОЛА" : `РАЗДАЧА #${state.hand_no || 1} · ${(state.street || 'ИГРА').toUpperCase()}`;
+    $("headerRoundText").textContent = roundTxt;
+    $("headerPotVal").textContent = fmtChips(state.pot);
+    $("centerPotSum").textContent = fmtChips(state.pot);
 
-    // 2. Central Pot and Street
-    $("potText").textContent = `БАНК: ${fmtChips(state.pot)}`;
-    $("streetPill").textContent = state.phase === "lobby" ? "ЛОББИ" : (state.street || "РАЗДАЧА").toUpperCase();
-
-    // 3. Community Board Cards
-    const boardWrap = $("boardCards");
-    boardWrap.innerHTML = "";
-    const boardCards = state.board || [];
-    for (let i = 0; i < 5; i++) {
-      if (i < boardCards.length) {
-        boardWrap.appendChild(createCardEl(boardCards[i]));
-      } else {
-        const slot = document.createElement("div");
-        slot.className = "card-slot";
-        boardWrap.appendChild(slot);
+    // Hero Balance Counter Animation
+    const meSeat = (state.seats || []).find(s => s.is_me);
+    const newStack = meSeat ? meSeat.stack : 0;
+    const balEl = $("heroHeaderBalance");
+    if (displayedHeroStack !== newStack) {
+      if (displayedHeroStack !== 0) {
+        balEl.classList.remove("glow-inc", "glow-dec");
+        void balEl.offsetWidth; // reflow
+        balEl.classList.add(newStack > displayedHeroStack ? "glow-inc" : "glow-dec");
+        setTimeout(() => balEl.classList.remove("glow-inc", "glow-dec"), 1200);
       }
+      displayedHeroStack = newStack;
     }
+    $("heroBalanceText").textContent = fmtChips(displayedHeroStack);
 
-    // 4. Seats Placement (Radial mapping)
+    // 2. Zone 2: Community Cards on Board
+    renderBoardCards();
+
+    // 3. Zone 2: Player Pods
     renderSeats();
 
-    // 5. Toast on new events
+    // 4. Toast on Events
     if (state.last_event && state.last_event !== lastEventMsg) {
       lastEventMsg = state.last_event;
       showToast(lastEventMsg);
@@ -1434,242 +1458,291 @@
       }
     }
 
-    // 6. Turn Sound Alert
+    // 5. Sound on My Turn
     const isMyTurn = (state.current_turn === myUid) && (state.phase === "playing");
     if (isMyTurn && lastTurnUid !== myUid) {
       SoundFX.turnAlert();
       triggerHaptic("warning");
+      // Check pre-actions on turn arrival
+      if (tryExecutePreaction()) {
+        lastTurnUid = state.current_turn;
+        return;
+      }
     }
     lastTurnUid = state.current_turn;
 
-    // 7. Hero Hand Cards & Combination Banner
-    renderHeroStation();
+    // 6. Zone 3: Hero Cards & Hand Combo
+    renderHeroCards();
 
-    // 8. Action Controller
-    renderActionControls();
+    // 7. Zone 3: Bottom Action Panel
+    renderActionPanel();
   }
 
-  // Render 8-Seat Oval Map
+  // Render Community Cards
+  function renderBoardCards() {
+    const row = $("boardCardsRow");
+    row.innerHTML = "";
+    const cards = state.board || [];
+    for (let i = 0; i < 5; i++) {
+      if (i < cards.length) {
+        row.appendChild(createCardEl(cards[i]));
+      } else {
+        const slot = document.createElement("div");
+        slot.className = "card-slot-placeholder";
+        row.appendChild(slot);
+      }
+    }
+  }
+
+  // Render 8 Seats Around Table
   function renderSeats() {
-    const layer = $("seatsLayer");
-    layer.innerHTML = "";
+    const container = $("seatsContainer");
+    container.innerHTML = "";
     const seats = state.seats || [];
     const dealerUid = state.dealer_uid;
+    const payouts = state.last_payouts || {};
 
-    // Arrange seats relative to Hero at position 4 (Bottom Center)
-    let myIndex = seats.findIndex(s => s.is_me);
-    if (myIndex === -1) myIndex = 0;
+    let myIdx = seats.findIndex(s => s.is_me);
+    if (myIdx === -1) myIdx = 0;
 
     seats.forEach((s, idx) => {
-      // Calculate visual position offset so Hero is at bottom
-      const visualPos = (idx - myIndex + 4 + 8) % 8;
+      // Rotate seats so Hero is always at bottom position 4
+      const visualPos = (idx - myIdx + 4 + 8) % 8;
 
-      const node = document.createElement("div");
-      node.className = `seat-node ${s.is_turn ? "is-turn" : ""} ${s.is_me ? "is-me" : ""} ${s.folded ? "folded" : ""}`;
-      node.setAttribute("data-pos", visualPos);
+      const pod = document.createElement("div");
+      const isTurn = s.is_turn && state.phase === "playing";
+      const isFolded = s.folded;
+      const isBusted = (!s.in_table && s.stack <= 0) || s.stack <= 0;
 
-      // Mini cards over seat
-      if (s.cards && s.cards.length && !s.is_me) {
-        const mcWrap = document.createElement("div");
-        mcWrap.className = "seat-cards-mini";
-        s.cards.forEach(c => mcWrap.appendChild(createCardEl(c)));
-        node.appendChild(mcWrap);
+      pod.className = `player-pod ${isTurn ? "is-turn" : ""} ${s.is_me ? "is-me" : ""} ${isFolded ? "folded" : ""} ${isBusted ? "busted" : ""}`;
+      pod.setAttribute("data-pos", visualPos);
+
+      // Opponent Mini Pocket Cards
+      if (s.cards && s.cards.length && !s.is_me && !isFolded && !isBusted) {
+        const oppCardsWrap = document.createElement("div");
+        oppCardsWrap.className = "opponent-mini-cards";
+        s.cards.forEach(c => oppCardsWrap.appendChild(createCardEl(c)));
+        pod.appendChild(oppCardsWrap);
       }
 
-      // Avatar circle
-      const av = document.createElement("div");
-      av.className = "seat-avatar-wrap";
-      const initials = (s.name || "P").slice(0, 2).toUpperCase();
-      av.textContent = initials;
+      // Avatar Capsule with Circular Timer
+      const avWrap = document.createElement("div");
+      avWrap.className = "avatar-wrapper";
 
-      // Circular 2-Minute Turn Timer Ring
-      if (s.is_turn && state.phase === "playing") {
+      // Circular SVG Countdown Timer Ring
+      if (isTurn) {
         const svg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
-        svg.setAttribute("class", "turn-timer-svg");
+        svg.setAttribute("class", "timer-ring-svg");
         svg.setAttribute("viewBox", "0 0 56 56");
         
         const circleBg = document.createElementNS("http://www.w3.org/2000/svg", "circle");
-        circleBg.setAttribute("class", "turn-timer-bg");
+        circleBg.setAttribute("class", "timer-ring-bg");
         circleBg.setAttribute("cx", "28");
         circleBg.setAttribute("cy", "28");
         circleBg.setAttribute("r", "24");
         
         const circleProg = document.createElementNS("http://www.w3.org/2000/svg", "circle");
-        circleProg.setAttribute("class", "turn-timer-prog");
-        circleProg.setAttribute("id", "turnTimerProg");
+        circleProg.setAttribute("class", "timer-ring-prog");
+        circleProg.setAttribute("id", "timerRingProg");
         circleProg.setAttribute("cx", "28");
         circleProg.setAttribute("cy", "28");
         circleProg.setAttribute("r", "24");
-        circleProg.setAttribute("stroke-dasharray", "150.8");
-        circleProg.setAttribute("stroke-dashoffset", "0");
         
         svg.appendChild(circleBg);
         svg.appendChild(circleProg);
-        av.appendChild(svg);
-
-        const badge = document.createElement("div");
-        badge.className = "turn-timer-badge";
-        badge.id = "turnTimerBadge";
-        badge.textContent = "2:00";
-        av.appendChild(badge);
+        avWrap.appendChild(svg);
       }
 
-      // Dealer badge
+      const avInner = document.createElement("div");
+      avInner.className = "avatar-inner";
+      avInner.textContent = (s.name || "P").slice(0, 2).toUpperCase();
+      avWrap.appendChild(avInner);
+
+      // Dealer Chip 'D'
       if (dealerUid && s.uid === dealerUid) {
-        const dBtn = document.createElement("div");
-        dBtn.className = "dealer-btn";
-        dBtn.textContent = "D";
-        av.appendChild(dBtn);
+        const dChip = document.createElement("div");
+        dChip.className = "dealer-chip";
+        dChip.textContent = "D";
+        avWrap.appendChild(dChip);
       }
-      node.appendChild(av);
+      pod.appendChild(avWrap);
 
-      // Info pill (Name & Stack)
-      const pill = document.createElement("div");
-      pill.className = "seat-info-pill";
+      // Info Capsule (Name + Stack)
+      const capsule = document.createElement("div");
+      capsule.className = "pod-info-capsule";
+
       let statusTxt = "";
-      if (!s.in_table && s.stack <= 0) statusTxt = "Выбыл";
-      else if (s.disqualified) statusTxt = "⛔ Выбыл (пропуск)";
+      if (isBusted) statusTxt = "Выбыл";
+      else if (s.disqualified) statusTxt = "⛔ Выбыл";
       else if (s.folded) statusTxt = "Пас";
       else if (s.all_in) statusTxt = "ALL-IN";
       else if (s.showdown) statusTxt = s.showdown;
       else if (s.last_action) statusTxt = s.last_action;
 
-      let missBadgeHtml = "";
-      if (s.misses === 1 && s.in_table && !s.disqualified) {
-        missBadgeHtml = `<div class="seat-warning-pill">⚠️ 1 пропуск (ещё один = выбывание)</div>`;
-      }
-
-      pill.innerHTML = `
-        <div class="seat-name">${escapeHtml(s.name)}${s.is_me ? " (ты)" : ""}${s.is_host ? " 👑" : ""}</div>
-        <div class="seat-chips">🪙 ${fmtChips(s.stack)}</div>
-        ${statusTxt ? `<div class="seat-action-text">${escapeHtml(statusTxt)}</div>` : ""}
-        ${missBadgeHtml}
+      capsule.innerHTML = `
+        <div class="pod-nickname">${escapeHtml(s.name)}${s.is_me ? " (ты)" : ""}${s.is_host ? " 👑" : ""}</div>
+        <div class="pod-stack">🪙 ${fmtChips(s.stack)}</div>
+        ${statusTxt ? `<div class="pod-status-text">${escapeHtml(statusTxt)}</div>` : ""}
       `;
-      node.appendChild(pill);
+      pod.appendChild(capsule);
 
-      // Current street bet chip pile
-      if (s.bet > 0) {
+      // BUG FIX: Do NOT display street bet badge for busted players or when hand is over
+      if (s.bet > 0 && !isBusted && state.phase === "playing") {
         const betBadge = document.createElement("div");
-        betBadge.className = "seat-bet-badge";
+        betBadge.className = "pod-bet-badge";
         betBadge.textContent = `🪙 ${fmtChips(s.bet)}`;
-        node.appendChild(betBadge);
+        pod.appendChild(betBadge);
       }
 
-      layer.appendChild(node);
+      // Flying Win Label (+3,400) if player received payout in this hand
+      if (payouts[s.uid] && payouts[s.uid] > 0) {
+        const winTag = document.createElement("div");
+        winTag.className = "pod-win-floater";
+        winTag.textContent = `+${fmtChips(payouts[s.uid])}`;
+        pod.appendChild(winTag);
+      }
+
+      container.appendChild(pod);
     });
   }
 
-  // Render Hero Cards & Combination Banner
-  function renderHeroStation() {
-    const heroCardsWrap = $("heroCardsWrap");
-    heroCardsWrap.innerHTML = "";
-    const comboBanner = $("comboBanner");
+  // Render Hero Pocket Cards & Combo Banner
+  function renderHeroCards() {
+    const deck = $("heroCardsDeck");
+    deck.innerHTML = "";
+    const comboBadge = $("handComboBadge");
     const meSeat = (state.seats || []).find(s => s.is_me);
 
-    if (meSeat) {
-      $("heroStack").textContent = `🪙 ${fmtChips(meSeat.stack)}`;
+    const cards = (meSeat && meSeat.cards && meSeat.cards.length) ? meSeat.cards : [];
+    if (cards.length && cards[0] !== "🂠") {
+      cards.forEach(c => {
+        const cardEl = createCardEl(c, true);
+        if (state.you && state.you.combo && (state.phase === "between_hands" || state.phase === "finished")) {
+          cardEl.classList.add("winning-highlight");
+        }
+        deck.appendChild(cardEl);
+      });
     }
-    const toCall = state.you ? (state.you.to_call || 0) : 0;
-    $("heroToCall").textContent = toCall > 0 ? `К уравниванию: ${fmtChips(toCall)}` : "Чек доступен";
 
-    // Cards
-    const myCards = meSeat && meSeat.cards && meSeat.cards.length ? meSeat.cards : [];
-    if (myCards.length && myCards[0] !== "🂠") {
-      myCards.forEach(c => heroCardsWrap.appendChild(createCardEl(c, true)));
-    }
-
-    // Combination name
-    const comboName = state.you && state.you.combo;
-    if (comboName) {
-      comboBanner.style.display = "flex";
-      $("comboText").textContent = comboName;
+    const combo = state.you && state.you.combo;
+    if (combo && cards.length && cards[0] !== "🂠") {
+      comboBadge.style.display = "flex";
+      $("handComboText").textContent = combo;
     } else {
-      comboBanner.style.display = "none";
+      comboBadge.style.display = "none";
     }
   }
 
-  // Render Betting & Action Buttons
-  function renderActionControls() {
-    const box = $("actionControls");
-    box.innerHTML = "";
+  // Pre-action Execution Helper
+  function tryExecutePreaction() {
+    const opts = (state.you && state.you.options) || {};
+    if (!opts || Object.keys(opts).length === 0) return false;
+
+    if (preactions.autoFold && opts.fold) {
+      preactions.autoFold = false;
+      send("action", { action: "fold" });
+      SoundFX.deal();
+      triggerHaptic("medium");
+      return true;
+    }
+    if (preactions.checkFold) {
+      preactions.checkFold = false;
+      if (opts.check) {
+        send("action", { action: "check" });
+        SoundFX.knock();
+        triggerHaptic("light");
+        return true;
+      } else if (opts.fold) {
+        send("action", { action: "fold" });
+        SoundFX.deal();
+        triggerHaptic("medium");
+        return true;
+      }
+    }
+    if (preactions.callAny && opts.call) {
+      preactions.callAny = false;
+      send("action", { action: "call" });
+      SoundFX.chip();
+      triggerHaptic("medium");
+      return true;
+    }
+    return false;
+  }
+
+  // Render Bottom Action Panel
+  function renderActionPanel() {
+    const panel = $("heroActionPanel");
+    panel.innerHTML = "";
     const phase = state.phase;
     const you = state.you || {};
+    const opts = you.options || {};
+    const meSeat = (state.seats || []).find(s => s.is_me);
 
-    // 1. Lobby State
+    // 1. Lobby Phase
     if (phase === "lobby") {
-      const lobby = document.createElement("div");
-      lobby.className = "lobby-panel";
-      lobby.innerHTML = `
-        <div class="lobby-sync-badge">
-          <span>💬</span>
-          <span><b>Синхронизировано с Telegram:</b> игроки из чата и веб-приложения играют за одним живым столом.</span>
-        </div>
-      `;
-      const btnRow = document.createElement("div");
-      btnRow.className = "lobby-btns-row";
-
-      const joinBtn = document.createElement("button");
-      joinBtn.className = "btn-join";
-      joinBtn.textContent = you.seated ? "✅ Ты за столом" : "🪑 Сесть за стол";
-      joinBtn.disabled = you.seated;
-      joinBtn.onclick = () => {
-        SoundFX.chip();
-        triggerHaptic("medium");
-        send("join");
-      };
-      btnRow.appendChild(joinBtn);
-
-      const startBtn = document.createElement("button");
-      startBtn.className = "btn-start";
+      const lobbyBox = document.createElement("div");
+      lobbyBox.style.cssText = "display:flex; flex-direction:column; gap:8px;";
+      
       const seatedCount = (state.seats || []).length;
-      startBtn.textContent = seatedCount < state.min_players ? `▶️ Начать (${seatedCount}/${state.min_players})` : "▶️ Начать игру";
-      startBtn.disabled = seatedCount < state.min_players;
-      startBtn.onclick = () => {
-        SoundFX.deal();
-        triggerHaptic("heavy");
-        send("start");
-      };
-      btnRow.appendChild(startBtn);
+      const canStart = seatedCount >= (state.min_players || 2);
 
-      if (state.is_host) {
-        const closeBtn = document.createElement("button");
-        closeBtn.className = "btn-act btn-fold";
-        closeBtn.textContent = "🛑 Закрыть стол";
-        closeBtn.style.maxWidth = "160px";
-        closeBtn.onclick = () => {
-          send("close_table");
-          showToast("Стол закрыт.");
+      lobbyBox.innerHTML = `
+        <div class="turn-wait-banner" style="padding:10px;">
+          <span>Игроков за столом: <b>${seatedCount}</b> / 9 (мин. ${state.min_players || 2})</span>
+        </div>
+        <div style="display:flex; gap:8px;">
+          <button class="btn-act btn-call" id="lobbyJoinBtn" style="flex:1;">
+            ${you.seated ? "✅ Ты за столом" : "🪑 Сесть за стол"}
+          </button>
+          <button class="btn-act btn-raise" id="lobbyStartBtn" style="flex:1.2;" ${canStart ? "" : "disabled"}>
+            ▶️ Начать игру
+          </button>
+        </div>
+      `;
+      panel.appendChild(lobbyBox);
+
+      const jBtn = $("lobbyJoinBtn");
+      if (jBtn) {
+        jBtn.disabled = you.seated;
+        jBtn.onclick = () => {
+          SoundFX.chip();
+          triggerHaptic("medium");
+          send("join");
         };
-        btnRow.appendChild(closeBtn);
       }
-
-      lobby.appendChild(btnRow);
-      box.appendChild(lobby);
+      const sBtn = $("lobbyStartBtn");
+      if (sBtn) {
+        sBtn.onclick = () => {
+          SoundFX.deal();
+          triggerHaptic("heavy");
+          send("start");
+        };
+      }
       return;
     }
 
-    // 2. Between Hands / Waiting
+    // 2. Between Hands
     if (phase === "between_hands") {
-      box.innerHTML = `
+      panel.innerHTML = `
         <div class="turn-wait-banner">
-          <div class="turn-wait-dot"></div>
-          <span>Раздача завершена. Новая раздача начнётся через несколько секунд...</span>
+          <div class="turn-wait-spinner"></div>
+          <span>Раздача завершена · Новая раздача начнётся через пару секунд...</span>
         </div>
       `;
       return;
     }
 
-    // 3. Finished
+    // 3. Finished / Tournament Over
     if (phase === "finished") {
-      box.innerHTML = `
-        <div class="turn-wait-banner" style="flex-direction:column; gap:12px; padding:16px;">
-          <span style="font-size:16px; font-weight:700; color:var(--gold);">🏆 Игра завершена!</span>
-          <button class="btn-act btn-fold" id="closeTableBtn" style="max-width:240px; margin:0 auto; padding:10px 20px;">
+      panel.innerHTML = `
+        <div class="turn-wait-banner" style="flex-direction:column; gap:10px; padding:16px;">
+          <span style="font-size:16px; font-weight:800; color:var(--cyber-gold);">👑 Турнир окончен!</span>
+          <button class="btn-act btn-fold" id="closeFinTableBtn" style="height:44px; width:200px;">
             🛑 Закрыть стол
           </button>
         </div>
       `;
-      const cBtn = $("closeTableBtn");
+      const cBtn = $("closeFinTableBtn");
       if (cBtn) {
         cBtn.onclick = () => {
           send("close_table");
@@ -1681,229 +1754,449 @@
 
     // 4. Closed State
     if (phase === "closed") {
-      box.innerHTML = `
-        <div class="turn-wait-banner" style="flex-direction:column; gap:8px;">
-          <span style="font-size:16px; color:#ef4444; font-weight:700;">🛑 Стол закрыт</span>
-          <span style="font-size:12px; opacity:0.8;">Игра завершена организатором.</span>
+      panel.innerHTML = `
+        <div class="turn-wait-banner" style="flex-direction:column; gap:6px;">
+          <span style="font-size:15px; color:#ef4444; font-weight:800;">🛑 Стол закрыт</span>
+          <span style="font-size:11px;">Игра завершена организатором.</span>
         </div>
       `;
       return;
     }
 
-    // 5. Playing State: Check if it's My Turn
-    const isMyTurn = (state.current_turn === myUid) && Object.keys(you.options || {}).length > 0;
+    // 5. Playing Phase: NOT My Turn (Pre-Actions Mode)
+    const isMyTurn = (state.current_turn === myUid) && Object.keys(opts).length > 0;
     if (!isMyTurn) {
       const curTurnSeat = (state.seats || []).find(s => s.uid === state.current_turn);
       const turnName = curTurnSeat ? curTurnSeat.name : "другого игрока";
-      box.innerHTML = `
+
+      const preBox = document.createElement("div");
+      preBox.style.cssText = "display:flex; flex-direction:column; gap:6px;";
+      preBox.innerHTML = `
+        <div class="preactions-row">
+          <label class="preaction-toggle">
+            <input type="checkbox" id="paCheckFold" ${preactions.checkFold ? "checked" : ""}>
+            <span>Чек / Фолд</span>
+          </label>
+          <label class="preaction-toggle">
+            <input type="checkbox" id="paCallAny" ${preactions.callAny ? "checked" : ""}>
+            <span>Колл любой</span>
+          </label>
+          <label class="preaction-toggle">
+            <input type="checkbox" id="paAutoFold" ${preactions.autoFold ? "checked" : ""}>
+            <span>Авто-фолд</span>
+          </label>
+        </div>
         <div class="turn-wait-banner">
-          <div class="turn-wait-dot"></div>
-          <span>Ходит <b>${escapeHtml(turnName)}</b> · Ожидайте свой черёд...</span>
+          <div class="turn-wait-spinner"></div>
+          <span>Ходит <b>${escapeHtml(turnName)}</b> · Ждите свою очередь...</span>
         </div>
       `;
+      panel.appendChild(preBox);
+
+      // Pre-action checkbox listeners
+      $("paCheckFold").onchange = (e) => { preactions.checkFold = e.target.checked; triggerHaptic("light"); };
+      $("paCallAny").onchange = (e) => { preactions.callAny = e.target.checked; triggerHaptic("light"); };
+      $("paAutoFold").onchange = (e) => { preactions.autoFold = e.target.checked; triggerHaptic("light"); };
       return;
     }
 
-    // --- Active Turn Controls ---
-    const opts = you.options || {};
+    // 6. Playing Phase: ACTIVE MY TURN!
     const toCall = you.to_call || 0;
-    const meSeat = (state.seats || []).find(s => s.is_me) || { stack: 0, bet: 0 };
-    const maxRaise = opts.max_raise_to || ((meSeat.stack || 0) + (meSeat.bet || 0));
+    const heroStack = (meSeat && meSeat.stack) || 0;
+    const heroBet = (meSeat && meSeat.bet) || 0;
+    const maxRaise = opts.max_raise_to || (heroStack + heroBet);
     const minRaise = opts.min_raise_to || (state.current_bet + state.big_blind);
 
     if (currentRaiseVal < minRaise || currentRaiseVal > maxRaise) {
       currentRaiseVal = Math.min(minRaise, maxRaise);
     }
 
+    const actionBox = document.createElement("div");
+    actionBox.style.cssText = "display:flex; flex-direction:column; gap:8px;";
+
     // Raise Slider Box (if raise is permitted)
     if (opts.can_raise && maxRaise >= minRaise) {
       const raiseBox = document.createElement("div");
-      raiseBox.className = "raise-controller";
+      raiseBox.className = "raise-control-box";
 
-      // Stepper & Slider
-      const stepRow = document.createElement("div");
-      stepRow.className = "raise-stepper-row";
+      // 4 Multipliers Row (Min, 1/2 Pot, Pot, All-in, Custom)
+      const multRow = document.createElement("div");
+      multRow.className = "multipliers-row";
+
+      const halfPot = Math.min(maxRaise, Math.max(minRaise, Math.floor(state.pot / 2) + state.current_bet));
+      const fullPot = Math.min(maxRaise, Math.max(minRaise, state.pot + state.current_bet));
+
+      const presets = [
+        { label: "Мин", val: minRaise },
+        { label: "½ Пота", val: halfPot },
+        { label: "Пот", val: fullPot },
+        { label: "All-in", val: maxRaise },
+        { label: "✍️ Своя", isCustom: true }
+      ];
+
+      presets.forEach(pr => {
+        const btn = document.createElement("button");
+        btn.className = "multiplier-chip";
+        btn.textContent = pr.label;
+        if (pr.isCustom) {
+          btn.style.color = "var(--cyber-gold)";
+          btn.style.borderColor = "var(--cyber-gold)";
+        }
+        btn.onclick = () => {
+          if (pr.isCustom) {
+            openCustomBetModal(minRaise, maxRaise, currentRaiseVal);
+            return;
+          }
+          currentRaiseVal = pr.val;
+          updateRaiseSlider();
+          SoundFX.chip();
+          triggerHaptic("light");
+        };
+        multRow.appendChild(btn);
+      });
+      raiseBox.appendChild(multRow);
+
+      // Slider Row: [-] [===●===] [+]
+      const sRow = document.createElement("div");
+      sRow.className = "slider-row";
 
       const minusBtn = document.createElement("button");
       minusBtn.className = "stepper-btn";
       minusBtn.textContent = "−";
       minusBtn.onclick = () => {
-        currentRaiseVal = Math.max(minRaise, currentRaiseVal - state.big_blind);
+        currentRaiseVal = Math.max(minRaise, currentRaiseVal - (state.big_blind || 1000));
         updateRaiseSlider();
         SoundFX.chip();
         triggerHaptic("light");
       };
 
-      const sliderWrap = document.createElement("div");
-      sliderWrap.className = "raise-slider-wrap";
+      const trackWrap = document.createElement("div");
+      trackWrap.className = "slider-track-wrap";
+
+      const tooltip = document.createElement("div");
+      tooltip.className = "slider-tooltip";
+      tooltip.id = "sliderTooltip";
+      tooltip.textContent = fmtChips(currentRaiseVal);
+
       const slider = document.createElement("input");
       slider.type = "range";
-      slider.className = "poker-slider";
+      slider.className = "poker-range-slider";
+      slider.id = "pokerSlider";
       slider.min = minRaise;
       slider.max = maxRaise;
-      slider.step = state.big_blind;
+      slider.step = state.big_blind || 1000;
       slider.value = currentRaiseVal;
+
       slider.oninput = (e) => {
         currentRaiseVal = Number(e.target.value);
         updateRaiseSlider();
+        triggerHaptic("light");
       };
-      sliderWrap.appendChild(slider);
+
+      trackWrap.appendChild(tooltip);
+      trackWrap.appendChild(slider);
 
       const plusBtn = document.createElement("button");
       plusBtn.className = "stepper-btn";
       plusBtn.textContent = "+";
       plusBtn.onclick = () => {
-        currentRaiseVal = Math.min(maxRaise, currentRaiseVal + state.big_blind);
+        currentRaiseVal = Math.min(maxRaise, currentRaiseVal + (state.big_blind || 1000));
         updateRaiseSlider();
         SoundFX.chip();
         triggerHaptic("light");
       };
 
-      const amountInput = document.createElement("input");
-      amountInput.type = "number";
-      amountInput.className = "raise-number-input";
-      amountInput.id = "raiseBadgeVal";
-      amountInput.min = minRaise;
-      amountInput.max = maxRaise;
-      amountInput.step = state.big_blind;
-      amountInput.value = currentRaiseVal;
-      amountInput.title = "Нажмите, чтобы ввести свою сумму ставки";
-      amountInput.oninput = (e) => {
-        const val = parseInt(e.target.value, 10);
-        if (!isNaN(val)) {
-          currentRaiseVal = Math.max(minRaise, Math.min(maxRaise, val));
-          if (slider) slider.value = currentRaiseVal;
-          const raiseBtn = $("mainRaiseBtn");
-          if (raiseBtn) raiseBtn.innerHTML = `📈 Рейз<span class="btn-sub-txt">${fmtChips(currentRaiseVal)}</span>`;
-        }
-      };
-      amountInput.onblur = () => {
-        amountInput.value = currentRaiseVal;
-      };
+      sRow.appendChild(minusBtn);
+      sRow.appendChild(trackWrap);
+      sRow.appendChild(plusBtn);
+      raiseBox.appendChild(sRow);
 
-      stepRow.appendChild(minusBtn);
-      stepRow.appendChild(sliderWrap);
-      stepRow.appendChild(plusBtn);
-      stepRow.appendChild(amountInput);
-      raiseBox.appendChild(stepRow);
-
-      // Quick Preset Chips
-      const presetsRow = document.createElement("div");
-      presetsRow.className = "presets-row";
-
-      const presets = [
-        { label: "Мин", val: minRaise },
-        { label: "2x", val: Math.min(maxRaise, state.current_bet * 2 || minRaise) },
-        { label: "1/2 Банка", val: Math.min(maxRaise, Math.max(minRaise, Math.floor(state.pot / 2))) },
-        { label: "Банк", val: Math.min(maxRaise, Math.max(minRaise, state.pot)) },
-        { label: "All-in", val: maxRaise },
-        { label: "✍️ Своя сумма", isCustom: true }
-      ];
-
-      presets.forEach(pr => {
-        const prBtn = document.createElement("button");
-        prBtn.className = "preset-chip";
-        prBtn.textContent = pr.label;
-        if (pr.isCustom) {
-          prBtn.style.color = "var(--gold)";
-          prBtn.style.borderColor = "var(--gold)";
-        }
-        prBtn.onclick = () => {
-          if (pr.isCustom) {
-            openCustomBetModal(minRaise, maxRaise, currentRaiseVal, slider);
-            return;
-          }
-          currentRaiseVal = pr.val;
-          slider.value = pr.val;
-          updateRaiseSlider();
-          SoundFX.chip();
-          triggerHaptic("light");
-        };
-        presetsRow.appendChild(prBtn);
-      });
-      raiseBox.appendChild(presetsRow);
-      box.appendChild(raiseBox);
+      actionBox.appendChild(raiseBox);
     }
 
-    function updateRaiseSlider() {
-      const b = $("raiseBadgeVal");
-      if (b) b.value = currentRaiseVal;
-      const raiseBtn = $("mainRaiseBtn");
-      if (raiseBtn) raiseBtn.innerHTML = `📈 Рейз<span class="btn-sub-txt">${fmtChips(currentRaiseVal)}</span>`;
-    }
-
-    // Grid Action Buttons: Fold, Check/Call, Raise
-    const grid = document.createElement("div");
-    grid.className = "actions-grid";
+    // Primary Action Buttons (Thumb Zone: Fold, Check/Call, Raise)
+    const actGrid = document.createElement("div");
+    actGrid.className = "actions-grid";
 
     // 1. Fold Button
     const foldBtn = document.createElement("button");
     foldBtn.className = "btn-act btn-fold";
-    foldBtn.innerHTML = `↩️ Пас<span class="btn-sub-txt">Сбросить</span>`;
+    foldBtn.innerHTML = `<span>↩️ Пас</span><span class="btn-sub-label">Сбросить</span>`;
     foldBtn.onclick = () => {
       SoundFX.deal();
       triggerHaptic("medium");
       send("action", { action: "fold" });
     };
-    grid.appendChild(foldBtn);
+    actGrid.appendChild(foldBtn);
 
     // 2. Check / Call Button
-    const checkCallBtn = document.createElement("button");
-    checkCallBtn.className = "btn-act btn-check-call";
-    if (opts.check) {
-      checkCallBtn.innerHTML = `✅ Чек<span class="btn-sub-txt">Бесплатно</span>`;
-      checkCallBtn.onclick = () => {
+    const callBtn = document.createElement("button");
+    callBtn.className = "btn-act btn-call";
+    if (toCall <= 0) {
+      callBtn.innerHTML = `<span>✅ Чек</span><span class="btn-sub-label">Бесплатно</span>`;
+      callBtn.onclick = () => {
         SoundFX.knock();
         triggerHaptic("light");
         send("action", { action: "check" });
       };
     } else {
-      checkCallBtn.innerHTML = `💰 Колл<span class="btn-sub-txt">${fmtChips(toCall)}</span>`;
-      checkCallBtn.onclick = () => {
+      callBtn.innerHTML = `<span>💰 Колл</span><span class="btn-sub-label">${fmtChips(toCall)}</span>`;
+      callBtn.onclick = () => {
         SoundFX.chip();
         triggerHaptic("medium");
         send("action", { action: "call" });
       };
     }
-    grid.appendChild(checkCallBtn);
+    actGrid.appendChild(callBtn);
 
-    // 3. Raise Button
-    const raiseBtn = document.createElement("button");
-    raiseBtn.className = "btn-act btn-raise";
-    raiseBtn.id = "mainRaiseBtn";
-    raiseBtn.disabled = !opts.can_raise;
-    raiseBtn.innerHTML = `📈 Рейз<span class="btn-sub-txt">${fmtChips(currentRaiseVal)}</span>`;
-    raiseBtn.onclick = () => {
-      SoundFX.chip();
-      triggerHaptic("heavy");
-      send("action", { action: "raise", amount: currentRaiseVal });
-    };
-    grid.appendChild(raiseBtn);
-
-    // 4. All-in Button (if available)
-    if (opts.all_in) {
+    // 3. Raise / All-in Button
+    if (opts.can_raise && maxRaise >= minRaise) {
+      const raiseBtn = document.createElement("button");
+      raiseBtn.className = "btn-act btn-raise";
+      raiseBtn.id = "mainRaiseBtn";
+      const isAllInRaise = (currentRaiseVal >= maxRaise);
+      raiseBtn.innerHTML = isAllInRaise 
+        ? `<span>🚨 ALL-IN</span><span class="btn-sub-label">${fmtChips(currentRaiseVal)}</span>`
+        : `<span>📈 Рейз</span><span class="btn-sub-label">${fmtChips(currentRaiseVal)}</span>`;
+      raiseBtn.onclick = () => {
+        SoundFX.chip();
+        triggerHaptic("heavy");
+        if (currentRaiseVal >= maxRaise) {
+          send("action", { action: "allin" });
+        } else {
+          send("action", { action: "raise", amount: currentRaiseVal });
+        }
+      };
+      actGrid.appendChild(raiseBtn);
+    } else if (opts.all_in) {
       const allInBtn = document.createElement("button");
-      allInBtn.className = "btn-act btn-allin";
-      allInBtn.innerHTML = `🚨 ВА-БАНК (ALL-IN)<span class="btn-sub-txt">${fmtChips(opts.all_in_to || meSeat.stack)} фишек</span>`;
+      allInBtn.className = "btn-act btn-raise";
+      allInBtn.innerHTML = `<span>🚨 ALL-IN</span><span class="btn-sub-label">${fmtChips(heroStack)}</span>`;
       allInBtn.onclick = () => {
         SoundFX.chip();
         triggerHaptic("heavy");
         send("action", { action: "allin" });
       };
-      grid.appendChild(allInBtn);
+      actGrid.appendChild(allInBtn);
     }
 
-    box.appendChild(grid);
+    actionBox.appendChild(actGrid);
+    panel.appendChild(actionBox);
+
+    // Initialize raise slider visual positions
+    updateRaiseSlider();
   }
 
-  // WebSocket Connection and Lifecycle
+  // BUG FIX #2: Synchronize slider.value, tooltip and CSS gradient fill
+  function updateRaiseSlider() {
+    const slider = $("pokerSlider");
+    const tooltip = $("sliderTooltip");
+    const raiseBtn = $("mainRaiseBtn");
+    if (!slider) return;
+
+    slider.value = currentRaiseVal;
+
+    const min = Number(slider.min) || 0;
+    const max = Number(slider.max) || 100;
+    const pct = max > min ? Math.max(0, Math.min(1, (currentRaiseVal - min) / (max - min))) : 0;
+    
+    slider.style.setProperty("--slider-pct", `${(pct * 100).toFixed(1)}%`);
+
+    if (tooltip) {
+      tooltip.textContent = fmtChips(currentRaiseVal);
+      tooltip.style.left = `${(pct * 100).toFixed(1)}%`;
+    }
+
+    if (raiseBtn) {
+      const isAllIn = (currentRaiseVal >= max);
+      raiseBtn.innerHTML = isAllIn
+        ? `<span>🚨 ALL-IN</span><span class="btn-sub-label">${fmtChips(currentRaiseVal)}</span>`
+        : `<span>📈 Рейз</span><span class="btn-sub-label">${fmtChips(currentRaiseVal)}</span>`;
+    }
+  }
+
+  // Turn Timer Countdown Visual & Circular Ring Ticker
+  function updateTurnTimerVisual() {
+    const progEl = $("timerRingProg");
+    if (!progEl) return;
+    
+    const total = (state && state.turn_timeout_sec) ? state.turn_timeout_sec : 120;
+    const pct = Math.max(0, Math.min(1, currentTurnSec / total));
+    const circ = 157.0; // 2 * PI * 25
+    const offset = circ * (1 - pct);
+    
+    progEl.style.strokeDashoffset = offset;
+    if (currentTurnSec <= 5) {
+      progEl.classList.add("danger");
+      // Pulse haptic on <= 3 sec
+      if (state.current_turn === myUid && currentTurnSec <= 3 && currentTurnSec > 0) {
+        triggerHaptic("warning");
+      }
+    } else {
+      progEl.classList.remove("danger");
+    }
+  }
+
+  function initTurnTimerTicker() {
+    if (turnTimerTicker) clearInterval(turnTimerTicker);
+    turnTimerTicker = setInterval(() => {
+      if (state && state.phase === "playing" && state.current_turn) {
+        if (currentTurnSec > 0) {
+          currentTurnSec -= 1;
+        }
+        updateTurnTimerVisual();
+      }
+    }, 1000);
+  }
+
+  // Custom Bet Modal Handlers
+  function openCustomBetModal(minVal, maxVal, curVal) {
+    const modal = $("customBetModal");
+    if (!modal) return;
+    $("cbetMinLabel").textContent = fmtChips(minVal);
+    $("cbetMaxLabel").textContent = fmtChips(maxVal);
+    const input = $("customBetInput");
+    input.min = minVal;
+    input.max = maxVal;
+    input.value = curVal || minVal;
+    modal.classList.add("open");
+    setTimeout(() => { input.focus(); input.select(); }, 150);
+  }
+
+  function addCustomBet(amt) {
+    const input = $("customBetInput");
+    if (!input) return;
+    const min = Number(input.min) || 0;
+    const max = Number(input.max) || 100000;
+    let cur = parseInt(input.value, 10) || min;
+    cur = Math.min(max, cur + amt);
+    input.value = cur;
+    SoundFX.chip();
+    triggerHaptic("light");
+  }
+
+  function setCustomBetRatio(type) {
+    const input = $("customBetInput");
+    if (!input) return;
+    const min = Number(input.min) || 0;
+    const max = Number(input.max) || 100000;
+    let val = min;
+    if (type === "half") {
+      val = Math.min(max, Math.max(min, Math.floor((state.pot || 0) / 2) + (state.current_bet || 0)));
+    } else if (type === "pot") {
+      val = Math.min(max, Math.max(min, (state.pot || 0) + (state.current_bet || 0)));
+    } else if (type === "allin") {
+      val = max;
+    }
+    input.value = val;
+    SoundFX.chip();
+    triggerHaptic("light");
+  }
+
+  function initCustomBetModalHandlers() {
+    const confirmBtn = $("confirmCustomBetBtn");
+    if (confirmBtn) {
+      confirmBtn.onclick = () => {
+        const input = $("customBetInput");
+        const min = Number(input.min) || 0;
+        const max = Number(input.max) || 100000;
+        let val = parseInt(input.value, 10);
+        if (isNaN(val) || val < min) val = min;
+        if (val > max) val = max;
+        currentRaiseVal = val;
+        updateRaiseSlider();
+        $("customBetModal").classList.remove("open");
+        SoundFX.chip();
+        triggerHaptic("heavy");
+        if (currentRaiseVal >= max) {
+          send("action", { action: "allin" });
+        } else {
+          send("action", { action: "raise", amount: currentRaiseVal });
+        }
+      };
+    }
+    const closeBtn = $("closeCustomBetModalBtn");
+    if (closeBtn) closeBtn.onclick = () => $("customBetModal").classList.remove("open");
+    const cancelBtn = $("cancelCustomBetBtn");
+    if (cancelBtn) cancelBtn.onclick = () => $("customBetModal").classList.remove("open");
+
+    const b1k = $("cbAdd1k"); if (b1k) b1k.onclick = () => addCustomBet(1000);
+    const b5k = $("cbAdd5k"); if (b5k) b5k.onclick = () => addCustomBet(5000);
+    const b10k = $("cbAdd10k"); if (b10k) b10k.onclick = () => addCustomBet(10000);
+    const bHalf = $("cbHalf"); if (bHalf) bHalf.onclick = () => setCustomBetRatio("half");
+    const bPot = $("cbPot"); if (bPot) bPot.onclick = () => setCustomBetRatio("pot");
+    const bAllIn = $("cbAllin"); if (bAllIn) bAllIn.onclick = () => setCustomBetRatio("allin");
+  }
+
+  // Active Rooms Modal
+  async function loadRoomsModal() {
+    $("roomsModal").classList.add("open");
+    const list = $("roomsModalList");
+    list.innerHTML = "<div style='text-align:center; color:var(--text-muted); padding:16px;'>Загрузка столов...</div>";
+    try {
+      const res = await fetch("/api/rooms");
+      const data = await res.json();
+      if (!data.rooms || !data.rooms.length) {
+        list.innerHTML = `
+          <div style="text-align:center; color:var(--text-muted); padding:20px;">
+            Нет других активных столов.<br>
+            <span style="font-size:12px;">Запустите игру в Telegram командой <b>/holdem</b>!</span>
+          </div>
+        `;
+        return;
+      }
+      list.innerHTML = "";
+      data.rooms.forEach(r => {
+        const item = document.createElement("div");
+        item.className = "room-item-card";
+        const isCurrent = r.code === room;
+        item.innerHTML = `
+          <div>
+            <div style="font-weight:700; color:var(--text-main); font-size:13px;">${escapeHtml(r.chat_title)} ${isCurrent ? "⭐" : ""}</div>
+            <div style="font-size:11px; color:var(--text-muted);">Игроков: ${r.players_count} · Банк: 🪙 ${fmtChips(r.pot)} · ${r.phase}</div>
+          </div>
+          <div style="font-size:12px; font-weight:700; color:var(--cyber-gold);">
+            ${isCurrent ? "Вы здесь" : "Войти →"}
+          </div>
+        `;
+        item.onclick = () => {
+          if (!isCurrent) {
+            location.href = `/?room=${encodeURIComponent(r.code)}`;
+          } else {
+            $("roomsModal").classList.remove("open");
+          }
+        };
+        list.appendChild(item);
+      });
+    } catch(e) {
+      list.innerHTML = "<div style='text-align:center; color:#ef4444; padding:16px;'>Не удалось загрузить столы</div>";
+    }
+  }
+
+  // Access Denied Screen (Private Group Chat Table)
+  function showAccessDeniedScreen(msgText) {
+    const root = document.querySelector(".app-root") || document.body;
+    root.innerHTML = `
+      <div style="display:flex; flex-direction:column; align-items:center; justify-content:center; min-height:85vh; padding:24px; text-align:center;">
+        <div style="font-size:56px; margin-bottom:16px;">🔒</div>
+        <h2 style="font-family:var(--font-brand); color:var(--cyber-gold); margin-bottom:12px; font-size:22px;">Доступ ограничен</h2>
+        <p style="color:var(--text-muted); max-width:320px; line-height:1.5; font-size:14px; margin-bottom:24px;">
+          ${escapeHtml(msgText)}
+        </p>
+        <button onclick="if(window.Telegram&&Telegram.WebApp)Telegram.WebApp.close();else window.history.back();" 
+                style="background:linear-gradient(135deg, #d97706, #b45309); color:#fff; border:none; padding:12px 28px; border-radius:12px; font-weight:700; font-size:15px; cursor:pointer;">
+          Закрыть
+        </button>
+      </div>
+    `;
+  }
+
+  // WebSocket Connection
   function connect() {
     const proto = location.protocol === "https:" ? "wss" : "ws";
     ws = new WebSocket(`${proto}://${location.host}/ws`);
 
     ws.onopen = () => {
-      $("onlineDot").className = "status-dot";
-      $("onlineDot").title = "Онлайн";
       ws.send(JSON.stringify({
         type: "auth",
         initData: initData,
@@ -1937,8 +2230,6 @@
     };
 
     ws.onclose = () => {
-      $("onlineDot").className = "status-dot offline";
-      $("onlineDot").title = "Переподключение...";
       clearTimeout(reconnectTimer);
       reconnectTimer = setTimeout(connect, 1500);
     };
@@ -1954,212 +2245,7 @@
     }
   }
 
-  // Active Rooms Modal logic
-  async function loadRoomsModal() {
-    $("roomsModal").classList.add("open");
-    const list = $("roomsModalList");
-    list.innerHTML = "<div style='text-align:center; color:var(--text-muted); padding:16px;'>Загрузка...</div>";
-    try {
-      const res = await fetch("/api/rooms");
-      const data = await res.json();
-      if (!data.rooms || !data.rooms.length) {
-        list.innerHTML = `
-          <div style="text-align:center; color:var(--text-muted); padding:20px;">
-            Нет других активных столов.<br>
-            <span style="font-size:12px;">Запустите игру в Telegram-чате командой <b>/holdem</b>!</span>
-          </div>
-        `;
-        return;
-      }
-      list.innerHTML = "";
-      data.rooms.forEach(r => {
-        const item = document.createElement("div");
-        item.className = "room-item-card";
-        const isCurrent = r.code === room;
-        item.innerHTML = `
-          <div class="room-item-info">
-            <div class="room-item-title">${escapeHtml(r.chat_title)} ${isCurrent ? "⭐" : ""}</div>
-            <div class="room-item-sub">Игроков: ${r.players_count} · Банк: 🪙 ${fmtChips(r.pot)} · ${r.phase}</div>
-          </div>
-          <div style="font-size: 13px; font-weight: 700; color: var(--gold);">
-            ${isCurrent ? "Вы здесь" : "Войти →"}
-          </div>
-        `;
-        item.onclick = () => {
-          if (!isCurrent) {
-            location.href = `/?room=${encodeURIComponent(r.code)}`;
-          } else {
-            $("roomsModal").classList.remove("open");
-          }
-        };
-        list.appendChild(item);
-      });
-    } catch(e) {
-      list.innerHTML = "<div style='text-align:center; color:#ef4444; padding:16px;'>Не удалось загрузить столы</div>";
-    }
-  }
-
-  // Turn Timer Countdown Visual & Ticker
-  let turnTimerTicker = null;
-  let currentTurnSec = 120;
-
-  function updateTurnTimerVisual() {
-    const progEl = $("turnTimerProg");
-    const badgeEl = $("turnTimerBadge");
-    if (!progEl && !badgeEl) return;
-    
-    const total = (state && state.turn_timeout_sec) ? state.turn_timeout_sec : 120;
-    const pct = Math.max(0, Math.min(1, currentTurnSec / total));
-    const circ = 150.8;
-    const offset = circ * (1 - pct);
-    
-    if (progEl) {
-      progEl.style.strokeDashoffset = offset;
-      if (currentTurnSec <= 10) {
-        progEl.style.stroke = "#ef4444";
-      } else if (currentTurnSec <= 30) {
-        progEl.style.stroke = "#f97316";
-      } else {
-        progEl.style.stroke = "var(--gold)";
-      }
-    }
-    
-    if (badgeEl) {
-      const m = Math.floor(currentTurnSec / 60);
-      const s = currentTurnSec % 60;
-      badgeEl.textContent = `${m}:${s < 10 ? '0' : ''}${s}`;
-      if (currentTurnSec <= 10) {
-        badgeEl.style.borderColor = "#ef4444";
-        badgeEl.style.color = "#f87171";
-      } else if (currentTurnSec <= 30) {
-        badgeEl.style.borderColor = "#f97316";
-        badgeEl.style.color = "#fb923c";
-      } else {
-        badgeEl.style.borderColor = "var(--gold)";
-        badgeEl.style.color = "#fff";
-      }
-    }
-  }
-
-  function initTurnTimerTicker() {
-    if (turnTimerTicker) clearInterval(turnTimerTicker);
-    turnTimerTicker = setInterval(() => {
-      if (state && state.phase === "playing" && state.current_turn) {
-        if (currentTurnSec > 0) {
-          currentTurnSec -= 1;
-        }
-        updateTurnTimerVisual();
-      }
-    }, 1000);
-  }
-
-  // Custom Bet Modal Logic
-  let customBetSliderRef = null;
-
-  function openCustomBetModal(minVal, maxVal, curVal, sliderRef) {
-    customBetSliderRef = sliderRef;
-    const modal = $("customBetModal");
-    if (!modal) return;
-    $("customBetMin").textContent = fmtChips(minVal);
-    $("customBetMax").textContent = fmtChips(maxVal);
-    const input = $("customBetInput");
-    input.min = minVal;
-    input.max = maxVal;
-    input.value = curVal || minVal;
-    modal.classList.add("open");
-    setTimeout(() => {
-      input.focus();
-      input.select();
-    }, 150);
-  }
-
-  function addCustomBet(addAmount) {
-    const input = $("customBetInput");
-    if (!input) return;
-    const meSeat = (state.seats || []).find(s => s.is_me) || { stack: 0, bet: 0 };
-    const opts = (state.you || {}).options || {};
-    const maxVal = opts.max_raise_to || ((meSeat.stack || 0) + (meSeat.bet || 0));
-    const minVal = opts.min_raise_to || (state.current_bet + state.big_blind);
-    let cur = parseInt(input.value, 10) || minVal;
-    cur = Math.min(maxVal, cur + addAmount);
-    input.value = cur;
-    SoundFX.chip();
-    triggerHaptic("light");
-  }
-
-  function setCustomBetPreset(type) {
-    const input = $("customBetInput");
-    if (!input) return;
-    const meSeat = (state.seats || []).find(s => s.is_me) || { stack: 0, bet: 0 };
-    const opts = (state.you || {}).options || {};
-    const maxVal = opts.max_raise_to || ((meSeat.stack || 0) + (meSeat.bet || 0));
-    const minVal = opts.min_raise_to || (state.current_bet + state.big_blind);
-    let val = minVal;
-    if (type === "half") {
-      val = Math.min(maxVal, Math.max(minVal, Math.floor(state.pot / 2)));
-    } else if (type === "pot") {
-      val = Math.min(maxVal, Math.max(minVal, state.pot));
-    } else if (type === "allin") {
-      val = maxVal;
-    }
-    input.value = val;
-    SoundFX.chip();
-    triggerHaptic("light");
-  }
-
-  function initCustomBetModalHandlers() {
-    const confirmBtn = $("confirmCustomBetBtn");
-    if (confirmBtn) {
-      confirmBtn.onclick = () => {
-        const input = $("customBetInput");
-        const meSeat = (state.seats || []).find(s => s.is_me) || { stack: 0, bet: 0 };
-        const opts = (state.you || {}).options || {};
-        const maxVal = opts.max_raise_to || ((meSeat.stack || 0) + (meSeat.bet || 0));
-        const minVal = opts.min_raise_to || (state.current_bet + state.big_blind);
-        let val = parseInt(input.value, 10);
-        if (isNaN(val) || val < minVal) val = minVal;
-        if (val > maxVal) val = maxVal;
-        currentRaiseVal = val;
-        updateRaiseSlider();
-        if (customBetSliderRef) customBetSliderRef.value = currentRaiseVal;
-        $("customBetModal").classList.remove("open");
-        SoundFX.chip();
-        triggerHaptic("heavy");
-        send("action", { action: "raise", amount: currentRaiseVal });
-      };
-    }
-    const closeBtn = $("closeCustomBetModalBtn");
-    if (closeBtn) closeBtn.onclick = () => $("customBetModal").classList.remove("open");
-    const cancelBtn = $("cancelCustomBetBtn");
-    if (cancelBtn) cancelBtn.onclick = () => $("customBetModal").classList.remove("open");
-
-    const b1k = $("cbetAdd1k"); if (b1k) b1k.onclick = () => addCustomBet(1000);
-    const b5k = $("cbetAdd5k"); if (b5k) b5k.onclick = () => addCustomBet(5000);
-    const b10k = $("cbetAdd10k"); if (b10k) b10k.onclick = () => addCustomBet(10000);
-    const bHalf = $("cbetHalf"); if (bHalf) bHalf.onclick = () => setCustomBetPreset("half");
-    const bPot = $("cbetPot"); if (bPot) bPot.onclick = () => setCustomBetPreset("pot");
-    const bAllIn = $("cbetAllIn"); if (bAllIn) bAllIn.onclick = () => setCustomBetPreset("allin");
-  }
-
-  // Access Denied (Private Chat Room) Screen
-  function showAccessDeniedScreen(msgText) {
-    const root = document.querySelector(".app-root") || document.body;
-    root.innerHTML = `
-      <div style="display:flex; flex-direction:column; align-items:center; justify-content:center; min-height:85vh; padding:24px; text-align:center;">
-        <div style="font-size:56px; margin-bottom:16px;">🔒</div>
-        <h2 style="font-family:var(--font-brand); color:var(--gold); margin-bottom:12px; font-size:22px;">Доступ ограничен</h2>
-        <p style="color:var(--text-muted); max-width:320px; line-height:1.5; font-size:14px; margin-bottom:24px;">
-          ${escapeHtml(msgText)}
-        </p>
-        <button onclick="if(window.Telegram&&Telegram.WebApp)Telegram.WebApp.close();else window.history.back();" 
-                style="background:linear-gradient(135deg, #d97706, #b45309); color:#fff; border:none; padding:12px 28px; border-radius:12px; font-weight:700; font-size:15px; cursor:pointer;">
-          Закрыть
-        </button>
-      </div>
-    `;
-  }
-
-  // Header Button Handlers
+  // Header Handlers
   $("soundBtn").onclick = () => {
     const isEnabled = SoundFX.toggle();
     $("soundBtn").textContent = isEnabled ? "🔊" : "🔇";
@@ -2172,16 +2258,12 @@
     triggerHaptic("light");
     loadRoomsModal();
   };
+  $("closeModalBtn").onclick = () => $("roomsModal").classList.remove("open");
 
-  $("closeModalBtn").onclick = () => {
-    $("roomsModal").classList.remove("open");
-  };
-
-  // Initialize helper handlers and timers
   initCustomBetModalHandlers();
   initTurnTimerTicker();
 
-  // Auto-check for active chat rooms if landed on "main"
+  // Auto-check for active chat tables if opened on "main"
   async function checkActiveChatRooms() {
     if (room !== "main") return;
     try {
@@ -2194,13 +2276,12 @@
             if (room === "main" && (!state || !state.seats || state.seats.length <= 1)) {
               loadRoomsModal();
             }
-          }, 900);
+          }, 800);
         }
       }
     } catch(e) {}
   }
 
-  // Start connection
   connect();
   checkActiveChatRooms();
 })();

@@ -59,6 +59,7 @@ def new_table(host_id: int) -> dict:
         "last_event": "",
         "turn_token": 0,
         "turn_start_time": 0,
+        "last_payouts": {},
     }
 
 
@@ -223,6 +224,7 @@ def begin_hand(table: dict, seed: int | None = None) -> dict:
     table["pot"] = 0
     table["current_bet"] = 0
     table["min_raise"] = BIG_BLIND
+    table["last_payouts"] = {}
     _set_turn(table, None)
     table["deck"] = [r + s for r in RANKS for s in SUITS]
     random.Random(seed).shuffle(table["deck"])
@@ -494,6 +496,9 @@ def _award_uncontested(table: dict, winner_uid: int) -> None:
     _set_turn(table, None)
     table["phase"] = "between_hands"
     table["last_event"] = f"🏆 {winner['name']} забрал банк {amount} без вскрытия."
+    table["last_payouts"] = {winner_uid: amount}
+    for p in table["players"].values():
+        p["street_bet"] = 0
     _post_hand_cleanup(table)
 
 
@@ -529,6 +534,9 @@ def _showdown(table: dict) -> None:
     _set_turn(table, None)
     table["phase"] = "between_hands"
     table["last_event"] = "🏁 Вскрытие.\n" + "\n".join(lines)
+    table["last_payouts"] = {uid: amt for uid, amt in payouts.items() if amt > 0}
+    for p in table["players"].values():
+        p["street_bet"] = 0
     _post_hand_cleanup(table)
 
 
@@ -563,6 +571,9 @@ def _post_hand_cleanup(table: dict) -> None:
     for uid, p in table["players"].items():
         if p.get("stack", 0) <= 0:
             p["in_table"] = False
+            p["stack"] = 0
+            p["street_bet"] = 0
+            p["all_in"] = False
     if len(_participants(table)) < 2:
         _finish_tournament(table)
 
@@ -571,6 +582,8 @@ def _finish_tournament(table: dict) -> None:
     left = _participants(table)
     _set_turn(table, None)
     table["phase"] = "finished"
+    for p in table["players"].values():
+        p["street_bet"] = 0
     prev = table.get("last_event", "")
     if left:
         winner = table["players"][left[0]]

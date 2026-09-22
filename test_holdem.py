@@ -206,6 +206,27 @@ def test_side_pot_conservation():
     assert sum(p["stack"] for p in t["players"].values()) + t["pot"] == total
 
 
+def test_eliminated_player_no_ghost_bet_or_stack():
+    t = h.new_table(1)
+    h.add_player(t, 1, "Hero")
+    h.add_player(t, 2, "Opponent")
+    t["players"][2]["stack"] = 2000
+    h.start_tournament(t, seed=42)
+    # Hero raises to 3000, Opponent calls (all-in with 2000 total)
+    h.apply_action(t, 1, "raise", 3000)
+    h.apply_action(t, 2, "call")
+    assert t["phase"] in ("between_hands", "finished")
+    # All street_bets must be 0 after showdown
+    for p in t["players"].values():
+        assert p["street_bet"] == 0, f"street_bet lingering: {p['street_bet']}"
+    # In seed 42, Hero wins, Opponent has 0 stack and is eliminated
+    opp = t["players"][2]
+    if opp["stack"] == 0:
+        assert not opp["in_table"], "busted player must not be in_table"
+        assert t["phase"] == "finished", "tournament must finish when 1 player left"
+        assert opp["street_bet"] == 0
+
+
 def _run():
     tests = [v for k, v in sorted(globals().items()) if k.startswith("test_") and callable(v)]
     fails = 0

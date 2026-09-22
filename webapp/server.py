@@ -208,16 +208,18 @@ def serialize(table: dict, viewer_uid: int) -> dict:
     """Состояние стола глазами конкретного игрока (чужие карты скрыты)."""
     players = table["players"]
     seats = []
+    is_round_over = table.get("phase") in ("between_hands", "finished", "closed")
     for uid in table["seats"]:
         p = players[uid]
         is_me = uid == viewer_uid
-        show_cards = is_me or (table.get("phase") in ("between_hands", "finished")
-                               and p.get("hole") and not p.get("folded"))
+        show_cards = is_me or (is_round_over and p.get("hole") and not p.get("folded"))
+        p_stack = p.get("stack", 0)
+        p_bet = 0 if (is_round_over or p_stack <= 0) else p.get("street_bet", 0)
         seats.append({
             "uid": uid,
             "name": p["name"],
-            "stack": p["stack"],
-            "bet": p.get("street_bet", 0),
+            "stack": p_stack,
+            "bet": p_bet,
             "folded": p.get("folded", False),
             "all_in": p.get("all_in", False),
             "in_table": p.get("in_table", False),
@@ -266,6 +268,7 @@ def serialize(table: dict, viewer_uid: int) -> dict:
         "turn_timeout_sec": holdem.TURN_TIMEOUT_SEC,
         "turn_seconds_left": t_left,
         "last_event": table.get("last_event", ""),
+        "last_payouts": table.get("last_payouts", {}),
         "min_players": holdem.MIN_PLAYERS,
         "is_host": viewer_uid == table.get("host"),
         "seats": seats,
