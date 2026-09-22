@@ -155,7 +155,14 @@ class Room:
         self.conns: dict[WebSocket, int] = {}   # соединение -> uid
         self.lock = asyncio.Lock()
         self.on_action = on_action
+        self.chat_id = chat_id
+        self.next_hand_task: asyncio.Task | None = None
         self.last_active = time.time()
+
+    def schedule_next_hand(self):
+        """Гарантировать запуск следующей раздачи при завершении руки."""
+        if self.next_hand_task is None or self.next_hand_task.done():
+            self.next_hand_task = asyncio.create_task(maybe_next_hand(self))
 
     def add_conn(self, ws: WebSocket, uid: int):
         self.conns[ws] = uid
@@ -338,8 +345,20 @@ async def maybe_next_hand(room: Room):
     await broadcast(room)
     await asyncio.sleep(NEXT_HAND_DELAY)
     async with room.lock:
-        if table.get("phase") == "between_hands" and len(holdem.active_table_players(table)) >= 2:
-            holdem.begin_hand(table)
+        if table.get("phase") == "between_hands":
+            if len(holdem.active_table_players(table)) >= 2:
+                holdem.begin_hand(table)
+                cid = getattr(room, "chat_id", None)
+                if cid:
+                    try:
+                        import bot
+                        asyncio.create_task(bot._holdem_announce_hole_cards(cid))
+                        asyncio.create_task(bot._holdem_refresh(cid))
+                        asyncio.create_task(bot._holdem_send_turn_prompt(cid))
+                    except Exception as e:
+                        log.warning("maybe_next_hand telegram sync error: %s", e)
+            else:
+                holdem._finish_tournament(table)
     await broadcast(room)
 
 
@@ -479,8 +498,23 @@ async def ws_endpoint(ws: WebSocket):
                     holdem.add_player(table, uid, name)
                     if uid in table.get("players", {}) and avatar_cache.get(uid):
                         table["players"][uid]["avatar"] = avatar_cache[uid]
-                elif mtype == "start":
-                    holdem.start_tournament(table)
+                elif mtype in ("start", "next_hand"):
+                    if table.get("phase") == "lobby":
+                        holdem.start_tournament(table)
+                    elif table.get("phase") == "between_hands":
+                        if len(holdem.active_table_players(table)) >= 2:
+                            holdem.begin_hand(table)
+                            cid = getattr(room, "chat_id", None)
+                            if cid:
+                                try:
+                                    import bot
+                                    asyncio.create_task(bot._holdem_announce_hole_cards(cid))
+                                    asyncio.create_task(bot._holdem_refresh(cid))
+                                    asyncio.create_task(bot._holdem_send_turn_prompt(cid))
+                                except Exception:
+                                    pass
+                        else:
+                            holdem._finish_tournament(table)
                 elif mtype == "action":
                     action = data.get("action")
                     amount = data.get("amount")
@@ -500,19 +534,19 @@ async def ws_endpoint(ws: WebSocket):
                     pass
 
             await broadcast(room)
-            # Для комнат Telegram-чата раздачу ведёт бот (_holdem_after_action).
-            # maybe_next_hand запускается только для автономных веб-комнат без chat_id.
-            if follow_up and not (room and room.chat_id):
-                asyncio.create_task(maybe_next_hand(room))
+            if follow_up:
+                room.schedule_next_hand()
 
             # Если комната привязана к чату Telegram — синхронизируем изменения с группой!
-            if room and room.on_action and room.chat_id:
+            cid = getattr(room, "chat_id", None)
+            cb = getattr(room, "on_action", None)
+            if cb and cid:
                 try:
-                    res = room.on_action(room.chat_id, mtype, uid)
+                    res = cb(cid, mtype, uid)
                     if asyncio.iscoroutine(res):
                         asyncio.create_task(res)
-                except Exception:
-                    pass
+                except Exception as e:
+                    log.warning("room on_action callback error: %s", e)
 
 
     except WebSocketDisconnect:

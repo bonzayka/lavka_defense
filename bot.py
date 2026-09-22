@@ -6076,23 +6076,32 @@ async def _holdem_announce_hole_cards(chat_id: int):
 
 
 async def _holdem_after_action(chat_id: int):
-    game = holdem_games.get(chat_id)
-    if not game:
-        return
-    table = game["table"]
-    await _holdem_refresh(chat_id)
-    if table.get("phase") == "between_hands":
-        if len(holdem.active_table_players(table)) < 2 or table.get("phase") == "finished":
-            return await _holdem_finish_if_needed(chat_id)
-        await asyncio.sleep(4)
-        holdem.begin_hand(table)
-        await _holdem_announce_hole_cards(chat_id)
+    try:
+        game = holdem_games.get(chat_id)
+        if not game:
+            return
+        table = game["table"]
         await _holdem_refresh(chat_id)
-        await _holdem_send_turn_prompt(chat_id)
-    elif table.get("phase") == "finished":
-        await _holdem_finish_if_needed(chat_id)
-    else:
-        await _holdem_send_turn_prompt(chat_id)
+        if table.get("phase") == "between_hands":
+            if len(holdem.active_table_players(table)) < 2 or table.get("phase") == "finished":
+                holdem._finish_tournament(table)
+                return await _holdem_finish_if_needed(chat_id)
+            await asyncio.sleep(4)
+            if table.get("phase") == "between_hands":
+                if len(holdem.active_table_players(table)) >= 2:
+                    holdem.begin_hand(table)
+                    await _holdem_announce_hole_cards(chat_id)
+                    await _holdem_refresh(chat_id)
+                    await _holdem_send_turn_prompt(chat_id)
+                else:
+                    holdem._finish_tournament(table)
+                    await _holdem_finish_if_needed(chat_id)
+        elif table.get("phase") == "finished":
+            await _holdem_finish_if_needed(chat_id)
+        else:
+            await _holdem_send_turn_prompt(chat_id)
+    except Exception as e:
+        log.exception("Error in _holdem_after_action chat=%s: %s", chat_id, e)
 
 
 async def _holdem_timeout_apply(chat_id: int, uid: int):

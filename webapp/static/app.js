@@ -569,11 +569,27 @@
     // 2. Between Hands
     if (phase === "between_hands") {
       panel.innerHTML = `
-        <div class="turn-wait-banner">
-          <div class="turn-wait-spinner"></div>
-          <span>Раздача завершена · Новая раздача начнётся через пару секунд...</span>
+        <div class="turn-wait-banner" style="flex-direction:column; gap:8px;">
+          <div style="display:flex; align-items:center; gap:8px;">
+            <div class="turn-wait-spinner"></div>
+            <span>Раздача завершена · Новая раздача начнётся через пару секунд...</span>
+          </div>
+          <button class="btn-act" id="forceNextHandBtn" style="display:none; height:34px; padding:0 18px; font-size:13px; font-weight:700; background:linear-gradient(135deg, #10b981, #059669); color:#fff; border-radius:8px; border:none; cursor:pointer; box-shadow: 0 2px 10px rgba(16,185,129,0.3); transition:all 0.2s;">
+            ▶️ Раздать сейчас
+          </button>
         </div>
       `;
+      setTimeout(() => {
+        const btn = $("forceNextHandBtn");
+        if (btn && state && state.phase === "between_hands") {
+          btn.style.display = "inline-flex";
+          btn.onclick = () => {
+            SoundFX.deal();
+            triggerHaptic("medium");
+            send("next_hand");
+          };
+        }
+      }, 3500);
       return;
     }
 
