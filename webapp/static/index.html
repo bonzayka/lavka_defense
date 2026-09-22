@@ -290,26 +290,27 @@
     /* Table Center: Community Cards & Pot */
     .table-center-hub {
       position: absolute;
-      top: 48%;
+      top: 40%;
       left: 50%;
       transform: translate(-50%, -50%);
       display: flex;
       flex-direction: column;
       align-items: center;
-      gap: 10px;
-      z-index: 10;
+      gap: 8px;
+      z-index: 25;
       width: 100%;
+      pointer-events: none;
     }
 
     .center-pot-plate {
       display: flex;
       align-items: center;
       gap: 6px;
-      background: rgba(9, 12, 16, 0.85);
-      border: 1px solid rgba(212, 175, 55, 0.4);
-      padding: 5px 14px;
+      background: rgba(9, 12, 16, 0.9);
+      border: 1.5px solid rgba(212, 175, 55, 0.45);
+      padding: 4px 14px;
       border-radius: 20px;
-      box-shadow: 0 4px 16px rgba(0, 0, 0, 0.7), 0 0 14px var(--cyber-gold-glow);
+      box-shadow: 0 4px 16px rgba(0, 0, 0, 0.8), 0 0 14px var(--cyber-gold-glow);
     }
 
     .center-pot-plate .chip-icon {
@@ -321,21 +322,6 @@
       font-size: 16px;
       font-weight: 800;
       color: var(--cyber-gold);
-    }
-
-    /* Community Cards (Board) - Protected Center Plate */
-    .table-center-hub {
-      position: absolute;
-      top: 48%;
-      left: 50%;
-      transform: translate(-50%, -50%);
-      display: flex;
-      flex-direction: column;
-      align-items: center;
-      gap: 6px;
-      z-index: 25;
-      width: 100%;
-      pointer-events: none;
     }
 
     .community-cards-row {
@@ -451,15 +437,15 @@
       filter: grayscale(1);
     }
 
-    /* 8 Radial Seat Positions (Shifted to clear 5th board card) */
-    .player-pod[data-pos="0"] { top: 6%;  left: 50%; } /* Top Center */
-    .player-pod[data-pos="1"] { top: 15%; left: 84%; } /* Top Right */
-    .player-pod[data-pos="2"] { top: 35%; left: 92%; } /* Right Upper-Mid (Clean from board) */
-    .player-pod[data-pos="3"] { top: 69%; left: 86%; } /* Bottom Right */
-    .player-pod[data-pos="4"] { top: 89%; left: 50%; } /* Bottom Center (Hero Pod Anchor) */
-    .player-pod[data-pos="5"] { top: 69%; left: 14%; } /* Bottom Left */
-    .player-pod[data-pos="6"] { top: 35%; left: 8%;  } /* Left Upper-Mid (Clean from board) */
-    .player-pod[data-pos="7"] { top: 15%; left: 16%; } /* Top Left */
+    /* 8 Balanced Radial Seat Positions (Spacious & Collision-Free) */
+    .player-pod[data-pos="0"] { top: 8%;  left: 50%; } /* Top Center */
+    .player-pod[data-pos="1"] { top: 16%; left: 83%; } /* Top Right */
+    .player-pod[data-pos="2"] { top: 38%; left: 91%; } /* Right Mid */
+    .player-pod[data-pos="3"] { top: 64%; left: 85%; } /* Bottom Right */
+    .player-pod[data-pos="4"] { top: 76%; left: 50%; } /* Bottom Center (Hero) */
+    .player-pod[data-pos="5"] { top: 64%; left: 15%; } /* Bottom Left */
+    .player-pod[data-pos="6"] { top: 38%; left: 9%;  } /* Left Mid */
+    .player-pod[data-pos="7"] { top: 16%; left: 17%; } /* Top Left */
 
     /* Avatar Capsule & SVG Timer Ring */
     .avatar-wrapper {
@@ -617,14 +603,14 @@
       100% { transform: scale(1); opacity: 1; }
     }
 
-    .player-pod[data-pos="0"] .pod-bet-badge { top: 58px; }
-    .player-pod[data-pos="1"] .pod-bet-badge { top: 52px; left: -24px; }
-    .player-pod[data-pos="2"] .pod-bet-badge { left: -42px; top: 12px; }
+    .player-pod[data-pos="0"] .pod-bet-badge { top: 58px; left: 50%; transform: translateX(-50%); }
+    .player-pod[data-pos="1"] .pod-bet-badge { top: 48px; left: -22px; }
+    .player-pod[data-pos="2"] .pod-bet-badge { top: 12px; left: -46px; }
     .player-pod[data-pos="3"] .pod-bet-badge { top: -20px; left: -24px; }
-    .player-pod[data-pos="4"] .pod-bet-badge { top: -24px; }
+    .player-pod[data-pos="4"] .pod-bet-badge { top: -26px; left: 50%; transform: translateX(-50%); }
     .player-pod[data-pos="5"] .pod-bet-badge { top: -20px; right: -24px; }
-    .player-pod[data-pos="6"] .pod-bet-badge { right: -42px; top: 12px; }
-    .player-pod[data-pos="7"] .pod-bet-badge { top: 52px; right: -24px; }
+    .player-pod[data-pos="6"] .pod-bet-badge { top: 12px; right: -46px; }
+    .player-pod[data-pos="7"] .pod-bet-badge { top: 48px; right: -22px; }
 
     /* Floating Winning Chips Animation Badge (+3,400) */
     .pod-win-floater {
@@ -679,13 +665,20 @@
       backdrop-filter: blur(18px);
       -webkit-backdrop-filter: blur(18px);
       border-top: 1px solid var(--glass-border);
-      padding: 8px 12px 14px;
+      padding: 6px 12px 14px;
       display: flex;
       flex-direction: column;
-      gap: 8px;
+      gap: 6px;
       z-index: 40;
       flex-shrink: 0;
       position: relative;
+    }
+
+    #heroActionPanel {
+      min-height: 124px;
+      display: flex;
+      flex-direction: column;
+      justify-content: center;
     }
 
     /* Hero Pocket Cards Section (Fanned Out) */
@@ -693,11 +686,20 @@
       display: flex;
       justify-content: center;
       align-items: flex-end;
-      gap: 4px;
-      margin-top: -34px;
+      gap: 6px;
+      min-height: 84px;
+      margin-top: -20px;
       margin-bottom: 2px;
       z-index: 30;
       position: relative;
+    }
+
+    .card-slot-placeholder.hero-slot {
+      width: 58px;
+      height: 82px;
+      border-radius: 10px;
+      border: 1.5px dashed rgba(255, 255, 255, 0.15);
+      background: rgba(0, 0, 0, 0.35);
     }
 
     .hero-pocket-card {
@@ -1979,7 +1981,30 @@
     }
   }
 
-  // Render 8 Seats Around Table
+  // Balanced radial position mapping for any table size (2 to 8 players)
+  const SEAT_LAYOUTS = {
+    1: [4],
+    2: [4, 0],
+    3: [4, 1, 7],
+    4: [4, 2, 0, 6],
+    5: [4, 2, 1, 7, 6],
+    6: [4, 3, 1, 0, 7, 5],
+    7: [4, 3, 2, 1, 7, 6, 5],
+    8: [4, 5, 6, 7, 0, 1, 2, 3]
+  };
+
+  function getVisualPosition(idx, total, myIdx) {
+    const layout = SEAT_LAYOUTS[total] || SEAT_LAYOUTS[8];
+    if (myIdx === -1) {
+      // Spectator view: distribute evenly according to layout
+      return layout[idx % layout.length];
+    }
+    // Rotate relative to Hero so Hero is always at layout[0] (Pos 4)
+    const relIdx = (idx - myIdx + total) % total;
+    return layout[relIdx % layout.length];
+  }
+
+  // Render Seats Around Table
   function renderSeats() {
     const container = $("seatsContainer");
     container.innerHTML = "";
@@ -1988,15 +2013,11 @@
     const payouts = state.last_payouts || {};
 
     let myIdx = seats.findIndex(s => s.is_me);
+    const totalSeats = seats.length;
 
     seats.forEach((s, idx) => {
-      // Position 4 is EXCLUSIVELY for Hero (is_me). If spectator (myIdx === -1), skip pos 4 so bottom center stays empty
-      let visualPos;
-      if (myIdx === -1) {
-        visualPos = (idx >= 4) ? (idx + 1) % 8 : idx;
-      } else {
-        visualPos = (idx - myIdx + 4 + 8) % 8;
-      }
+      // Smart radial layout: perfectly spreads 2 to 8 players around the table
+      const visualPos = getVisualPosition(idx, totalSeats, myIdx);
 
       const pod = document.createElement("div");
       const isTurn = s.is_turn && state.phase === "playing";
@@ -2130,8 +2151,13 @@
       return;
     }
 
-    // STRICT ISOLATION: Pocket cards read exclusively from state.you.hole
-    const cards = (state.you && state.you.hole && state.you.hole.length) ? state.you.hole : [];
+    // Read cards from state.you.hole with fallback to meSeat.cards for full compatibility
+    const meSeat = (state.seats || []).find(s => s.is_me);
+    let cards = (state.you && state.you.hole && state.you.hole.length) ? state.you.hole : [];
+    if (!cards.length && meSeat && meSeat.cards && meSeat.cards.length && meSeat.cards[0] !== "🂠") {
+      cards = meSeat.cards;
+    }
+
     if (cards.length && cards[0] !== "🂠") {
       cards.forEach(c => {
         const cardEl = createCardEl(c, true);
@@ -2140,6 +2166,11 @@
         }
         deck.appendChild(cardEl);
       });
+    } else if (state.phase === "playing") {
+      deck.innerHTML = `
+        <div class="card-slot-placeholder hero-slot"></div>
+        <div class="card-slot-placeholder hero-slot"></div>
+      `;
     }
 
     // Auto-combo hint is HIDDEN during betting rounds, only displayed at showdown!

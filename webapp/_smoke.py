@@ -38,13 +38,16 @@ def test_full_hand():
         holdem.add_player(t, uid, nm)
     assert holdem.start_tournament(t)["ok"], "турнир не стартовал"
 
-    # Проверяем строгую изоляцию: карманные карты передаются в you.hole, а в seats только рубашки
+    # Проверяем строгую изоляцию: карманные карты передаются в you.hole и в seat (только для самого игрока)
     for viewer in (101, 202, 303):
         view = S.serialize(t, viewer)
         assert len(view["you"]["hole"]) == 2 and all(c != "🂠" for c in view["you"]["hole"]), "свои карты должны быть в you.hole!"
         for seat in view["seats"]:
-            assert seat["cards"] in ([], ["🂠", "🂠"]), f"в seats во время игры должны быть только рубашки: {seat}"
-    print("[ok] serialize: строгая изоляция карт в you.hole, в seats только рубашки")
+            if seat["uid"] == viewer:
+                assert seat["cards"] == view["you"]["hole"], "свои карты должны совпадать в seat и you.hole"
+            else:
+                assert seat["cards"] in ([], ["🂠", "🂠"]), f"чужие карты должны быть скрыты рубашкой: {seat}"
+    print("[ok] serialize: строгая изоляция карт — свои карты видны только игроку, чужие скрыты рубашкой")
 
     # Играем раздачу до конца, каждый раз беря первое доступное действие.
     guard = 0

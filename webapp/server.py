@@ -216,10 +216,9 @@ def serialize(table: dict, viewer_uid: int, room: Room | None = None) -> dict:
     for uid in table["seats"]:
         p = players[uid]
         is_me = uid == viewer_uid
-        # Физическая изоляция: в seats реальные карты открываются ТОЛЬКО на шоудауне.
-        # Во время раздачи все карманные карты в seats скрыты (рубашки 🂠).
-        # Карты самого игрока передаются исключительно в state.you.hole.
-        show_cards = is_round_over and bool(p.get("hole")) and not p.get("folded")
+        # Физическая изоляция: свои карты видны только самому себе (is_me) и в state.you.hole.
+        # Для чужих мест реальные карты открываются ТОЛЬКО на шоудауне (is_round_over).
+        show_cards = is_me or (is_round_over and bool(p.get("hole")) and not p.get("folded"))
         p_stack = p.get("stack", 0)
         p_bet = 0 if (is_round_over or p_stack <= 0) else p.get("street_bet", 0)
         seats.append({
@@ -370,14 +369,21 @@ async def get_avatar(user_id: int):
     return Response(status_code=404)
 
 
+NO_CACHE_HEADERS = {
+    "Cache-Control": "no-cache, no-store, must-revalidate",
+    "Pragma": "no-cache",
+    "Expires": "0",
+}
+
+
 @app.get("/")
 async def index():
-    return FileResponse(STATIC_DIR / "index.html")
+    return FileResponse(STATIC_DIR / "index.html", headers=NO_CACHE_HEADERS)
 
 
 @app.get("/blackjack")
 async def blackjack():
-    return FileResponse(STATIC_DIR / "index.html")
+    return FileResponse(STATIC_DIR / "index.html", headers=NO_CACHE_HEADERS)
 
 
 # ============================== WebSocket-роут ==============================
@@ -472,7 +478,9 @@ async def ws_endpoint(ws: WebSocket):
                     pass
 
             await broadcast(room)
-            if follow_up:
+            # Для комнат Telegram-чата раздачу ведёт бот (_holdem_after_action).
+            # maybe_next_hand запускается только для автономных веб-комнат без chat_id.
+            if follow_up and not (room and room.chat_id):
                 asyncio.create_task(maybe_next_hand(room))
 
             # Если комната привязана к чату Telegram — синхронизируем изменения с группой!
