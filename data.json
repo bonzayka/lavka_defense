@@ -1,0 +1,32 @@
+{
+ "stopwords": [],
+ "hidden_words": [],
+ "warns": {},
+ "link_whitelist": [],
+ "trusted": [],
+ "flags": {},
+ "nums": {},
+ "strs": {},
+ "stats": {},
+ "rules": "",
+ "audit": [],
+ "triggers": {},
+ "mod_numbers": {},
+ "roles": {
+  "555": "модератор"
+ },
+ "role_perms": {},
+ "role_titles": {},
+ "owners": [],
+ "sticker_packs": [],
+ "verified_phones": {},
+ "pending_verify": {},
+ "activity": {},
+ "reputation": {},
+ "rep_quota": {},
+ "awards": {},
+ "flood_penalties": {},
+ "usernames": {},
+ "user_to_uname": {},
+ "user_perms": {}
+}

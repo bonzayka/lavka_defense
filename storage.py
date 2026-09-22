@@ -8,12 +8,16 @@
 
 import copy
 import json
+import logging
 import os
 import sqlite3
 import threading
 from datetime import datetime
 
 import config
+
+log = logging.getLogger("antispam.storage")
+
 
 _LOCK = threading.Lock()
 
@@ -394,14 +398,16 @@ def load() -> None:
 
         has_kv = cur.execute("SELECT 1 FROM kv_store LIMIT 1").fetchone()
         has_act = cur.execute("SELECT 1 FROM activity LIMIT 1").fetchone()
-
+        migrated = False
         if not has_kv and not has_act and os.path.exists(_PATH):
             try:
                 with open(_PATH, encoding="utf-8") as f:
                     json_data = json.load(f)
                 _import_json_to_db(conn, json_data)
-            except Exception:
-                pass
+                migrated = True
+            except Exception as e:
+                log.warning("Не удалось импортировать данные из %s: %s", _PATH, e)
+
 
         d = _fresh()
 
@@ -494,6 +500,10 @@ def load() -> None:
 
         _data = d
         _rebuild_indices()
+        if migrated:
+            log.info("Первый запуск: БД успешно перенесена из %s в SQLite (%s)", _PATH, _DB_PATH)
+        log.info("Хранилище SQLite (%s) загружено: %d активных записей, %d варнов, %d юзеров, %d стоп-слов.",
+                 os.path.basename(_DB_PATH), len(d["activity"]), len(d["warns"]), len(d["usernames"]), len(d["stopwords"]))
 
 def save() -> None:
     with _LOCK:
