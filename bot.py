@@ -155,7 +155,7 @@ game_flood_hits: dict[int, list[datetime]] = {}   # user_id -> отметки б
 cmd_cooldown: dict[int, datetime] = {}            # user_id -> datetime последней команды
 cmd_flood_hits: dict[int, list[datetime]] = {}    # user_id -> отметки быстрого спама команд
 flood_penalties: dict[tuple[int, int], datetime] = {} # (chat_id, user_id) -> окончание 10-мин штрафа за флуд
-GAME_COMMANDS = {"duel", "дуэль", "kubik", "dice", "game", "holdem", "poker", "mafia", "мафия", "start"}
+GAME_COMMANDS = {"duel", "дуэль", "kubik", "dice", "game", "holdem", "poker", "mafia", "мафия", "start", "blackjack", "блэкджек", "bj", "21"}
 
 # Ограничитель тяжёлого CV/OCR-анализа картинок: не больше ОДНОГО инференса
 # одновременно на весь процесс. Иначе несколько картинок разом занимают все ядра
@@ -1280,7 +1280,8 @@ def antiflood_hit(chat_id: int, user_id: int) -> bool:
 PUBLIC_CMDS = {"rules", "report", "ping", "help", "vb", "start", "privacy",
                "kubik", "dice", "game", "mafia", "мафия", "holdem", "poker",
                "holdemhelp", "pokerhelp", "duel", "дуэль", "bet", "raise", "ставка", "рейз",
-               "voice", "transcribe", "гс", "stt", "pokerapp", "app", "webapp"}
+               "voice", "transcribe", "гс", "stt", "pokerapp", "app", "webapp",
+               "blackjack", "блэкджек", "bj", "21"}
 
 
 
@@ -5117,7 +5118,7 @@ async def cmd_holdem_help(message: Message):
         "2. <b>Пара</b> — две одинаковые карты.\n"
         "3. <b>Две пары</b> — две отдельные пары.\n"
         "4. <b>Сет</b> — три одинаковые карты.\n"
-        "5. <b>Стрит</b> — пять карт подряд.\n"
+        "5. <b>Стрит</b> — пять карт подряд любых мастей. <i>Туз может быть старшим (10-J-Q-K-A) или младшим (A-2-3-4-5). Круговые стриты (напр. K-A-2-3-4) не считаются.</i>\n"
         "6. <b>Флеш</b> — пять карт одной масти.\n"
         "7. <b>Фулл-хаус</b> — сет и пара.\n"
         "8. <b>Каре</b> — четыре одинаковые карты.\n"
@@ -5940,18 +5941,12 @@ async def _holdem_send_turn_prompt(chat_id: int):
     board_str = "  ".join(holdem.format_card(c) for c in board) if board else "—"
     hole_str = "  ".join(holdem.format_card(c) for c in p.get("hole", []))
 
-    combo_info = ""
-    combo_name = holdem.eval_player_combination(p.get("hole", []), board)
-    if combo_name:
-        combo_info = f"\n💡 <i>Твоя комбинация: <b>{combo_name}</b></i>"
-
     owe_str = f"{_fmt_chips(owe)} фишек" if owe > 0 else "0 (бесплатный чек)"
 
     text = (
         f"🂡 <b>Твой ход в Texas Hold'em!</b>\n\n"
         f"🃏 <b>Стол:</b> [ {board_str} ]\n"
-        f"🂠 <b>Твои карты:</b> <b>{hole_str}</b>"
-        f"{combo_info}\n\n"
+        f"🂠 <b>Твои карты:</b> <b>{hole_str}</b>\n\n"
         f"💰 <b>Банк:</b> {_fmt_chips(table.get('pot', 0))} фишек\n"
         f"🪙 <b>Твой стек:</b> {_fmt_chips(p['stack'])} фишек\n"
         f"💵 <b>К уравниванию:</b> <b>{owe_str}</b>\n\n"
@@ -5973,13 +5968,11 @@ async def _holdem_announce_hole_cards(chat_id: int):
     for uid in holdem.active_table_players(table):
         p = table["players"][uid]
         holdem_player_chat[uid] = chat_id
-        combo = holdem.eval_player_combination(p.get("hole", []), [])
-        combo_txt = f"\n💡 <i>Комбинация: {combo}</i>" if combo else ""
         cards_str = "  ".join(holdem.format_card(c) for c in p.get("hole", []))
         await _holdem_dm(
             uid,
             f"🂡 <b>Раздача #{table['hand_no']}</b>\n"
-            f"🃏 Твои карты: <b>{cards_str}</b>{combo_txt}\n"
+            f"🃏 Твои карты: <b>{cards_str}</b>\n"
             f"🪙 Стек: <b>{_fmt_chips(p['stack'])}</b> фишек"
         )
 
@@ -6379,14 +6372,11 @@ async def holdem_move_cb(cb: CallbackQuery):
         board = table.get("board", [])
         board_str = "  ".join(holdem.format_card(c) for c in board) if board else "—"
         hole_str = "  ".join(holdem.format_card(c) for c in p.get("hole", []))
-        combo_name = holdem.eval_player_combination(p.get("hole", []), board)
-        combo_info = f"\n💡 <i>Твоя комбинация: <b>{combo_name}</b></i>" if combo_name else ""
         owe_str = f"{_fmt_chips(owe)} фишек" if owe > 0 else "0 (бесплатный чек)"
         text = (
             f"🂡 <b>Твой ход в Texas Hold'em!</b>\n\n"
             f"🃏 <b>Стол:</b> [ {board_str} ]\n"
-            f"🂠 <b>Твои карты:</b> <b>{hole_str}</b>"
-            f"{combo_info}\n\n"
+            f"🂠 <b>Твои карты:</b> <b>{hole_str}</b>\n\n"
             f"💰 <b>Банк:</b> {_fmt_chips(table.get('pot', 0))} фишек\n"
             f"🪙 <b>Твой стек:</b> {_fmt_chips(p['stack'])} фишек\n"
             f"💵 <b>К уравниванию:</b> <b>{owe_str}</b>\n\n"
@@ -6452,14 +6442,14 @@ async def holdem_help_cmd(message: Message):
         "🃏 <b>Обозначения карт:</b>\n"
         "• Числа от <b>2</b> до <b>10</b> — обычный номинал (<i>10 — это десятка</i>)\n"
         "• <b>J</b> — Валет, <b>Q</b> — Дама, <b>K</b> — Король\n"
-        "• <b>A</b> — <b>Туз</b> (самая старшая карта, в стрите А-2-3-4-5 может быть единицей)\n\n"
+        "• <b>A</b> — <b>Туз</b>: самая старшая карта. В стрите может быть как старшим (10-J-Q-K-A), так и младшим (A-2-3-4-5, где он играет за единицу). Круговые стриты (напр. Q-K-A-2-3 или K-A-2-3-4) в покере НЕ считаются.\n\n"
         "🏆 <b>Иерархия комбинаций (от сильнейшей к слабейшей):</b>\n"
         "1. <b>Роял-флеш</b> — 10-J-Q-K-A одной масти\n"
         "2. <b>Стрит-флеш</b> — любые 5 карт по порядку одной масти (напр. 5-6-7-8-9♠)\n"
         "3. <b>Каре</b> — 4 карты одного достоинства (напр. 4 Короля)\n"
         "4. <b>Фулл-хаус</b> — 3 карты + 2 карты (напр. 3 Туза + 2 Десятки)\n"
         "5. <b>Флеш</b> — любые 5 карт одной масти\n"
-        "6. <b>Стрит</b> — 5 карт подряд любых мастей\n"
+        "6. <b>Стрит</b> — 5 карт подряд любых мастей (Туз в начале или в конце)\n"
         "7. <b>Сет (Тройка)</b> — 3 карты одного достоинства\n"
         "8. <b>Две пары</b> — напр. Пара Дам и Пара Восьмёрок\n"
         "9. <b>Пара</b> — 2 карты одного достоинства\n"
@@ -6528,6 +6518,35 @@ async def holdem_pokerapp_cmd(message: Message):
         f"🂡 <b>Покерный Mini App (Texas Hold'em)</b>\n\n"
         f"{room_desc}\n"
         f"Нажмите кнопку ниже, чтобы войти в игру:",
+        reply_markup=kb,
+    )
+
+
+@dp.message(Command("blackjack", "bj", "21", "блэкджек"))
+async def blackjack_webapp_cmd(message: Message):
+    """Открытие веб-версии Блэкджека (21) в Telegram Mini App."""
+    url = getattr(config, "WEBAPP_URL", "")
+    if not url:
+        await message.reply(
+            "🃏 <b>Telegram Mini App (Блэкджек 21)</b>\n\n"
+            "⚠️ Публичный адрес приложения (<code>WEBAPP_URL</code>) ещё не задан в <code>config.py</code>.\n\n"
+            "<b>Инструкция по запуску:</b>\n"
+            "1. Запустите туннель или настройте SSL-домен (напр. ngrok: <code>ngrok http 8080</code>).\n"
+            "2. Пропишите полученный адрес в <code>config.py</code>: <code>WEBAPP_URL = \"https://...\"</code>\n"
+            "3. Включите <code>WEBAPP_ENABLED = True</code>.\n"
+            "4. В @BotFather настройте кнопку Web App."
+        )
+        return
+
+    full_url = f"{url.rstrip('/')}/?game=blackjack"
+    btn_text = "🃏 Сыграть в Блэкджек (21)"
+    kb = InlineKeyboardMarkup(inline_keyboard=[[
+        InlineKeyboardButton(text=btn_text, web_app=WebAppInfo(url=full_url))
+    ]])
+    await message.reply(
+        "🃏 <b>Блэкджек (21) · Telegram Mini App</b>\n\n"
+        "Одиночная быстрая игра против дилера с плавной анимацией колоды!\n"
+        "Нажмите кнопку ниже, чтобы начать игру:",
         reply_markup=kb,
     )
 

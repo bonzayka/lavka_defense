@@ -323,34 +323,53 @@
       color: var(--cyber-gold);
     }
 
-    /* Community Cards (Board) */
+    /* Community Cards (Board) - Protected Center Plate */
+    .table-center-hub {
+      position: absolute;
+      top: 48%;
+      left: 50%;
+      transform: translate(-50%, -50%);
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      gap: 6px;
+      z-index: 25;
+      width: 100%;
+      pointer-events: none;
+    }
+
     .community-cards-row {
       display: flex;
       align-items: center;
       justify-content: center;
-      gap: 6px;
+      gap: 4px;
+      padding: 4px 6px;
+      background: rgba(0, 0, 0, 0.55);
+      border: 1px solid rgba(212, 175, 55, 0.3);
+      border-radius: 10px;
+      box-shadow: 0 4px 18px rgba(0, 0, 0, 0.75);
     }
 
     .card-slot-placeholder {
-      width: 44px;
-      height: 62px;
-      border-radius: var(--radius-sm);
+      width: 38px;
+      height: 54px;
+      border-radius: 6px;
       border: 1px dashed rgba(255, 255, 255, 0.12);
       background: rgba(0, 0, 0, 0.25);
     }
 
     /* High-Contrast 4-Color Cards */
     .p-card {
-      width: 44px;
-      height: 62px;
-      border-radius: var(--radius-sm);
+      width: 38px;
+      height: 54px;
+      border-radius: 6px;
       background: var(--card-face);
       border: 1px solid rgba(0, 0, 0, 0.35);
-      box-shadow: 0 4px 12px rgba(0, 0, 0, 0.65), 0 1px 3px rgba(0, 0, 0, 0.4);
+      box-shadow: 0 4px 10px rgba(0, 0, 0, 0.65);
       display: flex;
       flex-direction: column;
       justify-content: space-between;
-      padding: 3px 4px;
+      padding: 2px 3px;
       position: relative;
       font-family: var(--font-num);
       font-weight: 800;
@@ -368,18 +387,18 @@
     .p-card.suit-club { color: #15803d; }
 
     .p-card .card-rank-top {
-      font-size: 13px;
+      font-size: 10px;
       line-height: 1;
     }
 
     .p-card .card-suit-mid {
-      font-size: 18px;
+      font-size: 16px;
       line-height: 1;
       align-self: center;
     }
 
     .p-card .card-rank-bot {
-      font-size: 11px;
+      font-size: 9px;
       line-height: 1;
       align-self: flex-end;
       transform: rotate(180deg);
@@ -432,21 +451,21 @@
       filter: grayscale(1);
     }
 
-    /* 8 Radial Seat Positions */
-    .player-pod[data-pos="0"] { top: 7%;  left: 50%; } /* Top Center */
-    .player-pod[data-pos="1"] { top: 18%; left: 83%; } /* Top Right */
-    .player-pod[data-pos="2"] { top: 48%; left: 91%; } /* Right Middle */
-    .player-pod[data-pos="3"] { top: 78%; left: 81%; } /* Bottom Right */
-    .player-pod[data-pos="4"] { top: 88%; left: 50%; } /* Bottom Center (Hero Pod Anchor) */
-    .player-pod[data-pos="5"] { top: 78%; left: 19%; } /* Bottom Left */
-    .player-pod[data-pos="6"] { top: 48%; left: 9%;  } /* Left Middle */
-    .player-pod[data-pos="7"] { top: 18%; left: 17%; } /* Top Left */
+    /* 8 Radial Seat Positions (Shifted to clear 5th board card) */
+    .player-pod[data-pos="0"] { top: 6%;  left: 50%; } /* Top Center */
+    .player-pod[data-pos="1"] { top: 15%; left: 84%; } /* Top Right */
+    .player-pod[data-pos="2"] { top: 35%; left: 92%; } /* Right Upper-Mid (Clean from board) */
+    .player-pod[data-pos="3"] { top: 69%; left: 86%; } /* Bottom Right */
+    .player-pod[data-pos="4"] { top: 89%; left: 50%; } /* Bottom Center (Hero Pod Anchor) */
+    .player-pod[data-pos="5"] { top: 69%; left: 14%; } /* Bottom Left */
+    .player-pod[data-pos="6"] { top: 35%; left: 8%;  } /* Left Upper-Mid (Clean from board) */
+    .player-pod[data-pos="7"] { top: 15%; left: 16%; } /* Top Left */
 
     /* Avatar Capsule & SVG Timer Ring */
     .avatar-wrapper {
       position: relative;
-      width: 50px;
-      height: 50px;
+      width: 48px;
+      height: 48px;
       border-radius: 50%;
       display: flex;
       align-items: center;
@@ -454,14 +473,14 @@
     }
 
     .avatar-inner {
-      width: 44px;
-      height: 44px;
+      width: 42px;
+      height: 42px;
       border-radius: 50%;
       background: linear-gradient(135deg, #1e293b, #0f172a);
-      border: 1.5px solid rgba(255, 255, 255, 0.15);
+      border: 1.5px solid rgba(255, 255, 255, 0.18);
       color: #f8fafc;
       font-weight: 800;
-      font-size: 14px;
+      font-size: 13px;
       display: flex;
       align-items: center;
       justify-content: center;
@@ -469,7 +488,18 @@
       overflow: hidden;
     }
 
-    .player-pod.is-me .avatar-inner {
+    .avatar-img {
+      width: 42px;
+      height: 42px;
+      border-radius: 50%;
+      object-fit: cover;
+      border: 1.5px solid rgba(255, 255, 255, 0.2);
+      box-shadow: 0 4px 10px rgba(0, 0, 0, 0.8);
+      display: block;
+    }
+
+    .player-pod.is-me .avatar-inner,
+    .player-pod.is-me .avatar-img {
       border-color: var(--cyber-gold);
       box-shadow: 0 0 12px var(--cyber-gold-glow);
     }
@@ -725,55 +755,6 @@
       gap: 6px;
     }
 
-    /* Pre-Actions Row (Before Hero's Turn) */
-    .preactions-row {
-      display: flex;
-      align-items: center;
-      justify-content: space-around;
-      gap: 6px;
-      background: rgba(15, 23, 42, 0.7);
-      border: 1px solid rgba(255, 255, 255, 0.08);
-      border-radius: 12px;
-      padding: 6px 10px;
-    }
-
-    .preaction-toggle {
-      display: flex;
-      align-items: center;
-      gap: 6px;
-      font-size: 12px;
-      font-weight: 600;
-      color: var(--text-muted);
-      cursor: pointer;
-    }
-
-    .preaction-toggle input[type="checkbox"] {
-      appearance: none;
-      -webkit-appearance: none;
-      width: 17px;
-      height: 17px;
-      border-radius: 5px;
-      border: 1.5px solid rgba(255, 255, 255, 0.25);
-      background: rgba(0, 0, 0, 0.4);
-      cursor: pointer;
-      display: flex;
-      align-items: center;
-      justify-content: center;
-      transition: all 0.2s ease;
-    }
-
-    .preaction-toggle input[type="checkbox"]:checked {
-      background: var(--neon-cyan);
-      border-color: var(--neon-cyan);
-      box-shadow: 0 0 8px var(--neon-cyan-glow);
-    }
-
-    .preaction-toggle input[type="checkbox"]:checked::after {
-      content: "✓";
-      color: #000;
-      font-size: 12px;
-      font-weight: 900;
-    }
 
     /* Bet Slider & Multiplier Buttons */
     .raise-control-box {
@@ -1109,6 +1090,361 @@
     .room-item-card:hover {
       background: rgba(255, 255, 255, 0.04);
     }
+  
+    /* =========================================================================
+       GAME SWITCHER & SPECTATOR & BLACKJACK STYLES
+       ========================================================================= */
+    .game-nav-bar {
+      display: flex;
+      align-items: center;
+      background: rgba(0, 0, 0, 0.45);
+      border-radius: 12px;
+      padding: 3px;
+      gap: 3px;
+      border: 1px solid rgba(255, 255, 255, 0.1);
+      margin: 0 4px;
+      flex: 1;
+      max-width: 230px;
+    }
+    .game-nav-tab {
+      flex: 1;
+      border: none;
+      background: transparent;
+      color: var(--text-muted);
+      font-family: var(--font-main);
+      font-size: 11px;
+      font-weight: 700;
+      padding: 6px 4px;
+      border-radius: 9px;
+      cursor: pointer;
+      text-align: center;
+      transition: all 0.2s ease;
+      white-space: nowrap;
+    }
+    .game-nav-tab.active {
+      background: linear-gradient(135deg, rgba(212, 175, 55, 0.25), rgba(56, 189, 248, 0.2));
+      color: #fff;
+      box-shadow: 0 2px 8px rgba(0, 0, 0, 0.4), 0 0 10px rgba(212, 175, 55, 0.2);
+      border: 1px solid rgba(212, 175, 55, 0.4);
+    }
+    .poker-subheader {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 6px 16px;
+      background: rgba(10, 14, 20, 0.6);
+      border-bottom: 1px solid rgba(255, 255, 255, 0.05);
+      z-index: 20;
+    }
+    .spectator-counter-pill {
+      display: flex;
+      align-items: center;
+      gap: 5px;
+      background: rgba(56, 189, 248, 0.15);
+      border: 1px solid rgba(56, 189, 248, 0.35);
+      border-radius: 20px;
+      padding: 2px 8px;
+      font-size: 11px;
+      font-weight: 800;
+      color: var(--neon-cyan);
+      font-family: var(--font-num);
+    }
+    .pulse-dot {
+      width: 7px;
+      height: 7px;
+      border-radius: 50%;
+      background: var(--neon-cyan);
+      box-shadow: 0 0 8px var(--neon-cyan);
+      display: inline-block;
+      animation: pulseAnim 1.5s infinite ease-in-out;
+    }
+    @keyframes pulseAnim {
+      0%, 100% { transform: scale(1); opacity: 1; }
+      50% { transform: scale(1.4); opacity: 0.5; }
+    }
+    .spectator-hero-banner {
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      gap: 4px;
+      padding: 10px 18px;
+      background: rgba(15, 23, 42, 0.7);
+      border: 1px dashed rgba(56, 189, 248, 0.4);
+      border-radius: 14px;
+      margin-bottom: 8px;
+      text-align: center;
+      width: 100%;
+    }
+    .spectator-banner {
+      background: rgba(15, 23, 42, 0.88) !important;
+      border: 1.5px solid rgba(56, 189, 248, 0.35) !important;
+      box-shadow: 0 4px 20px rgba(0, 0, 0, 0.6), 0 0 15px rgba(56, 189, 248, 0.15) !important;
+    }
+    .game-screen {
+      display: flex;
+      flex-direction: column;
+      flex: 1;
+      overflow: hidden;
+      position: relative;
+    }
+
+    /* BLACKJACK SPECIFIC STYLES */
+    .bj-viewport {
+      flex: 1;
+      display: flex;
+      flex-direction: column;
+      position: relative;
+      overflow: hidden;
+      padding: 10px 14px 6px;
+    }
+    .bj-table-felt {
+      flex: 1;
+      border-radius: 26px;
+      background: radial-gradient(ellipse at 50% 15%, #152232 0%, #0c141e 60%, #070a0e 100%);
+      border: 3px solid #233044;
+      box-shadow: inset 0 0 40px rgba(0, 0, 0, 0.9), 0 0 30px rgba(0, 0, 0, 0.8);
+      position: relative;
+      display: flex;
+      flex-direction: column;
+      justify-content: space-between;
+      padding: 14px 12px;
+      overflow: hidden;
+    }
+    .bj-table-felt::before {
+      content: "";
+      position: absolute;
+      top: -20px;
+      left: 8%;
+      right: 8%;
+      height: 170px;
+      border-bottom: 2px dashed rgba(212, 175, 55, 0.2);
+      border-radius: 50%;
+      pointer-events: none;
+    }
+    .bj-table-watermark {
+      position: absolute;
+      top: 50%;
+      left: 50%;
+      transform: translate(-50%, -50%);
+      font-family: var(--font-brand);
+      font-size: 13px;
+      font-weight: 800;
+      letter-spacing: 2px;
+      color: rgba(212, 175, 55, 0.12);
+      text-align: center;
+      pointer-events: none;
+      white-space: nowrap;
+    }
+    .bj-deck-shoe {
+      position: absolute;
+      top: 12px;
+      right: 12px;
+      width: 44px;
+      height: 60px;
+      border-radius: 8px;
+      background: linear-gradient(135deg, #1e293b, #0f172a);
+      border: 1.5px solid rgba(212, 175, 55, 0.35);
+      box-shadow: 2px 2px 10px rgba(0,0,0,0.7);
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      cursor: default;
+      z-index: 10;
+    }
+    .bj-deck-shoe::after {
+      content: "🂠";
+      font-size: 30px;
+      color: rgba(212, 175, 55, 0.6);
+      line-height: 1;
+    }
+    .bj-shoe-label {
+      font-size: 8px;
+      font-weight: 800;
+      color: var(--text-muted);
+      letter-spacing: 0.5px;
+      margin-top: 2px;
+    }
+    .bj-dealer-zone {
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      gap: 8px;
+      z-index: 2;
+    }
+    .bj-avatar-pill {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      background: rgba(15, 23, 42, 0.85);
+      border: 1px solid var(--glass-border);
+      padding: 4px 12px;
+      border-radius: 20px;
+      box-shadow: 0 4px 14px rgba(0,0,0,0.5);
+    }
+    .bj-avatar-icon { font-size: 16px; }
+    .bj-dealer-name, .bj-player-name {
+      font-size: 12px;
+      font-weight: 700;
+      letter-spacing: 1px;
+    }
+    .bj-score-badge {
+      background: var(--cyber-gold);
+      color: #000;
+      font-weight: 900;
+      font-size: 12px;
+      font-family: var(--font-num);
+      padding: 1px 7px;
+      border-radius: 10px;
+      min-width: 22px;
+      text-align: center;
+      transition: all 0.2s ease;
+    }
+    .bj-score-badge.bust {
+      background: #ef4444;
+      color: #fff;
+    }
+    .bj-score-badge.bj {
+      background: linear-gradient(135deg, #22c55e, #38bdf8);
+      color: #000;
+      box-shadow: 0 0 10px var(--neon-emerald);
+    }
+    .bj-cards-row {
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      gap: 6px;
+      min-height: 72px;
+    }
+    .bj-cards-row .p-card {
+      width: 50px;
+      height: 72px;
+      margin-left: -12px;
+      box-shadow: 0 4px 12px rgba(0,0,0,0.8);
+      transition: transform 0.2s ease;
+    }
+    .bj-cards-row .p-card:first-child {
+      margin-left: 0;
+    }
+    .card-deal-anim {
+      animation: cardDealFly 0.32s cubic-bezier(0.2, 0.85, 0.3, 1) forwards;
+    }
+    @keyframes cardDealFly {
+      0% {
+        opacity: 0;
+        transform: translate(60px, -120px) scale(0.3) rotate(30deg);
+      }
+      100% {
+        opacity: 1;
+        transform: translate(0, 0) scale(1) rotate(0deg);
+      }
+    }
+    .bj-center-zone {
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      gap: 8px;
+      min-height: 60px;
+      z-index: 2;
+    }
+    .bj-bet-circle {
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      padding: 6px 18px;
+      background: rgba(0, 0, 0, 0.55);
+      border: 1.5px dashed rgba(212, 175, 55, 0.45);
+      border-radius: 20px;
+      box-shadow: 0 0 16px rgba(212, 175, 55, 0.15);
+    }
+    .bj-bet-title {
+      font-size: 9px;
+      font-weight: 800;
+      color: var(--text-muted);
+      letter-spacing: 1.5px;
+    }
+    .bj-bet-amount {
+      font-size: 15px;
+      font-weight: 800;
+      color: var(--cyber-gold);
+      font-family: var(--font-num);
+    }
+    .bj-status-banner {
+      background: rgba(15, 23, 42, 0.95);
+      border: 1.5px solid var(--cyber-gold);
+      padding: 8px 18px;
+      border-radius: 14px;
+      font-size: 14px;
+      font-weight: 800;
+      text-align: center;
+      box-shadow: 0 6px 20px rgba(0,0,0,0.8), 0 0 20px var(--cyber-gold-glow);
+      animation: popBanner 0.3s cubic-bezier(0.175, 0.885, 0.32, 1.275);
+    }
+    .bj-player-zone {
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      gap: 8px;
+      z-index: 2;
+    }
+    .bj-player-header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      width: 100%;
+      max-width: 320px;
+      padding: 0 4px;
+    }
+    .bj-chips-badge {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      background: rgba(0, 0, 0, 0.6);
+      border: 1px solid rgba(212, 175, 55, 0.35);
+      border-radius: 18px;
+      padding: 4px 10px;
+      font-family: var(--font-num);
+      font-size: 13px;
+      font-weight: 800;
+      color: var(--cyber-gold);
+    }
+    .bj-refill-btn {
+      background: var(--neon-cyan);
+      color: #000;
+      border: none;
+      border-radius: 8px;
+      font-size: 10px;
+      font-weight: 800;
+      padding: 2px 6px;
+      cursor: pointer;
+    }
+    .bj-action-dock {
+      background: var(--glass-panel);
+      backdrop-filter: blur(18px);
+      -webkit-backdrop-filter: blur(18px);
+      border-top: 1px solid var(--glass-border);
+      padding: 10px 14px;
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+      z-index: 40;
+    }
+    .bj-control-panel {
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+      width: 100%;
+    }
+    .bj-chip-select-row {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 6px;
+    }
+
   </style>
 </head>
 <body>
@@ -1120,18 +1456,19 @@
         <button class="icon-btn" id="roomsListBtn" title="Комнаты">🗂</button>
       </div>
 
-      <div class="header-center-info">
-        <div class="round-indicator">
-          <div class="round-dot"></div>
-          <span id="headerRoundText">РАЗДАЧА #1</span>
-        </div>
-        <div class="header-pot-wrap">
-          <span class="header-pot-label">БАНК:</span>
-          <span class="header-pot-val" id="headerPotVal">0</span>
-        </div>
+      <!-- Game Switcher Navigation -->
+      <div class="game-nav-bar">
+        <button type="button" class="game-nav-tab active" id="tabPoker" onclick="switchGameMode('poker')">🂡 Покер</button>
+        <button type="button" class="game-nav-tab" id="tabBlackjack" onclick="switchGameMode('blackjack')">🃏 Блэкджек</button>
       </div>
 
       <div class="header-right">
+        <!-- Spectator Counter Pill -->
+        <div class="spectator-counter-pill" id="specPill" style="display: none;" title="Зрителей за столом">
+          <span class="pulse-dot"></span>
+          <span>👀</span>
+          <span id="specCountVal">0</span>
+        </div>
         <div class="hero-balance-badge" id="heroHeaderBalance">
           <span>🪙</span>
           <span id="heroBalanceText">50 000</span>
@@ -1142,46 +1479,144 @@
     <!-- Event Toast -->
     <div class="event-toast" id="eventToast"></div>
 
-    <!-- Zone 2: Poker Arena (Oval Table & Player Pods) -->
-    <main class="arena-viewport">
-      <div class="poker-table">
-        <div class="table-logo-watermark">CHUDO POKER</div>
+    <!-- POKER SCREEN -->
+    <div id="pokerScreen" class="game-screen active">
+      <!-- Poker Subheader: Round & Pot -->
+      <div class="poker-subheader" id="pokerSubheader">
+        <div class="round-indicator">
+          <div class="round-dot"></div>
+          <span id="headerRoundText">РАЗДАЧА #1</span>
+        </div>
+        <div class="header-pot-wrap">
+          <span class="header-pot-label">БАНК:</span>
+          <span class="header-pot-val" id="headerPotVal">0</span>
+        </div>
+      </div>
 
-        <!-- Center Hub: Board Cards & Pot -->
-        <div class="table-center-hub">
-          <div class="center-pot-plate">
-            <span class="chip-icon">🪙</span>
-            <span class="pot-sum" id="centerPotSum">0</span>
+      <!-- Zone 2: Poker Arena (Oval Table & Player Pods) -->
+      <main class="arena-viewport">
+        <div class="poker-table">
+          <div class="table-logo-watermark">CHUDO POKER</div>
+
+          <!-- Center Hub: Board Cards & Pot -->
+          <div class="table-center-hub">
+            <div class="center-pot-plate">
+              <span class="chip-icon">🪙</span>
+              <span class="pot-sum" id="centerPotSum">0</span>
+            </div>
+
+            <div class="community-cards-row" id="boardCardsRow">
+              <div class="card-slot-placeholder"></div>
+              <div class="card-slot-placeholder"></div>
+              <div class="card-slot-placeholder"></div>
+              <div class="card-slot-placeholder"></div>
+              <div class="card-slot-placeholder"></div>
+            </div>
           </div>
 
-          <div class="community-cards-row" id="boardCardsRow">
-            <div class="card-slot-placeholder"></div>
-            <div class="card-slot-placeholder"></div>
-            <div class="card-slot-placeholder"></div>
-            <div class="card-slot-placeholder"></div>
-            <div class="card-slot-placeholder"></div>
-          </div>
+          <!-- Dynamic Radial Player Pods -->
+          <div class="seats-container" id="seatsContainer"></div>
+        </div>
+      </main>
+
+      <!-- Zone 3: Hero Interactive Dock (Bottom Thumb Zone) -->
+      <footer class="hero-interactive-dock">
+        <!-- Pocket Cards of Hero -->
+        <div class="hero-cards-deck" id="heroCardsDeck"></div>
+
+        <!-- Winning Hand Combination Badge -->
+        <div class="hand-combo-badge" id="handComboBadge" style="display: none;">
+          <span>🏆</span>
+          <span id="handComboText">Две пары</span>
         </div>
 
-        <!-- Dynamic Radial Player Pods -->
-        <div class="seats-container" id="seatsContainer"></div>
+        <!-- Action Panel Content (Turn / Pre-actions / Lobby) -->
+        <div id="heroActionPanel"></div>
+      </footer>
+    </div>
+
+    <!-- BLACKJACK (21) SCREEN -->
+    <div id="blackjackScreen" class="game-screen" style="display: none;">
+      <div class="bj-viewport">
+        <div class="bj-table-felt">
+          <div class="bj-table-watermark">BLACKJACK 21 · PAYS 3 TO 2</div>
+
+          <!-- Shoe Deck in Corner -->
+          <div class="bj-deck-shoe" id="bjDeckShoe" title="Колода карт">
+            <span class="bj-shoe-label">52 КАРТЫ</span>
+          </div>
+
+          <!-- Dealer Zone -->
+          <div class="bj-dealer-zone">
+            <div class="bj-avatar-pill">
+              <span class="bj-avatar-icon">🤖</span>
+              <span class="bj-dealer-name">ДИЛЕР</span>
+              <span class="bj-score-badge" id="bjDealerScore">0</span>
+            </div>
+            <div class="bj-cards-row" id="bjDealerCards"></div>
+          </div>
+
+          <!-- Center Zone (Bet Circle & Result Status Banner) -->
+          <div class="bj-center-zone">
+            <div class="bj-bet-circle" id="bjBetCircle">
+              <span class="bj-bet-title">СТАВКА</span>
+              <span class="bj-bet-amount" id="bjCurrentBetText">🪙 500</span>
+            </div>
+            <div class="bj-status-banner" id="bjStatusBanner" style="display: none;"></div>
+          </div>
+
+          <!-- Player Zone -->
+          <div class="bj-player-zone">
+            <div class="bj-cards-row" id="bjPlayerCards"></div>
+            <div class="bj-player-header">
+              <div class="bj-avatar-pill">
+                <span class="bj-avatar-icon">😎</span>
+                <span class="bj-player-name">ТЫ</span>
+                <span class="bj-score-badge" id="bjPlayerScore">0</span>
+              </div>
+              <div class="bj-chips-badge" id="bjChipsBadge">
+                <span>🪙</span>
+                <span id="bjPlayerChipsVal">50 000</span>
+                <button type="button" class="bj-refill-btn" id="bjRefillBtn" title="Пополнить бесплатно" onclick="bjRefillChips()" style="display:none;">+50k</button>
+              </div>
+            </div>
+          </div>
+        </div>
       </div>
-    </main>
 
-    <!-- Zone 3: Hero Interactive Dock (Bottom Thumb Zone) -->
-    <footer class="hero-interactive-dock">
-      <!-- Pocket Cards of Hero -->
-      <div class="hero-cards-deck" id="heroCardsDeck"></div>
+      <!-- BJ Bottom Action Dock -->
+      <footer class="bj-action-dock" id="bjActionDock">
+        <!-- 1. Betting Controls -->
+        <div id="bjBettingControls" class="bj-control-panel">
+          <div class="bj-chip-select-row">
+            <button type="button" class="multiplier-chip" onclick="bjAddBet(100)">+100</button>
+            <button type="button" class="multiplier-chip" onclick="bjAddBet(500)">+500</button>
+            <button type="button" class="multiplier-chip" onclick="bjAddBet(1000)">+1k</button>
+            <button type="button" class="multiplier-chip" onclick="bjAddBet(5000)">+5k</button>
+            <button type="button" class="multiplier-chip" onclick="bjClearBet()" style="color:#ef4444; border-color:rgba(239,68,68,0.4);">Сброс</button>
+            <button type="button" class="multiplier-chip" onclick="bjAllInBet()" style="color:var(--cyber-gold); border-color:var(--cyber-gold);">All-in</button>
+          </div>
+          <button type="button" class="btn-act btn-raise" id="bjDealBtn" onclick="bjStartDeal()" style="height: 50px; font-size: 16px; font-weight: 800;">
+            ▶️ Раздать
+          </button>
+        </div>
 
-      <!-- Winning Hand Combination Badge -->
-      <div class="hand-combo-badge" id="handComboBadge" style="display: none;">
-        <span>🏆</span>
-        <span id="handComboText">Две пары</span>
-      </div>
-
-      <!-- Action Panel Content (Turn / Pre-actions / Lobby) -->
-      <div id="heroActionPanel"></div>
-    </footer>
+        <!-- 2. Active Play Controls -->
+        <div id="bjPlayControls" class="bj-control-panel" style="display: none;">
+          <div class="act-buttons-grid">
+            <button type="button" class="btn-act btn-fold" id="bjStandBtn" onclick="bjStand()">
+              🛑 Хватит
+            </button>
+            <button type="button" class="btn-act btn-call" id="bjHitBtn" onclick="bjHit()">
+              ➕ Взять
+            </button>
+            <button type="button" class="btn-act btn-raise" id="bjDoubleBtn" onclick="bjDouble()">
+              ✖️2 Удвоить
+            </button>
+          </div>
+        </div>
+      </footer>
+    </div>
   </div>
 
   <!-- Modal: Active Tables List -->
@@ -1397,12 +1832,6 @@
   let turnTimerTicker = null;
   let currentTurnSec = 120;
 
-  // Pre-action checkbox states
-  const preactions = {
-    checkFold: false,
-    callAny: false,
-    autoFold: false
-  };
 
   // Format chip numbers with spaces
   function fmtChips(n) {
@@ -1470,7 +1899,7 @@
     $("headerPotVal").textContent = fmtChips(state.pot);
     $("centerPotSum").textContent = fmtChips(state.pot);
 
-    // Hero Balance Counter Animation
+    // Hero Balance Counter Animation & Spectator Badge
     const meSeat = (state.seats || []).find(s => s.is_me);
     const newStack = meSeat ? meSeat.stack : 0;
     const balEl = $("heroHeaderBalance");
@@ -1483,7 +1912,25 @@
       }
       displayedHeroStack = newStack;
     }
-    $("heroBalanceText").textContent = fmtChips(displayedHeroStack);
+    if (activeGameMode === "poker") {
+      if (!state.you || !state.you.seated) {
+        $("heroBalanceText").textContent = "Зритель";
+      } else {
+        $("heroBalanceText").textContent = fmtChips(displayedHeroStack);
+      }
+    }
+
+    // Spectator Pill Update
+    const specCount = Number(state.spectators_count || 0);
+    const specPill = $("specPill");
+    if (specPill) {
+      if (specCount > 0 || (state.you && !state.you.seated)) {
+        specPill.style.display = "flex";
+        $("specCountVal").textContent = specCount;
+      } else {
+        specPill.style.display = "none";
+      }
+    }
 
     // 2. Zone 2: Community Cards on Board
     renderBoardCards();
@@ -1506,11 +1953,6 @@
     if (isMyTurn && lastTurnUid !== myUid) {
       SoundFX.turnAlert();
       triggerHaptic("warning");
-      // Check pre-actions on turn arrival
-      if (tryExecutePreaction()) {
-        lastTurnUid = state.current_turn;
-        return;
-      }
     }
     lastTurnUid = state.current_turn;
 
@@ -1546,11 +1988,15 @@
     const payouts = state.last_payouts || {};
 
     let myIdx = seats.findIndex(s => s.is_me);
-    if (myIdx === -1) myIdx = 0;
 
     seats.forEach((s, idx) => {
-      // Rotate seats so Hero is always at bottom position 4
-      const visualPos = (idx - myIdx + 4 + 8) % 8;
+      // Position 4 is EXCLUSIVELY for Hero (is_me). If spectator (myIdx === -1), skip pos 4 so bottom center stays empty
+      let visualPos;
+      if (myIdx === -1) {
+        visualPos = (idx >= 4) ? (idx + 1) % 8 : idx;
+      } else {
+        visualPos = (idx - myIdx + 4 + 8) % 8;
+      }
 
       const pod = document.createElement("div");
       const isTurn = s.is_turn && state.phase === "playing";
@@ -1599,6 +2045,22 @@
       const avInner = document.createElement("div");
       avInner.className = "avatar-inner";
       avInner.textContent = (s.name || "P").slice(0, 2).toUpperCase();
+
+      const avatarSrc = s.avatar || (s.uid ? `/api/avatar/${s.uid}` : "");
+      if (avatarSrc) {
+        const img = document.createElement("img");
+        img.className = "avatar-img";
+        img.src = avatarSrc;
+        img.alt = s.name || "P";
+        img.onerror = () => {
+          img.style.display = "none";
+          avInner.style.display = "flex";
+        };
+        img.onload = () => {
+          avInner.style.display = "none";
+        };
+        avWrap.appendChild(img);
+      }
       avWrap.appendChild(avInner);
 
       // Dealer Chip 'D'
@@ -1654,9 +2116,22 @@
     const deck = $("heroCardsDeck");
     deck.innerHTML = "";
     const comboBadge = $("handComboBadge");
-    const meSeat = (state.seats || []).find(s => s.is_me);
 
-    const cards = (meSeat && meSeat.cards && meSeat.cards.length) ? meSeat.cards : [];
+    if (!state.you || !state.you.seated) {
+      deck.innerHTML = `
+        <div class="spectator-hero-banner">
+          <span style="font-size: 13px; font-weight: 700; color: var(--neon-cyan); display: flex; align-items: center; gap: 6px;">
+            <span class="pulse-dot"></span> 👀 Режим зрителя
+          </span>
+          <span style="font-size: 11px; color: var(--text-muted);">Карты игроков скрыты до шоудауна</span>
+        </div>
+      `;
+      comboBadge.style.display = "none";
+      return;
+    }
+
+    // STRICT ISOLATION: Pocket cards read exclusively from state.you.hole
+    const cards = (state.you && state.you.hole && state.you.hole.length) ? state.you.hole : [];
     if (cards.length && cards[0] !== "🂠") {
       cards.forEach(c => {
         const cardEl = createCardEl(c, true);
@@ -1667,8 +2142,10 @@
       });
     }
 
+    // Auto-combo hint is HIDDEN during betting rounds, only displayed at showdown!
     const combo = state.you && state.you.combo;
-    if (combo && cards.length && cards[0] !== "🂠") {
+    const isShowdown = (state.phase === "between_hands" || state.phase === "finished");
+    if (combo && cards.length && cards[0] !== "🂠" && isShowdown) {
       comboBadge.style.display = "flex";
       $("handComboText").textContent = combo;
     } else {
@@ -1676,41 +2153,6 @@
     }
   }
 
-  // Pre-action Execution Helper
-  function tryExecutePreaction() {
-    const opts = (state.you && state.you.options) || {};
-    if (!opts || Object.keys(opts).length === 0) return false;
-
-    if (preactions.autoFold && opts.fold) {
-      preactions.autoFold = false;
-      send("action", { action: "fold" });
-      try { SoundFX.deal(); } catch(e) {}
-      try { triggerHaptic("medium"); } catch(e) {}
-      return true;
-    }
-    if (preactions.checkFold) {
-      preactions.checkFold = false;
-      if (opts.check) {
-        send("action", { action: "check" });
-        try { SoundFX.knock(); } catch(e) {}
-        try { triggerHaptic("light"); } catch(e) {}
-        return true;
-      } else if (opts.fold) {
-        send("action", { action: "fold" });
-        try { SoundFX.deal(); } catch(e) {}
-        try { triggerHaptic("medium"); } catch(e) {}
-        return true;
-      }
-    }
-    if (preactions.callAny && opts.call) {
-      preactions.callAny = false;
-      send("action", { action: "call" });
-      try { SoundFX.chip(); } catch(e) {}
-      try { triggerHaptic("medium"); } catch(e) {}
-      return true;
-    }
-    return false;
-  }
 
   // Render Bottom Action Panel
   function renderActionPanel() {
@@ -1806,40 +2248,38 @@
       return;
     }
 
-    // 5. Playing Phase: NOT My Turn (Pre-Actions Mode)
+    // 5. Playing Phase: NOT My Turn (or Spectator)
     const isMyTurn = (state.current_turn === myUid) && Object.keys(opts).length > 0;
     if (!isMyTurn) {
       const curTurnSeat = (state.seats || []).find(s => s.uid === state.current_turn);
       const turnName = curTurnSeat ? curTurnSeat.name : "другого игрока";
 
-      const preBox = document.createElement("div");
-      preBox.style.cssText = "display:flex; flex-direction:column; gap:6px;";
-      preBox.innerHTML = `
-        <div class="preactions-row">
-          <label class="preaction-toggle">
-            <input type="checkbox" id="paCheckFold" ${preactions.checkFold ? "checked" : ""}>
-            <span>Чек / Фолд</span>
-          </label>
-          <label class="preaction-toggle">
-            <input type="checkbox" id="paCallAny" ${preactions.callAny ? "checked" : ""}>
-            <span>Колл любой</span>
-          </label>
-          <label class="preaction-toggle">
-            <input type="checkbox" id="paAutoFold" ${preactions.autoFold ? "checked" : ""}>
-            <span>Авто-фолд</span>
-          </label>
-        </div>
+      if (!you.seated) {
+        panel.innerHTML = `
+          <div class="turn-wait-banner spectator-banner" style="flex-direction: column; gap: 8px; padding: 12px 14px;">
+            <div style="display: flex; align-items: center; justify-content: space-between; width: 100%;">
+              <span style="display: flex; align-items: center; gap: 6px; font-weight: 800; color: var(--neon-cyan); font-size: 13px;">
+                <span class="pulse-dot"></span> 👀 РЕЖИМ ЗРИТЕЛЯ
+              </span>
+              <span style="font-size: 11px; color: var(--text-muted); font-family: var(--font-num);">Раздача #${state.hand_no || 1}</span>
+            </div>
+            <div style="font-size: 13px; color: #fff;">
+              Ходит <b>${escapeHtml(turnName)}</b> · Банк: <b style="color: var(--cyber-gold);">🪙 ${fmtChips(state.pot)}</b>
+            </div>
+            <div style="font-size: 11px; color: var(--text-muted);">
+              Карты участников откроются при вскрытии.
+            </div>
+          </div>
+        `;
+        return;
+      }
+
+      panel.innerHTML = `
         <div class="turn-wait-banner">
           <div class="turn-wait-spinner"></div>
           <span>Ходит <b>${escapeHtml(turnName)}</b> · Ждите свою очередь...</span>
         </div>
       `;
-      panel.appendChild(preBox);
-
-      // Pre-action checkbox listeners
-      $("paCheckFold").onchange = (e) => { preactions.checkFold = e.target.checked; triggerHaptic("light"); };
-      $("paCallAny").onchange = (e) => { preactions.callAny = e.target.checked; triggerHaptic("light"); };
-      $("paAutoFold").onchange = (e) => { preactions.autoFold = e.target.checked; triggerHaptic("light"); };
       return;
     }
 
@@ -2325,8 +2765,422 @@
     } catch(e) {}
   }
 
+
+  // =========================================================================
+  // MULTI-GAME ROUTING & BLACKJACK (21) ENGINE
+  // =========================================================================
+  let activeGameMode = "poker";
+
+  window.switchGameMode = function(mode) {
+    activeGameMode = mode;
+    if (mode === "blackjack") {
+      $("tabPoker").classList.remove("active");
+      $("tabBlackjack").classList.add("active");
+      $("pokerScreen").style.display = "none";
+      $("blackjackScreen").style.display = "flex";
+      $("roomsListBtn").style.display = "none";
+      $("specPill").style.display = "none";
+      BJ.init();
+    } else {
+      $("tabBlackjack").classList.remove("active");
+      $("tabPoker").classList.add("active");
+      $("blackjackScreen").style.display = "none";
+      $("pokerScreen").style.display = "flex";
+      $("roomsListBtn").style.display = "flex";
+      renderTable();
+    }
+  };
+
+  const BJ = {
+    deck: [],
+    dealerHand: [],
+    playerHand: [],
+    bet: 500,
+    chips: 50000,
+    phase: "betting", // 'betting', 'playing', 'dealer_turn', 'round_over'
+    
+    init() {
+      const saved = localStorage.getItem("chudo_bj_chips");
+      if (saved !== null && !isNaN(Number(saved))) {
+        this.chips = Math.max(0, Number(saved));
+      } else {
+        this.chips = 50000;
+        this.saveChips();
+      }
+      if (this.bet > this.chips) {
+        this.bet = Math.min(this.chips, 500);
+      }
+      this.updateUI();
+    },
+
+    saveChips() {
+      localStorage.setItem("chudo_bj_chips", String(this.chips));
+    },
+
+    createDeck() {
+      const ranks = ["2","3","4","5","6","7","8","9","T","J","Q","K","A"];
+      const suits = ["c","d","h","s"];
+      const d = [];
+      for (const r of ranks) {
+        for (const s of suits) {
+          d.push(r + s);
+        }
+      }
+      for (let i = d.length - 1; i > 0; i--) {
+        const j = Math.floor(Math.random() * (i + 1));
+        [d[i], d[j]] = [d[j], d[i]];
+      }
+      return d;
+    },
+
+    evalHand(cards) {
+      let sum = 0;
+      let aces = 0;
+      for (const c of cards) {
+        if (!c || c === "🂠") continue;
+        const r = c.slice(0, -1);
+        if (r === "A") {
+          sum += 11;
+          aces += 1;
+        } else if (["K","Q","J","T","10"].includes(r)) {
+          sum += 10;
+        } else {
+          sum += Number(r);
+        }
+      }
+      while (sum > 21 && aces > 0) {
+        sum -= 10;
+        aces -= 1;
+      }
+      const isSoft = aces > 0 && sum <= 21;
+      const isBust = sum > 21;
+      const isBlackjack = cards.length === 2 && sum === 21;
+      return { score: sum, isSoft, isBust, isBlackjack };
+    },
+
+    addBet(amt) {
+      if (this.phase !== "betting") return;
+      if (this.bet + amt > this.chips) {
+        this.bet = this.chips;
+      } else {
+        this.bet += amt;
+      }
+      SoundFX.chip();
+      triggerHaptic("light");
+      this.updateUI();
+    },
+
+    clearBet() {
+      if (this.phase !== "betting") return;
+      this.bet = 0;
+      SoundFX.knock();
+      triggerHaptic("light");
+      this.updateUI();
+    },
+
+    allInBet() {
+      if (this.phase !== "betting") return;
+      this.bet = this.chips;
+      SoundFX.chip();
+      triggerHaptic("medium");
+      this.updateUI();
+    },
+
+    refillChips() {
+      if (this.chips > 0) return;
+      this.chips = 50000;
+      this.saveChips();
+      this.bet = 500;
+      SoundFX.fanfare();
+      triggerHaptic("success");
+      showToast("Баланс пополнен: 🪙 50 000!");
+      this.updateUI();
+    },
+
+    startDeal() {
+      if (this.phase !== "betting") return;
+      if (this.bet <= 0) {
+        showToast("Сделайте ставку перед раздачей!");
+        return;
+      }
+      if (this.bet > this.chips) {
+        this.bet = this.chips;
+      }
+      this.chips -= this.bet;
+      this.saveChips();
+
+      this.deck = this.createDeck();
+      this.playerHand = [];
+      this.dealerHand = [];
+      this.phase = "playing";
+
+      $("bjStatusBanner").style.display = "none";
+      SoundFX.deal();
+      triggerHaptic("medium");
+
+      this.playerHand.push(this.deck.pop());
+      this.dealerHand.push(this.deck.pop());
+      this.playerHand.push(this.deck.pop());
+      this.dealerHand.push(this.deck.pop());
+
+      this.updateUI();
+
+      const pEval = this.evalHand(this.playerHand);
+      if (pEval.isBlackjack) {
+        setTimeout(() => this.finishRoundNaturalBJ(), 600);
+      }
+    },
+
+    hit() {
+      if (this.phase !== "playing") return;
+      if (!this.deck.length) this.deck = this.createDeck();
+      const card = this.deck.pop();
+      this.playerHand.push(card);
+      SoundFX.deal();
+      triggerHaptic("light");
+
+      const pEval = this.evalHand(this.playerHand);
+      this.updateUI();
+
+      if (pEval.isBust) {
+        this.phase = "round_over";
+        SoundFX.knock();
+        triggerHaptic("heavy");
+        this.showStatus("💥 Перебор! (" + pEval.score + ") Проигрыш", "#ef4444");
+        this.saveChips();
+        setTimeout(() => this.resetToBetting(), 2200);
+      } else if (pEval.score === 21) {
+        setTimeout(() => this.stand(), 400);
+      }
+    },
+
+    double() {
+      if (this.phase !== "playing" || this.playerHand.length !== 2) return;
+      if (this.chips < this.bet) {
+        showToast("Недостаточно фишек для удвоения!");
+        return;
+      }
+      this.chips -= this.bet;
+      this.bet *= 2;
+      this.saveChips();
+      SoundFX.chip();
+      triggerHaptic("medium");
+
+      if (!this.deck.length) this.deck = this.createDeck();
+      const card = this.deck.pop();
+      this.playerHand.push(card);
+      SoundFX.deal();
+
+      const pEval = this.evalHand(this.playerHand);
+      this.updateUI();
+
+      if (pEval.isBust) {
+        this.phase = "round_over";
+        SoundFX.knock();
+        triggerHaptic("heavy");
+        this.showStatus("💥 Перебор! (" + pEval.score + ") Проигрыш", "#ef4444");
+        setTimeout(() => this.resetToBetting(), 2200);
+      } else {
+        setTimeout(() => this.stand(), 600);
+      }
+    },
+
+    stand() {
+      if (this.phase !== "playing") return;
+      this.phase = "dealer_turn";
+      this.updateUI();
+      this.playDealerTurn();
+    },
+
+    playDealerTurn() {
+      SoundFX.deal();
+      this.updateUI();
+
+      const step = () => {
+        const dEval = this.evalHand(this.dealerHand);
+        if (dEval.score < 17) {
+          if (!this.deck.length) this.deck = this.createDeck();
+          this.dealerHand.push(this.deck.pop());
+          SoundFX.deal();
+          triggerHaptic("light");
+          this.updateUI();
+          setTimeout(step, 600);
+        } else {
+          this.evaluateWinner();
+        }
+      };
+      setTimeout(step, 600);
+    },
+
+    finishRoundNaturalBJ() {
+      this.phase = "round_over";
+      const dEval = this.evalHand(this.dealerHand);
+      this.updateUI();
+
+      if (dEval.isBlackjack) {
+        this.chips += this.bet;
+        this.showStatus("🤝 Ничья! У обоих Блэкджек", "var(--neon-cyan)");
+        SoundFX.knock();
+      } else {
+        const win = Math.floor(this.bet * 2.5);
+        this.chips += win;
+        this.showStatus("🏆 БЛЭКДЖЕК! +🪙 " + fmtChips(Math.floor(this.bet * 1.5)), "var(--cyber-gold)");
+        SoundFX.fanfare();
+        triggerHaptic("success");
+      }
+      this.saveChips();
+      this.updateUI();
+      setTimeout(() => this.resetToBetting(), 2600);
+    },
+
+    evaluateWinner() {
+      this.phase = "round_over";
+      const pScore = this.evalHand(this.playerHand).score;
+      const dEval = this.evalHand(this.dealerHand);
+      const dScore = dEval.score;
+
+      if (dEval.isBust) {
+        const win = this.bet * 2;
+        this.chips += win;
+        this.showStatus("🎉 Дилер перебрал! (" + dScore + ") Победа +🪙 " + fmtChips(this.bet), "var(--neon-emerald)");
+        SoundFX.fanfare();
+        triggerHaptic("success");
+      } else if (pScore > dScore) {
+        const win = this.bet * 2;
+        this.chips += win;
+        this.showStatus("🎉 Победа! (" + pScore + " против " + dScore + ") +🪙 " + fmtChips(this.bet), "var(--neon-emerald)");
+        SoundFX.fanfare();
+        triggerHaptic("success");
+      } else if (pScore === dScore) {
+        this.chips += this.bet;
+        this.showStatus("🤝 Ничья! (" + pScore + " очков) Возврат ставки", "var(--neon-cyan)");
+        SoundFX.knock();
+        triggerHaptic("light");
+      } else {
+        this.showStatus("❌ Проигрыш (" + pScore + " против " + dScore + ")", "#ef4444");
+        SoundFX.knock();
+        triggerHaptic("medium");
+      }
+
+      this.saveChips();
+      this.updateUI();
+      setTimeout(() => this.resetToBetting(), 2600);
+    },
+
+    resetToBetting() {
+      this.phase = "betting";
+      if (this.bet > this.chips) {
+        this.bet = Math.min(this.chips, 500);
+      }
+      $("bjStatusBanner").style.display = "none";
+      this.updateUI();
+    },
+
+    showStatus(msg, color) {
+      const banner = $("bjStatusBanner");
+      banner.style.display = "block";
+      banner.style.borderColor = color || "var(--cyber-gold)";
+      banner.innerHTML = `<span style="color:${color || '#fff'}">${msg}</span>`;
+    },
+
+    updateUI() {
+      $("bjPlayerChipsVal").textContent = fmtChips(this.chips);
+      $("bjCurrentBetText").textContent = "🪙 " + fmtChips(this.bet);
+      if (activeGameMode === "blackjack") {
+        $("heroBalanceText").textContent = fmtChips(this.chips);
+      }
+
+      $("bjRefillBtn").style.display = (this.chips <= 0 && this.phase === "betting") ? "inline-block" : "none";
+
+      const pRow = $("bjPlayerCards");
+      pRow.innerHTML = "";
+      this.playerHand.forEach(c => {
+        const el = createCardEl(formatCardBJ(c));
+        el.classList.add("card-deal-anim");
+        pRow.appendChild(el);
+      });
+      const pEval = this.evalHand(this.playerHand);
+      const pScoreEl = $("bjPlayerScore");
+      if (this.playerHand.length === 0) {
+        pScoreEl.textContent = "0";
+        pScoreEl.className = "bj-score-badge";
+      } else {
+        pScoreEl.textContent = (pEval.isSoft && pEval.score < 21) ? `${pEval.score - 10}/${pEval.score}` : String(pEval.score);
+        pScoreEl.className = "bj-score-badge" + (pEval.isBust ? " bust" : (pEval.isBlackjack ? " bj" : ""));
+      }
+
+      const dRow = $("bjDealerCards");
+      dRow.innerHTML = "";
+      const showHole = (this.phase === "dealer_turn" || this.phase === "round_over");
+      this.dealerHand.forEach((c, idx) => {
+        let cardStr = c;
+        if (idx === 1 && !showHole) {
+          cardStr = "🂠";
+        } else {
+          cardStr = formatCardBJ(c);
+        }
+        const el = createCardEl(cardStr);
+        el.classList.add("card-deal-anim");
+        dRow.appendChild(el);
+      });
+
+      const dScoreEl = $("bjDealerScore");
+      if (this.dealerHand.length === 0) {
+        dScoreEl.textContent = "0";
+        dScoreEl.className = "bj-score-badge";
+      } else if (!showHole) {
+        const upCardEval = this.evalHand([this.dealerHand[0]]);
+        dScoreEl.textContent = String(upCardEval.score);
+        dScoreEl.className = "bj-score-badge";
+      } else {
+        const dEval = this.evalHand(this.dealerHand);
+        dScoreEl.textContent = (dEval.isSoft && dEval.score < 21) ? `${dEval.score - 10}/${dEval.score}` : String(dEval.score);
+        dScoreEl.className = "bj-score-badge" + (dEval.isBust ? " bust" : (dEval.isBlackjack ? " bj" : ""));
+      }
+
+      if (this.phase === "betting") {
+        $("bjBettingControls").style.display = "flex";
+        $("bjPlayControls").style.display = "none";
+        $("bjDealBtn").disabled = this.bet <= 0 || this.chips <= 0;
+      } else {
+        $("bjBettingControls").style.display = "none";
+        $("bjPlayControls").style.display = "flex";
+        const isPlaying = this.phase === "playing";
+        $("bjHitBtn").disabled = !isPlaying;
+        $("bjStandBtn").disabled = !isPlaying;
+        $("bjDoubleBtn").disabled = !isPlaying || this.playerHand.length !== 2 || this.chips < this.bet;
+      }
+    }
+  };
+
+  function formatCardBJ(c) {
+    if (!c || c === "🂠") return "🂠";
+    const r = c.slice(0, -1);
+    const s = c.slice(-1);
+    const rankMap = { "T": "10" };
+    const suitIcon = { "c": "♣", "d": "♦", "h": "♥", "s": "♠" };
+    return (rankMap[r] || r) + (suitIcon[s] || s);
+  }
+
+  window.bjAddBet = (amt) => BJ.addBet(amt);
+  window.bjClearBet = () => BJ.clearBet();
+  window.bjAllInBet = () => BJ.allInBet();
+  window.bjStartDeal = () => BJ.startDeal();
+  window.bjHit = () => BJ.hit();
+  window.bjStand = () => BJ.stand();
+  window.bjDouble = () => BJ.double();
+  window.bjRefillChips = () => BJ.refillChips();
+
   connect();
   checkActiveChatRooms();
+
+  // URL Game Mode Check
+  try {
+    const urlParams = new URLSearchParams(window.location.search);
+    if (urlParams.get("game") === "blackjack" || window.location.pathname.startsWith("/blackjack")) {
+      switchGameMode("blackjack");
+    }
+  } catch(e) {}
 })();
 </script>
 </body>

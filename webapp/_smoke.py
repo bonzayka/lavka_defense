@@ -38,15 +38,13 @@ def test_full_hand():
         holdem.add_player(t, uid, nm)
     assert holdem.start_tournament(t)["ok"], "турнир не стартовал"
 
-    # Проверяем, что каждый видит только свои карты в начале раздачи.
+    # Проверяем строгую изоляцию: карманные карты передаются в you.hole, а в seats только рубашки
     for viewer in (101, 202, 303):
         view = S.serialize(t, viewer)
+        assert len(view["you"]["hole"]) == 2 and all(c != "🂠" for c in view["you"]["hole"]), "свои карты должны быть в you.hole!"
         for seat in view["seats"]:
-            if seat["uid"] == viewer:
-                assert all(c != "🂠" for c in seat["cards"]), "свои карты скрыты!"
-            else:
-                assert seat["cards"] in ([], ["🂠", "🂠"]), f"видны чужие карты: {seat}"
-    print("[ok] serialize: игрок видит свои карты, чужие скрыты рубашкой")
+            assert seat["cards"] in ([], ["🂠", "🂠"]), f"в seats во время игры должны быть только рубашки: {seat}"
+    print("[ok] serialize: строгая изоляция карт в you.hole, в seats только рубашки")
 
     # Играем раздачу до конца, каждый раз беря первое доступное действие.
     guard = 0
@@ -79,7 +77,9 @@ def test_http():
         assert r.status_code == 200 and r.json().get("ok"), r.text
         r = client.get("/")
         assert r.status_code == 200 and "telegram-web-app.js" in r.text, "страница стола не отдалась"
-    print("[ok] HTTP: /health и / (страница стола) отвечают 200")
+        r_bj = client.get("/blackjack")
+        assert r_bj.status_code == 200 and "telegram-web-app.js" in r_bj.text, "страница блэкджека не отдалась"
+    print("[ok] HTTP: /health, / и /blackjack отвечают 200")
 
 
 def test_ws():

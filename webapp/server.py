@@ -59,6 +59,9 @@ INITDATA_MAX_AGE = int(os.environ.get("WEBAPP_INITDATA_MAX_AGE", "86400"))
 # Пауза между раздачами (сек), как в групповом боте.
 NEXT_HAND_DELAY = 4
 
+# Кеш аватаров пользователей (user_id -> photo_url)
+avatar_cache: dict[int, str] = {}
+
 app = FastAPI(title="Poker Mini App")
 
 
@@ -93,7 +96,7 @@ def verify_init_data(init_data: str, bot_token: str, max_age: int = INITDATA_MAX
     Валидация Telegram WebApp initData по официальной схеме:
         secret = HMAC_SHA256(key="WebAppData", msg=bot_token)
         hash   = HMAC_SHA256(key=secret, msg=data_check_string)
-    Возвращает dict пользователя {id, name} или None, если подпись неверна.
+    Возвращает dict пользователя {id, name, photo_url} или None, если подпись неверна.
     """
     if not init_data or not bot_token:
         return None
@@ -125,7 +128,8 @@ def verify_init_data(init_data: str, bot_token: str, max_age: int = INITDATA_MAX
         return None
     name = (f"{user.get('first_name', '')} {user.get('last_name', '')}").strip() \
         or user.get("username") or f"Игрок {uid}"
-    return {"id": int(uid), "name": name}
+    photo_url = user.get("photo_url") or ""
+    return {"id": int(uid), "name": name, "photo_url": photo_url}
 
 
 # =============================== Комнаты/столы ==============================
@@ -204,7 +208,7 @@ def _card_list(cards: list[str]) -> list[str]:
     return [holdem.format_card(c) for c in (cards or [])]
 
 
-def serialize(table: dict, viewer_uid: int) -> dict:
+def serialize(table: dict, viewer_uid: int, room: Room | None = None) -> dict:
     """Состояние стола глазами конкретного игрока (чужие карты скрыты)."""
     players = table["players"]
     seats = []
@@ -212,12 +216,16 @@ def serialize(table: dict, viewer_uid: int) -> dict:
     for uid in table["seats"]:
         p = players[uid]
         is_me = uid == viewer_uid
-        show_cards = is_me or (is_round_over and p.get("hole") and not p.get("folded"))
+        # Физическая изоляция: в seats реальные карты открываются ТОЛЬКО на шоудауне.
+        # Во время раздачи все карманные карты в seats скрыты (рубашки 🂠).
+        # Карты самого игрока передаются исключительно в state.you.hole.
+        show_cards = is_round_over and bool(p.get("hole")) and not p.get("folded")
         p_stack = p.get("stack", 0)
         p_bet = 0 if (is_round_over or p_stack <= 0) else p.get("street_bet", 0)
         seats.append({
             "uid": uid,
             "name": p["name"],
+            "avatar": p.get("avatar") or avatar_cache.get(uid, ""),
             "stack": p_stack,
             "bet": p_bet,
             "folded": p.get("folded", False),
@@ -229,7 +237,7 @@ def serialize(table: dict, viewer_uid: int) -> dict:
             "misses": p.get("misses", 0),
             "last_action": p.get("last_action", ""),
             "showdown": p.get("showdown_name", ""),
-            "cards": _card_list(p.get("hole")) if show_cards else (["🂠", "🂠"] if p.get("hole") else []),
+            "cards": _card_list(p.get("hole")) if show_cards else (["🂠", "🂠"] if (p.get("hole") and not p.get("folded")) else []),
         })
 
     me = players.get(viewer_uid)
@@ -248,6 +256,11 @@ def serialize(table: dict, viewer_uid: int) -> dict:
     t_start = table.get("turn_start_time", 0)
     now_t = time.time()
     t_left = max(0, int(holdem.TURN_TIMEOUT_SEC - (now_t - t_start))) if (table.get("phase") == "playing" and table.get("current_turn") and t_start) else 0
+
+    spectators_count = 0
+    if room:
+        seated_uids = set(table.get("players", {}).keys())
+        spectators_count = sum(1 for u in set(room.conns.values()) if u not in seated_uids)
 
     return {
         "type": "state",
@@ -271,10 +284,12 @@ def serialize(table: dict, viewer_uid: int) -> dict:
         "last_payouts": table.get("last_payouts", {}),
         "min_players": holdem.MIN_PLAYERS,
         "is_host": viewer_uid == table.get("host"),
+        "spectators_count": spectators_count,
         "seats": seats,
         "you": {
             "uid": viewer_uid,
             "seated": bool(me),
+            "hole": _card_list(me.get("hole")) if me else [],
             "combo": combo_name,
             "to_call": holdem.player_to_call(table, viewer_uid) if me else 0,
             "options": opts,
@@ -287,7 +302,7 @@ async def broadcast(room: Room):
     dead = []
     for ws, uid in list(room.conns.items()):
         try:
-            await ws.send_json(serialize(room.table, uid))
+            await ws.send_json(serialize(room.table, uid, room))
         except Exception:
             dead.append(ws)
     for ws in dead:
@@ -329,8 +344,39 @@ async def list_rooms():
     return {"ok": True, "rooms": active}
 
 
+@app.get("/api/avatar/{user_id}")
+async def get_avatar(user_id: int):
+    """Отдать аватар пользователя Telegram (из кеша или через Bot API)."""
+    if user_id in avatar_cache and avatar_cache[user_id]:
+        from fastapi.responses import RedirectResponse
+        return RedirectResponse(avatar_cache[user_id])
+    try:
+        import bot
+        bot_inst = getattr(bot, "bot", None)
+        token = getattr(bot, "BOT_TOKEN", BOT_TOKEN)
+        if bot_inst and token:
+            photos = await bot_inst.get_user_profile_photos(user_id, limit=1)
+            if photos and photos.total_count > 0:
+                file_id = photos.photos[0][-1].file_id
+                f = await bot_inst.get_file(file_id)
+                if f.file_path:
+                    url = f"https://api.telegram.org/file/bot{token}/{f.file_path}"
+                    avatar_cache[user_id] = url
+                    from fastapi.responses import RedirectResponse
+                    return RedirectResponse(url)
+    except Exception:
+        pass
+    from fastapi.responses import Response
+    return Response(status_code=404)
+
+
 @app.get("/")
 async def index():
+    return FileResponse(STATIC_DIR / "index.html")
+
+
+@app.get("/blackjack")
+async def blackjack():
     return FileResponse(STATIC_DIR / "index.html")
 
 
@@ -355,13 +401,16 @@ async def ws_endpoint(ws: WebSocket):
         user = verify_init_data(msg.get("initData", ""), BOT_TOKEN)
         if user is None and WEBAPP_DEV:
             duid = int(msg.get("dev_uid") or 1000 + int(time.time()) % 9000)
-            user = {"id": duid, "name": msg.get("dev_name") or f"Dev{duid}"}
+            user = {"id": duid, "name": msg.get("dev_name") or f"Dev{duid}", "photo_url": ""}
         if user is None:
             await ws.send_json({"type": "error", "error": "bad_init_data"})
             await ws.close()
             return
 
         uid, name = user["id"], user["name"]
+        photo_url = user.get("photo_url") or ""
+        if photo_url:
+            avatar_cache[uid] = photo_url
 
         # Защита приватности: если комната привязана к чату, проверяем членство
         if code.startswith("chat_"):
@@ -382,10 +431,12 @@ async def ws_endpoint(ws: WebSocket):
         room = get_room(code, host_id=uid)
         room.table["code"] = code
         room.add_conn(ws, uid)
-        # Обновим имя, если игрок уже сидит.
+        # Обновим имя и аватар, если игрок уже сидит.
         if uid in room.table["players"]:
             room.table["players"][uid]["name"] = name
-        await ws.send_json(serialize(room.table, uid))
+            if photo_url:
+                room.table["players"][uid]["avatar"] = photo_url
+        await ws.send_json(serialize(room.table, uid, room))
 
         # 2) Основной цикл действий.
         while True:
@@ -398,6 +449,8 @@ async def ws_endpoint(ws: WebSocket):
                 table = room.table
                 if mtype == "join":
                     holdem.add_player(table, uid, name)
+                    if uid in table.get("players", {}) and avatar_cache.get(uid):
+                        table["players"][uid]["avatar"] = avatar_cache[uid]
                 elif mtype == "start":
                     holdem.start_tournament(table)
                 elif mtype == "action":
