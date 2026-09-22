@@ -134,41 +134,89 @@ def _sync_recognize_whisper_file(wav_path: str, language: str = "ru") -> str | N
         return None
 
 
-def _sync_recognize(wav_bytes: bytes, language: str) -> str | None:
-    """Синхронное распознавание речи (Google Speech API с фоллбэком на Faster-Whisper)."""
+def _sync_recognize_file(wav_path: str, language: str) -> str | None:
+    """Синхронное распознавание из готового wav-файла."""
     engine = getattr(config, "VOICE_ENGINE", "auto")
 
+    # Если принудительно задан движок whisper
+    if engine == "whisper" and has_whisper():
+        return _sync_recognize_whisper_file(wav_path, language)
+
+    # 1. Попытка через Google Speech Recognition
+    if sr is not None:
+        r = sr.Recognizer()
+        try:
+            with sr.AudioFile(wav_path) as source:
+                audio_data = r.record(source)
+            try:
+                text = r.recognize_google(audio_data, language=language)
+                return (text or "").strip()
+            except sr.UnknownValueError:
+                # Тишина или неразборчивый звук
+                return ""
+            except sr.RequestError as e:
+                log.info("voiceguard: Google API временно недоступен (%s). Переключаемся на резервный Faster-Whisper...", e)
+        except Exception as e:
+            log.warning("voiceguard: ошибка чтения аудио в SpeechRecognition: %s", e)
+
+    # 2. Резервный оффлайн-движок Faster-Whisper (если Google упал или недоступен)
+    if has_whisper():
+        return _sync_recognize_whisper_file(wav_path, language)
+
+    return None
+
+
+def _sync_convert_and_recognize(data: bytes, ext: str, language: str) -> str | None:
+    """Конвертация и распознавание за один проход без повторной записи файла на диск."""
+    if not has_ffmpeg():
+        raise RuntimeError("ffmpeg не найден в системе")
+
+    suffix_in = f".{ext.lstrip('.')}"
+    with tempfile.NamedTemporaryFile(suffix=suffix_in, delete=False) as in_f:
+        in_name = in_f.name
+        in_f.write(data)
+
+    out_name = in_name + ".wav"
+    try:
+        cmd = [
+            "ffmpeg",
+            "-y",
+            "-i", in_name,
+            "-vn",                  # без видео (для video_note / кружочков)
+            "-ar", "16000",         # 16 kHz
+            "-ac", "1",             # mono
+            "-c:a", "pcm_s16le",    # 16-bit PCM
+            "-f", "wav",
+            out_name,
+        ]
+        res = subprocess.run(
+            cmd,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            timeout=30,
+            check=False,
+        )
+        if res.returncode != 0 or not os.path.exists(out_name):
+            raise RuntimeError(f"ffmpeg завершился с ошибкой: код {res.returncode}")
+
+        return _sync_recognize_file(out_name, language)
+    finally:
+        for p in (in_name, out_name):
+            try:
+                if os.path.exists(p):
+                    os.remove(p)
+            except OSError:
+                pass
+
+
+def _sync_recognize(wav_bytes: bytes, language: str) -> str | None:
+    """Синхронное распознавание речи (Google Speech API с фоллбэком на Faster-Whisper)."""
     with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as wav_f:
         wav_name = wav_f.name
         wav_f.write(wav_bytes)
 
     try:
-        # Если принудительно задан движок whisper
-        if engine == "whisper" and has_whisper():
-            return _sync_recognize_whisper_file(wav_name, language)
-
-        # 1. Попытка через Google Speech Recognition
-        if sr is not None:
-            r = sr.Recognizer()
-            try:
-                with sr.AudioFile(wav_name) as source:
-                    audio_data = r.record(source)
-                try:
-                    text = r.recognize_google(audio_data, language=language)
-                    return (text or "").strip()
-                except sr.UnknownValueError:
-                    # Тишина или неразборчивый звук
-                    return ""
-                except sr.RequestError as e:
-                    log.info("voiceguard: Google API временно недоступен (%s). Переключаемся на резервный Faster-Whisper...", e)
-            except Exception as e:
-                log.warning("voiceguard: ошибка чтения аудио в SpeechRecognition: %s", e)
-
-        # 2. Резервный оффлайн-движок Faster-Whisper (если Google упал или недоступен)
-        if has_whisper():
-            return _sync_recognize_whisper_file(wav_name, language)
-
-        return None
+        return _sync_recognize_file(wav_name, language)
     finally:
         try:
             if os.path.exists(wav_name):
@@ -194,15 +242,9 @@ async def transcribe(audio_bytes: bytes, language: str | None = None, ext: str =
 
     async with sema:
         try:
-            wav_bytes = await asyncio.to_thread(convert_to_wav, audio_bytes, ext)
+            return await asyncio.to_thread(_sync_convert_and_recognize, audio_bytes, ext, lang)
         except Exception as e:
-            log.warning("voiceguard: ошибка конвертации аудио: %s", e)
-            return None
-
-        try:
-            return await asyncio.to_thread(_sync_recognize, wav_bytes, lang)
-        except Exception as e:
-            log.warning("voiceguard: ошибка распознавания речи: %s", e)
+            log.warning("voiceguard: ошибка обработки аудио: %s", e)
             return None
 
 

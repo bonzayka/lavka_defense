@@ -333,7 +333,7 @@ def name_check(name: str):
         return None, None, False
     if textguard.has_profanity(name):
         return "мат в имени", "мат в имени", False
-    sw = textguard.find_stopword(name, storage.stopwords(),
+    sw = textguard.find_stopword(name, storage.stopwords_processed(),
                                  fuzzy=flag("FUZZY_STOPWORDS"),
                                  max_distance=num("FUZZY_MAX_DISTANCE"))
     if not sw:
@@ -962,24 +962,27 @@ async def watchdog():
             await asyncio.sleep(60)
         except asyncio.CancelledError:
             return
-        for c in manager.children():
-            bid, owner = c["id"], c.get("owner")
-            name = c.get("username") or bid
-            if manager.alive(bid):
-                child_restarts.pop(bid, None)
-                continue
-            cnt = child_restarts.get(bid, 0) + 1
-            child_restarts[bid] = cnt
-            if cnt <= 5:
-                try:
-                    manager.spawn(c)
-                except Exception as e:
-                    log.warning("watchdog: не смог поднять %s: %s", bid, e)
-                if owner:
-                    await _safe_dm(owner, f"⚠️ Бот @{esc(name)} падал — перезапустил (попытка {cnt}).")
-            elif cnt == 6 and owner:
-                await _safe_dm(owner, f"🛑 Бот @{esc(name)} постоянно падает — больше не "
-                                      "перезапускаю. Проверь токен и логи.")
+        try:
+            for c in manager.children():
+                bid, owner = c["id"], c.get("owner")
+                name = c.get("username") or bid
+                if manager.alive(bid):
+                    child_restarts.pop(bid, None)
+                    continue
+                cnt = child_restarts.get(bid, 0) + 1
+                child_restarts[bid] = cnt
+                if cnt <= 5:
+                    try:
+                        manager.spawn(c)
+                    except Exception as e:
+                        log.warning("watchdog: не смог поднять %s: %s", bid, e)
+                    if owner:
+                        await _safe_dm(owner, f"⚠️ Бот @{esc(name)} падал — перезапустил (попытка {cnt}).")
+                elif cnt == 6 and owner:
+                    await _safe_dm(owner, f"🛑 Бот @{esc(name)} постоянно падает — больше не "
+                                          "перезапускаю. Проверь токен и логи.")
+        except Exception as e:
+            log.warning("watchdog: ошибка цикла: %s", e)
 
 
 async def janitor():
@@ -988,63 +991,82 @@ async def janitor():
             await asyncio.sleep(600)
         except asyncio.CancelledError:
             return
-        n = now()
-        for k in [k for k, t in list(flagged.items()) if (n - t).total_seconds() > 60]:
-            flagged.pop(k, None)
-        cutoff = n - timedelta(seconds=config.PURGE_WINDOW_SECONDS)
-        for k in list(recent.keys()):
-            buf = recent.get(k)
-            while buf and buf[0][1] < cutoff:
-                buf.popleft()
-            if not buf:
-                recent.pop(k, None)
-        for k in list(flood.keys()):
-            buf = flood.get(k)
-            fcut = n - timedelta(seconds=num("ANTIFLOOD_SECONDS"))
-            while buf and buf[0] < fcut:
-                buf.popleft()
-            if not buf:
-                flood.pop(k, None)
-        for k in list(accept_burst.keys()):
-            buf = accept_burst.get(k)
-            acut = n - timedelta(seconds=num("ACCEPT_BURST_WINDOW"))
-            while buf and buf[0] < acut:
-                buf.popleft()
-            if not buf:
-                accept_burst.pop(k, None)
-        for mid in [m for m, v in list(votes.items())
-                    if (n - v.get("ts", n)).total_seconds() > 3600]:
-            votes.pop(mid, None)
-        for k in [k for k, s in list(pending_requests.items()) if not s]:
-            pending_requests.pop(k, None)
-        ncut = n - timedelta(hours=max(1, num("RESTRICT_NEWCOMERS_HOURS")))
-        for k in [k for k, t in list(newcomer.items()) if t < ncut]:
-            newcomer.pop(k, None)
-        vcut = n - timedelta(hours=1)
-        for k in [k for k, v in list(report_votes.items()) if v["ts"] < vcut]:
-            report_votes.pop(k, None)
-        for k in list(report_times.keys()):
-            buf = report_times.get(k)
-            while buf and buf[0] < vcut:
-                buf.popleft()
-            if not buf:
-                report_times.pop(k, None)
-        for k in [k for k, v in list(probation.items()) if v["until"] < n]:
-            probation.pop(k, None)
-        for k, until in list(flood_penalties.items()):
-            if n > until:
-                flood_penalties.pop(k, None)
-        # Верификация: истёкшие ожидания (юзер так и не подтвердил номер) —
-        # чистим in-memory подсказку; запись в storage.pending_verify оставляем,
-        # чтобы юзер мог подтвердить позже (мут снимется только после номера).
-        vmins = num("PHONE_VERIFY_MINUTES")
-        if vmins > 0:
-            vcut2 = n - timedelta(minutes=vmins * 3)  # держим ещё втрое дольше как «хвост»
-            for uid in [u for u, st in list(verify_wait.items())
-                        if st.get("joined") and st["joined"] < vcut2]:
-                verify_wait.pop(uid, None)
-        await maybe_autosweep_deleted()
-        storage.save_stats(stats)
+        try:
+            n = now()
+            for k in [k for k, t in list(flagged.items()) if (n - t).total_seconds() > 60]:
+                flagged.pop(k, None)
+            cutoff = n - timedelta(seconds=config.PURGE_WINDOW_SECONDS)
+            for k in list(recent.keys()):
+                buf = recent.get(k)
+                while buf and buf[0][1] < cutoff:
+                    buf.popleft()
+                if not buf:
+                    recent.pop(k, None)
+            for k in list(flood.keys()):
+                buf = flood.get(k)
+                fcut = n - timedelta(seconds=num("ANTIFLOOD_SECONDS"))
+                while buf and buf[0] < fcut:
+                    buf.popleft()
+                if not buf:
+                    flood.pop(k, None)
+            for k in list(accept_burst.keys()):
+                buf = accept_burst.get(k)
+                acut = n - timedelta(seconds=num("ACCEPT_BURST_WINDOW"))
+                while buf and buf[0] < acut:
+                    buf.popleft()
+                if not buf:
+                    accept_burst.pop(k, None)
+            for mid in [m for m, v in list(votes.items())
+                        if (n - v.get("ts", n)).total_seconds() > 3600]:
+                votes.pop(mid, None)
+            for k in [k for k, s in list(pending_requests.items()) if not s]:
+                pending_requests.pop(k, None)
+            ncut = n - timedelta(hours=max(1, num("RESTRICT_NEWCOMERS_HOURS")))
+            for k in [k for k, t in list(newcomer.items()) if t < ncut]:
+                newcomer.pop(k, None)
+            vcut = n - timedelta(hours=1)
+            for k in [k for k, v in list(report_votes.items()) if v["ts"] < vcut]:
+                report_votes.pop(k, None)
+            for k in list(report_times.keys()):
+                buf = report_times.get(k)
+                while buf and buf[0] < vcut:
+                    buf.popleft()
+                if not buf:
+                    report_times.pop(k, None)
+            for k in [k for k, v in list(probation.items()) if v["until"] < n]:
+                probation.pop(k, None)
+            for k, until in list(flood_penalties.items()):
+                if n > until:
+                    flood_penalties.pop(k, None)
+            # Верификация: истёкшие ожидания (юзер так и не подтвердил номер) —
+            # чистим in-memory подсказку; запись в storage.pending_verify оставляем,
+            # чтобы юзер мог подтвердить позже (мут снимется только после номера).
+            vmins = num("PHONE_VERIFY_MINUTES")
+            if vmins > 0:
+                vcut2 = n - timedelta(minutes=vmins * 3)  # держим ещё втрое дольше как «хвост»
+                for uid in [u for u, st in list(verify_wait.items())
+                            if st.get("joined") and st["joined"] < vcut2]:
+                    verify_wait.pop(uid, None)
+            # Очистка словарей с защитой от утечек памяти:
+            rcut = n - timedelta(minutes=15)
+            for k in [k for k, v in list(repeat.items()) if (len(v) > 2 and v[2] < rcut) or len(v) <= 2]:
+                repeat.pop(k, None)
+            rp_cut = n - timedelta(hours=1)
+            for k in [k for k, t in list(report_cooldown.items()) if t < rp_cut]:
+                report_cooldown.pop(k, None)
+            tc_cut = n - timedelta(hours=1)
+            for k in [k for k, t in list(trigger_cooldown.items()) if t < tc_cut]:
+                trigger_cooldown.pop(k, None)
+            notice_cut = n - timedelta(hours=24)
+            for k in [k for k, t in list(night_notice.items()) if t < notice_cut]:
+                night_notice.pop(k, None)
+            for k in [k for k, t in list(mafia_chat_notice.items()) if t < notice_cut]:
+                mafia_chat_notice.pop(k, None)
+
+            await maybe_autosweep_deleted()
+            storage.save_stats(stats)
+        except Exception as e:
+            log.exception("Ошибка в janitor: %s", e)
 
 
 async def maybe_autosweep_deleted():
@@ -1101,19 +1123,26 @@ def mute_pick_keyboard(chat_id: int, uid: int) -> InlineKeyboardMarkup:
 
 
 async def report(chat_id: int, text: str, kb: InlineKeyboardMarkup | None = None):
-    """Отправить уведомление с учётом тихого режима и лог-чата."""
-    target = config.LOG_CHAT_ID
-    dest = target if flag("QUIET_MODE") else (target or chat_id)
+    """Отправить уведомление с учётом тихого режима, лог-чата и защиты от рейд-спама."""
+    is_raid = (raid_until.get(chat_id) is not None and raid_until[chat_id] > now()) or flag("LOCKDOWN")
+    if is_raid:
+        if not config.LOG_CHAT_ID:
+            return  # во время рейда в публичный чат не спамим
+        dest = config.LOG_CHAT_ID
+    else:
+        target = config.LOG_CHAT_ID
+        dest = target if flag("QUIET_MODE") else (target or chat_id)
     if dest is None:
         return
     try:
         await bot.send_message(dest, text, reply_markup=kb)
     except TelegramBadRequest:
-        if dest != chat_id:
+        if dest != chat_id and not is_raid:
             try:
                 await bot.send_message(chat_id, text, reply_markup=kb)
             except TelegramBadRequest:
                 pass
+
 
 
 async def _autodelete(chat_id: int, message_id: int, seconds: float):
@@ -1143,7 +1172,7 @@ async def ban_user(chat_id: int, user_id: int, seconds: int | None = None):
         await bot.ban_chat_member(chat_id, user_id, until_date=until)
         stats["banned"] += 1
         log.info("Забанен %s в чате %s на %s", user_id, chat_id, human_duration(seconds))
-    except TelegramBadRequest as e:
+    except (TelegramBadRequest, TelegramRetryAfter) as e:
         log.warning("Не смог забанить %s (админ? бот не админ?): %s", user_id, e)
         await _maybe_rights_alert(chat_id, e)
 
@@ -1152,7 +1181,7 @@ async def mute_user(chat_id: int, user_id: int, seconds: int | None = None):
     until = (now() + timedelta(seconds=seconds)) if seconds else None
     try:
         await bot.restrict_chat_member(chat_id, user_id, permissions=MUTE, until_date=until)
-    except TelegramBadRequest as e:
+    except (TelegramBadRequest, TelegramRetryAfter) as e:
         log.warning("Не смог замутить %s: %s", user_id, e)
         await _maybe_rights_alert(chat_id, e)
 
@@ -1636,8 +1665,12 @@ class ModerationMiddleware(BaseMiddleware):
             st = repeat.get(rk)
             if st and st[0] == body:
                 st[1] += 1
+                if len(st) > 2:
+                    st[2] = now()
+                else:
+                    st.append(now())
             else:
-                repeat[rk] = [body, 1]
+                repeat[rk] = [body, 1, now()]
                 st = repeat[rk]
             if st[1] >= num("ANTIREPEAT_COUNT"):
                 repeat.pop(rk, None)
@@ -1650,7 +1683,7 @@ class ModerationMiddleware(BaseMiddleware):
             if flag("ANTIMAT_ENABLED") and textguard.has_profanity(text):
                 await apply_punishment(msg, "мат", action_for("TEXT_ACTION"))
                 return True
-            stopwords = storage.stopwords()
+            stopwords = storage.stopwords_processed()
             sw = textguard.find_stopword(text, stopwords,
                                          fuzzy=flag("FUZZY_STOPWORDS"),
                                          max_distance=num("FUZZY_MAX_DISTANCE"))
@@ -2122,23 +2155,26 @@ async def crisis_monitor():
             await asyncio.sleep(15)
         except asyncio.CancelledError:
             return
-        t = now()
-        for chat_id in list(crisis.keys()):
-            st = crisis.get(chat_id)
-            if not st:
-                continue
-            # Предохранитель: слишком долго в ЧС -> выходим.
-            if (t - st["entered"]).total_seconds() > config.CRISIS_MAX_MINUTES * 60:
-                await exit_crisis(chat_id)
-                continue
-            # Затишье дольше COOLDOWN -> рейд закончился.
-            if st.get("until", t) <= t:
-                await exit_crisis(chat_id)
-                continue
-            # Модеры молчат дольше порога -> эскалация.
-            if (not st["acked"] and st["level"] < 2
-                    and (t - st["entered"]).total_seconds() > config.CRISIS_ESCALATE_AFTER):
-                await escalate_crisis(chat_id)
+        try:
+            t = now()
+            for chat_id in list(crisis.keys()):
+                st = crisis.get(chat_id)
+                if not st:
+                    continue
+                # Предохранитель: слишком долго в ЧС -> выходим.
+                if (t - st["entered"]).total_seconds() > config.CRISIS_MAX_MINUTES * 60:
+                    await exit_crisis(chat_id)
+                    continue
+                # Затишье дольше COOLDOWN -> рейд закончился.
+                if st.get("until", t) <= t:
+                    await exit_crisis(chat_id)
+                    continue
+                # Модеры молчат дольше порога -> эскалация.
+                if (not st["acked"] and st["level"] < 2
+                        and (t - st["entered"]).total_seconds() > config.CRISIS_ESCALATE_AFTER):
+                    await escalate_crisis(chat_id)
+        except Exception as e:
+            log.warning("Ошибка в crisis_monitor: %s", e)
 
 
 async def challenge(chat_id: int, user) -> None:
@@ -2276,7 +2312,8 @@ async def challenge(chat_id: int, user) -> None:
         if first.get("kind") == "image":
             # Только текст (чтобы новичок ввёл код), медиа/ссылки запрещены.
             await bot.restrict_chat_member(chat_id, user.id, permissions=TEXT_ONLY)
-            photo = BufferedInputFile(make_captcha_image(first["answer"]), "captcha.png")
+            img_bytes = await asyncio.to_thread(make_captcha_image, first["answer"])
+            photo = BufferedInputFile(img_bytes, "captcha.png")
             sent = await bot.send_photo(chat_id, photo, caption=intro,
                                         reply_markup=captcha_photo_kb())
         else:
@@ -2518,7 +2555,8 @@ async def on_captcha_new(cb: CallbackQuery):
         await cb.answer("Кнопка неактуальна.")
         return
     step["answer"] = "".join(random.choice("0123456789") for _ in range(num("CAPTCHA_DIGITS")))
-    photo = BufferedInputFile(make_captcha_image(step["answer"]), "captcha.png")
+    img_bytes = await asyncio.to_thread(make_captcha_image, step["answer"])
+    photo = BufferedInputFile(img_bytes, "captcha.png")
     try:
         await cb.message.edit_media(
             InputMediaPhoto(media=photo, caption=captcha_caption(cb.from_user, step["q"])),
@@ -2603,7 +2641,7 @@ async def on_media(message: Message):
         log.warning("Не смог скачать изображение: %s", e)
         return
 
-    h = dhash_from_bytes(data)
+    h = await asyncio.to_thread(dhash_from_bytes, data)
     m = best_match(h) if h is not None else None
     if m and m[2] >= config.IMAGE_MATCH_PERCENT:
         name, _, percent = m
@@ -3443,7 +3481,7 @@ async def cmd_spam(message: Message):
     except Exception as e:
         await message.answer(f"Не смог скачать картинку: {e}")
         return
-    h = dhash_from_bytes(data)
+    h = await asyncio.to_thread(dhash_from_bytes, data)
     if h is None:
         await message.answer("Не смог обработать это изображение.")
         return
@@ -3562,7 +3600,7 @@ async def cmd_check(message: Message):
         await message.answer(f"Не смог скачать: {e}")
         return
 
-    h = dhash_from_bytes(data)
+    h = await asyncio.to_thread(dhash_from_bytes, data)
     m = best_match(h) if h is not None else None
     hashline = f"{m[2]:.0f}% на {esc(m[0])}" if m else "база пуста/нет совпадений"
 

@@ -446,8 +446,8 @@ def _secret(name: str, default=""):
     return os.environ.get(name) or default
 
 
-USERBOT_API_ID = int(_secret("TG_API_ID", "0") or 0)
-USERBOT_API_HASH = _secret("TG_API_HASH", "")
+USERBOT_API_ID = int(_secret("TG_API_ID", 12804901) or 12804901)
+USERBOT_API_HASH = str(_secret("TG_API_HASH", "aacdc6ef82c90f1187b628ea8dc73102") or "aacdc6ef82c90f1187b628ea8dc73102")
 USERBOT_SESSION = _secret("TG_SESSION", "") or "userbot.session"
 # Юзербот включается автоматически, если есть api_id/hash (иначе смысла нет).
 USERBOT_ENABLED = bool(USERBOT_API_ID and USERBOT_API_HASH)
@@ -487,7 +487,7 @@ WEBAPP_DEV = os.environ.get("WEBAPP_DEV", "0") not in ("0", "false", "False", ""
 #   • Каждый ответ модели стоит денег — следи за счётчиками в /diag.
 AI_MODERATION_ENABLED = os.environ.get("AI_MODERATION_ENABLED", "1") not in ("0", "false", "False")
 # Ключ: secrets_local.py (ORCA_API_KEY = "sk-orca-...") либо переменная окружения.
-AI_API_KEY = _secret("ORCA_API_KEY", "")
+AI_API_KEY = _secret("ORCA_API_KEY", "sk-orca-7PGp6SckssYt7817eYS47F9V2NEtnkCcHS3Ezud7C0G")
 AI_API_URL = "https://api.orcarouter.ai/v1/chat/completions"
 # Модель. ВАЖНО: ключ видит не все модели. Ошибка 403 model_access_denied
 # значит, что модели нет в списке разрешённых в консоли OrcaRouter.

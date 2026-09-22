@@ -40,6 +40,7 @@ _PATTERNS = [
     r"еблан",
 ]
 _PROF_RE = [re.compile(p) for p in _PATTERNS]
+_COMBINED_PROF_RE = re.compile("|".join(f"(?:{p})" for p in _PATTERNS))
 
 # Узкий набор для «схлопнутого» текста (обфускация пробелами/точками: х у й).
 _COLLAPSED_BAD = [
@@ -68,7 +69,7 @@ def has_profanity(text: str) -> bool:
         if w in WHITELIST:
             continue
         probe = " " + w  # чтобы (?:^|[^а-яё]) сработал на границе слова
-        if any(rx.search(probe) for rx in _PROF_RE):
+        if _COMBINED_PROF_RE.search(probe):
             return True
     collapsed = "".join(words)  # «х у й» -> «хуй»
     return any(bad in collapsed for bad in _COLLAPSED_BAD)
@@ -136,14 +137,22 @@ def find_stopword(text: str, stopwords, fuzzy: bool = False,
     raw = _ZERO_WIDTH.sub("", (text or "").lower())
     collapsed = "".join(_words(norm))          # «с п а м» -> «спам» (снимает разделители)
     collapsed_sq = _squeeze(collapsed) if fuzzy else ""
-    for sw in stopwords:
-        s = sw.lower()
+    for item in stopwords:
+        if isinstance(item, tuple):
+            sw = item[0]
+            s = item[1]
+            s_sq = item[2] if len(item) > 2 else ""
+        else:
+            sw = item
+            s = sw.lower()
+            s_sq = _squeeze(s) if fuzzy else ""
         if not s:
             continue
         if s in norm or s in collapsed or s in raw:   # точный путь + латиница (ники/ссылки)
             return sw
         if fuzzy:
-            s_sq = _squeeze(s)
+            if not s_sq:
+                s_sq = _squeeze(s)
             if s_sq and s_sq in collapsed_sq:  # растянутые буквы
                 return sw
             if _fuzzy_hit(s_sq, collapsed_sq, max_distance):  # опечатки

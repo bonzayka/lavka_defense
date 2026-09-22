@@ -45,6 +45,7 @@ except Exception:  # запуск без config — берём токен из e
     BOT_TOKEN = os.environ.get("BOT_TOKEN", "")
 
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect  # noqa: E402
+from fastapi.middleware.gzip import GZipMiddleware  # noqa: E402
 from fastapi.responses import FileResponse, JSONResponse  # noqa: E402
 from fastapi.staticfiles import StaticFiles  # noqa: E402
 
@@ -59,10 +60,22 @@ INITDATA_MAX_AGE = int(os.environ.get("WEBAPP_INITDATA_MAX_AGE", "86400"))
 # Пауза между раздачами (сек), как в групповом боте.
 NEXT_HAND_DELAY = 4
 
-# Кеш аватаров пользователей (user_id -> photo_url)
+# Кеш аватаров пользователей (user_id -> photo_url) с ограничением размера
+MAX_AVATARS = 2000
 avatar_cache: dict[int, str] = {}
 
+
+def set_avatar_cache(user_id: int, url: str) -> None:
+    if len(avatar_cache) >= MAX_AVATARS and user_id not in avatar_cache:
+        try:
+            avatar_cache.pop(next(iter(avatar_cache)), None)
+        except StopIteration:
+            pass
+    avatar_cache[user_id] = url
+
+
 app = FastAPI(title="Poker Mini App")
+app.add_middleware(GZipMiddleware, minimum_size=1000)
 
 
 # ============================ Проверка доступа к чату =======================
@@ -142,19 +155,28 @@ class Room:
         self.conns: dict[WebSocket, int] = {}   # соединение -> uid
         self.lock = asyncio.Lock()
         self.on_action = on_action
-        self.chat_id = chat_id
+        self.last_active = time.time()
 
     def add_conn(self, ws: WebSocket, uid: int):
         self.conns[ws] = uid
+        self.last_active = time.time()
 
     def drop_conn(self, ws: WebSocket):
         self.conns.pop(ws, None)
+        self.last_active = time.time()
 
 
 rooms: dict[str, Room] = {}
 
 
 def get_room(code: str, host_id: int) -> Room:
+    # Очистка заброшенных пустых комнат (старше 2 часов), чтобы не расходовать память
+    if len(rooms) > 50:
+        now_ts = time.time()
+        for c, r in list(rooms.items()):
+            if not c.startswith("chat_") and not r.conns and (now_ts - getattr(r, "last_active", now_ts)) > 7200:
+                rooms.pop(c, None)
+
     room = rooms.get(code)
     if room is None:
         if code.startswith("chat_"):
@@ -360,7 +382,7 @@ async def get_avatar(user_id: int):
                 f = await bot_inst.get_file(file_id)
                 if f.file_path:
                     url = f"https://api.telegram.org/file/bot{token}/{f.file_path}"
-                    avatar_cache[user_id] = url
+                    set_avatar_cache(user_id, url)
                     from fastapi.responses import RedirectResponse
                     return RedirectResponse(url)
     except Exception:
@@ -416,7 +438,7 @@ async def ws_endpoint(ws: WebSocket):
         uid, name = user["id"], user["name"]
         photo_url = user.get("photo_url") or ""
         if photo_url:
-            avatar_cache[uid] = photo_url
+            set_avatar_cache(uid, photo_url)
 
         # Защита приватности: если комната привязана к чату, проверяем членство
         if code.startswith("chat_"):
@@ -505,9 +527,17 @@ async def ws_endpoint(ws: WebSocket):
             room.drop_conn(ws)
 
 
-# Статика (telegram-web-app.js подключаем с CDN в index.html, но папку монтируем).
+class CachedStaticFiles(StaticFiles):
+    async def get_response(self, path: str, scope):
+        response = await super().get_response(path, scope)
+        if response.status_code == 200:
+            response.headers["Cache-Control"] = "public, max-age=604800, immutable"
+        return response
+
+
+# Статика с кэшированием (CSS, JS кэшируются браузером на 7 дней).
 if STATIC_DIR.exists():
-    app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
+    app.mount("/static", CachedStaticFiles(directory=str(STATIC_DIR)), name="static")
 
 
 # ===================== Запуск внутри процесса бота ==========================

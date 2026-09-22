@@ -70,6 +70,9 @@ def load(variant: str = "quantized", threads: int = 0) -> None:
         import onnxruntime as ort
         path = _ensure_model(variant)
         so = ort.SessionOptions()
+        so.graph_optimization_level = ort.GraphOptimizationLevel.ORT_ENABLE_ALL
+        so.execution_mode = ort.ExecutionMode.ORT_SEQUENTIAL
+        so.enable_cpu_mem_arena = True
         if threads and threads > 0:
             so.intra_op_num_threads = threads
         _session = ort.InferenceSession(path, so, providers=["CPUExecutionProvider"])

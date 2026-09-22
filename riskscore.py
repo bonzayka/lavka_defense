@@ -69,32 +69,42 @@ def dominant_script(text: str) -> str:
     counts: dict[str, int] = {}
     letters = 0
     for ch in text or "":
-        if ch.isspace():
-            continue
-        if not ch.isalpha():
+        if ch.isspace() or not ch.isalpha():
             continue
         letters += 1
-        try:
-            name = unicodedata.name(ch)
-        except ValueError:
-            counts["other"] = counts.get("other", 0) + 1
-            continue
-        if "CYRILLIC" in name:
+        cp = ord(ch)
+        if (0x0400 <= cp <= 0x052F) or (0x2DE0 <= cp <= 0x2DFF) or (0xA640 <= cp <= 0xA69F) or (0x1C80 <= cp <= 0x1C8F):
             k = "cyrillic"
-        elif "LATIN" in name:
+        elif (0x0041 <= cp <= 0x005A) or (0x0061 <= cp <= 0x007A) or (0x00C0 <= cp <= 0x024F) or (0x1E00 <= cp <= 0x1EFF):
             k = "latin"
-        elif "ARABIC" in name or "HEBREW" in name:
+        elif (0x0600 <= cp <= 0x06FF) or (0x0750 <= cp <= 0x08FF) or (0x0590 <= cp <= 0x05FF) or (0xFB50 <= cp <= 0xFDFF):
             k = "arabic"
-        elif ("CJK" in name or "HIRAGANA" in name or "KATAKANA" in name
-              or "HANGUL" in name):
+        elif (0x4E00 <= cp <= 0x9FFF) or (0x3040 <= cp <= 0x30FF) or (0xAC00 <= cp <= 0xD7AF) or (0x1100 <= cp <= 0x11FF):
             k = "cjk"
-        elif ("DEVANAGARI" in name or "THAI" in name or "BENGALI" in name
-              or "TAMIL" in name or "TELUGU" in name or "GUJARATI" in name
-              or "KANNADA" in name or "MALAYALAM" in name or "SINHALA" in name
-              or "MYANMAR" in name or "KHMER" in name or "LAO" in name):
+        elif (0x0900 <= cp <= 0x0E7F) or (0x0E80 <= cp <= 0x0EFF) or (0x1000 <= cp <= 0x109F) or (0x1780 <= cp <= 0x17FF):
             k = "indic"
         else:
-            k = "other"
+            try:
+                name = unicodedata.name(ch)
+            except ValueError:
+                counts["other"] = counts.get("other", 0) + 1
+                continue
+            if "CYRILLIC" in name:
+                k = "cyrillic"
+            elif "LATIN" in name:
+                k = "latin"
+            elif "ARABIC" in name or "HEBREW" in name:
+                k = "arabic"
+            elif ("CJK" in name or "HIRAGANA" in name or "KATAKANA" in name
+                  or "HANGUL" in name):
+                k = "cjk"
+            elif ("DEVANAGARI" in name or "THAI" in name or "BENGALI" in name
+                  or "TAMIL" in name or "TELUGU" in name or "GUJARATI" in name
+                  or "KANNADA" in name or "MALAYALAM" in name or "SINHALA" in name
+                  or "MYANMAR" in name or "KHMER" in name or "LAO" in name):
+                k = "indic"
+            else:
+                k = "other"
         counts[k] = counts.get(k, 0) + 1
     if letters == 0:
         # Букв нет вовсе: только эмодзи/значки/невидимки (или пусто).
