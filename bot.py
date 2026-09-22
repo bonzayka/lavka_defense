@@ -51,7 +51,7 @@ from aiogram.types import (
     ReplyKeyboardRemove,
     WebAppInfo,
 )
-from aiogram.exceptions import TelegramBadRequest, TelegramRetryAfter, TelegramForbiddenError
+from aiogram.exceptions import TelegramBadRequest, TelegramRetryAfter, TelegramForbiddenError, TelegramAPIError
 
 import aiguard
 import config
@@ -5664,11 +5664,18 @@ async def _duel_run(chat_id: int, duel: dict):
 
 
 # ============================ Texas Hold'em =================================
+_holdem_refresh_last_time: dict[int, float] = {}
+_holdem_refresh_tasks: dict[int, asyncio.Task] = {}
+HOLDEM_REFRESH_MIN_INTERVAL = 1.0  # сек минимального интервала между edit_message_text в Telegram
 
 
 async def _holdem_cleanup_table(chat_id: int):
     """Полная очистка состояния стола в чате: таймеры, игроки, веб-комната."""
     await _holdem_cancel_timer(chat_id)
+    task = _holdem_refresh_tasks.pop(chat_id, None)
+    if task and not task.done():
+        task.cancel()
+    _holdem_refresh_last_time.pop(chat_id, None)
     holdem_games.pop(chat_id, None)
     for uid in list(holdem_player_chat):
         if holdem_player_chat.get(uid) == chat_id:
@@ -5824,22 +5831,25 @@ def _holdem_playing_kb(chat_id: int, phase: str = "playing") -> InlineKeyboardMa
 
 async def _on_webapp_action(chat_id: int, mtype: str, uid: int):
     """Синхронизация действий из WebApp прямо в группу Telegram."""
-    game = holdem_games.get(chat_id)
-    if not game:
-        return
-    if mtype == "join":
-        holdem_player_chat[uid] = chat_id
-        await _holdem_refresh(chat_id)
-    elif mtype == "start":
-        await _holdem_announce_hole_cards(chat_id)
-        await _holdem_refresh(chat_id)
-        await _holdem_send_turn_prompt(chat_id)
-    elif mtype == "action":
-        await _holdem_cancel_timer(chat_id)
-        holdem_custom_wait.pop(uid, None)
-        await _holdem_after_action(chat_id)
-    elif mtype in ("close_table", "cancel"):
-        await holdem_close_from_webapp(chat_id, uid)
+    try:
+        game = holdem_games.get(chat_id)
+        if not game:
+            return
+        if mtype == "join":
+            holdem_player_chat[uid] = chat_id
+            await _holdem_refresh(chat_id)
+        elif mtype == "start":
+            await _holdem_announce_hole_cards(chat_id)
+            await _holdem_refresh(chat_id)
+            await _holdem_send_turn_prompt(chat_id)
+        elif mtype == "action":
+            await _holdem_cancel_timer(chat_id)
+            holdem_custom_wait.pop(uid, None)
+            await _holdem_after_action(chat_id)
+        elif mtype in ("close_table", "cancel"):
+            await holdem_close_from_webapp(chat_id, uid)
+    except Exception as e:
+        log.exception("Error in _on_webapp_action chat=%s type=%s: %s", chat_id, mtype, e)
 
 
 async def holdem_close_from_webapp(chat_id: int, uid: int):
@@ -5852,7 +5862,7 @@ async def holdem_close_from_webapp(chat_id: int, uid: int):
     if msg_id:
         try:
             await bot.edit_message_text("🛑 Стол Texas Hold'em закрыт.", chat_id=chat_id, message_id=msg_id)
-        except TelegramBadRequest:
+        except (TelegramBadRequest, TelegramRetryAfter, TelegramAPIError):
             pass
 
 
@@ -5893,28 +5903,77 @@ async def _holdem_dm(uid: int, text: str, kb: InlineKeyboardMarkup | None = None
     try:
         await bot.send_message(uid, text, reply_markup=kb)
         return True
-    except (TelegramForbiddenError, TelegramBadRequest):
+    except TelegramRetryAfter as e:
+        log.warning("holdem dm flood-control uid=%s: retry after %s s", uid, e.retry_after)
+        return False
+    except (TelegramForbiddenError, TelegramBadRequest, TelegramAPIError) as e:
+        log.warning("holdem dm failed uid=%s: %s", uid, e)
+        return False
+    except Exception as e:
+        log.warning("holdem dm unexpected error uid=%s: %s", uid, e)
         return False
 
 
-
-async def _holdem_refresh(chat_id: int):
+async def _holdem_do_edit(chat_id: int):
+    """Непосредственное редактирование сообщения стола в чате Telegram с защитой от Flood Control."""
     game = holdem_games.get(chat_id)
-    if not game:
+    if not game or not game.get("msg_id"):
         return
     text = _holdem_board_text(game)
     phase = game["table"].get("phase", "lobby")
     is_lobby = (phase == "lobby")
     kb = _holdem_lobby_kb(chat_id) if is_lobby else _holdem_playing_kb(chat_id, phase)
+    _holdem_refresh_last_time[chat_id] = time.time()
     try:
         await bot.edit_message_text(text=text, chat_id=chat_id, message_id=game["msg_id"], reply_markup=kb)
-    except TelegramBadRequest as e:
+    except TelegramRetryAfter as e:
+        log.warning("holdem edit flood-control chat=%s: retry after %s s", chat_id, e.retry_after)
+        _holdem_refresh_last_time[chat_id] = time.time() + e.retry_after
+    except (TelegramBadRequest, TelegramAPIError) as e:
         log.warning("holdem refresh failed chat=%s: %s", chat_id, e)
+    except Exception as e:
+        log.warning("holdem edit unexpected error chat=%s: %s", chat_id, e)
+
+
+async def _holdem_throttled_edit(chat_id: int, delay: float):
+    try:
+        await asyncio.sleep(delay)
+        await _holdem_do_edit(chat_id)
+    except asyncio.CancelledError:
+        pass
+    except Exception as e:
+        log.warning("holdem throttled edit error chat=%s: %s", chat_id, e)
+    finally:
+        _holdem_refresh_tasks.pop(chat_id, None)
+
+
+async def _holdem_refresh(chat_id: int):
+    # 1. Мгновенно синхронизируем WebApp (WebSocket, 0ms задержки, без лимитов Telegram API)
     try:
         from webapp import server as webapp_server
         webapp_server.notify_chat_update(chat_id)
     except Exception:
         pass
+
+    # 2. Обновляем сообщение в группе Telegram с троттлингом и защитой от флуда
+    game = holdem_games.get(chat_id)
+    if not game:
+        return
+
+    now = time.time()
+    last = _holdem_refresh_last_time.get(chat_id, 0.0)
+    elapsed = now - last
+
+    # Если уже запланировано отложенное обновление — оно обновит стол со свежими данными
+    existing_task = _holdem_refresh_tasks.get(chat_id)
+    if existing_task and not existing_task.done():
+        return
+
+    if elapsed >= HOLDEM_REFRESH_MIN_INTERVAL:
+        await _holdem_do_edit(chat_id)
+    else:
+        wait_s = max(0.2, HOLDEM_REFRESH_MIN_INTERVAL - elapsed)
+        _holdem_refresh_tasks[chat_id] = asyncio.create_task(_holdem_throttled_edit(chat_id, wait_s))
 
 
 async def _holdem_cancel_timer(chat_id: int):
@@ -6119,7 +6178,7 @@ async def holdem_lobby_cb(cb: CallbackQuery):
         await cb.answer("Стол закрыт.")
         try:
             await cb.message.edit_text(f"🂡 Стол Texas Hold'em закрыт участником {who}.")
-        except TelegramBadRequest:
+        except (TelegramBadRequest, TelegramRetryAfter, TelegramAPIError):
             pass
     elif action == "start":
         res = holdem.start_tournament(table)
@@ -6168,10 +6227,10 @@ async def _holdem_try_text_action(message: Message, chat_id: int, uid: int, raw_
     async def _safe_reply(txt: str):
         try:
             await message.reply(txt)
-        except TelegramBadRequest:
+        except (TelegramBadRequest, TelegramRetryAfter, TelegramAPIError):
             try:
                 await message.answer(txt)
-            except TelegramBadRequest:
+            except (TelegramBadRequest, TelegramRetryAfter, TelegramAPIError):
                 pass
 
     text_lower = raw_text.strip().lower()
@@ -6358,7 +6417,7 @@ async def holdem_move_cb(cb: CallbackQuery):
         await cb.answer()
         try:
             await cb.message.edit_text(prompt_text, reply_markup=InlineKeyboardMarkup(inline_keyboard=preset_rows))
-        except TelegramBadRequest:
+        except (TelegramBadRequest, TelegramRetryAfter, TelegramAPIError):
             pass
         return
 
@@ -6386,7 +6445,7 @@ async def holdem_move_cb(cb: CallbackQuery):
         await cb.answer()
         try:
             await cb.message.edit_text(text, reply_markup=_holdem_turn_kb(chat_id, uid, opts))
-        except TelegramBadRequest:
+        except (TelegramBadRequest, TelegramRetryAfter, TelegramAPIError):
             pass
         return
 
