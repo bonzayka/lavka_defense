@@ -14,6 +14,8 @@ import re
 import subprocess
 import sys
 
+import config
+
 BASE = os.path.dirname(os.path.abspath(__file__))
 CHILDREN_FILE = os.path.join(BASE, "children.json")
 CHILDREN_DIR = os.path.join(BASE, "children")
@@ -72,13 +74,18 @@ def spawn(entry: dict) -> None:
         return
     data_file, photo = _paths(bid)
     env = dict(os.environ)
+    inf_mode = getattr(config, "INFERENCE_MODE", "microservice")
+    is_ms = inf_mode == "microservice"
     env.update({
         "BOT_TOKEN": entry["token"],
         "DATA_FILE": data_file,
         "PHOTO_DIR": photo,
         "CHILD_BOT": "1",
-        "NSFW_ENABLED": "1" if CHILD_NSFW else "0",
-        "GORE_ENABLED": "1" if CHILD_GORE else "0",
+        "INFERENCE_MODE": inf_mode,
+        "INFERENCE_SOCKET": getattr(config, "INFERENCE_SOCKET", ""),
+        "INFERENCE_AUTO_START": "0",  # дочерний бот не пытается сам спавнить сервис
+        "NSFW_ENABLED": "1" if (is_ms or CHILD_NSFW) else "0",
+        "GORE_ENABLED": "1" if (is_ms or CHILD_GORE) else "0",
         # У каждого дочернего — СВОЙ пароль панели (не родительский «Benny»).
         "PANEL_PASSWORD": entry.get("password") or "",
     })

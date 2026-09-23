@@ -1665,10 +1665,61 @@ check("bio scam: custom stopword detected", _scam_sw is True and "запреще
 check("bot: flag CHECK_JOIN_BIO on by default", bot.flag("CHECK_JOIN_BIO") is True)
 check("bot: action_for BIO_ACTION is mute by default", bot.action_for("BIO_ACTION") == "mute")
 
+# ----------------- ТЕСТЫ ИЗОЛЯЦИИ ИНФЕРЕНСА (IPC / МИКРОСЕРВИС) -----------------
+import inference_client
+import inference_service
+from starlette.testclient import TestClient
+
+check("inference: config INFERENCE_MODE exists", hasattr(config, "INFERENCE_MODE"))
+check("inference: config INFERENCE_SOCKET exists", hasattr(config, "INFERENCE_SOCKET"))
+check("inference: config INFERENCE_AUTO_START exists", hasattr(config, "INFERENCE_AUTO_START"))
+check("inference: client singleton is InferenceClient", isinstance(inference_client.get_client(), inference_client.InferenceClient))
+check("inference: client target resolved", len(inference_client.get_client()._target) > 0)
+check("inference: voiceguard available in microservice mode", voiceguard.available() is True)
+
+_inf_tc = TestClient(inference_service.app)
+
+# 1. Health & Status
+_h_resp = _inf_tc.get("/health")
+check("inference server: GET /health 200 OK", _h_resp.status_code == 200 and _h_resp.json().get("status") == "ok")
+
+_s_resp = _inf_tc.get("/status")
+check("inference server: GET /status 200 OK", _s_resp.status_code == 200 and "models" in _s_resp.json())
+check("inference server: models list complete", set(_s_resp.json()["models"].keys()) == {"nsfw", "gore", "ocr", "voice"})
+
+# 2. Endpoints с пустыми/базовыми телами (проверка валидации)
+_nsfw_resp = _inf_tc.post("/nsfw", content=b"")
+check("inference server: POST /nsfw empty body", _nsfw_resp.status_code == 200 and _nsfw_resp.json().get("prob") is None)
+
+_gore_resp = _inf_tc.post("/gore", content=b"")
+check("inference server: POST /gore empty body", _gore_resp.status_code == 200 and _gore_resp.json().get("hit") is False)
+
+_ocr_resp = _inf_tc.post("/ocr", content=b"")
+check("inference server: POST /ocr empty body", _ocr_resp.status_code == 200 and _ocr_resp.json().get("text") == "")
+
+_tr_resp = _inf_tc.post("/transcribe", content=b"")
+check("inference server: POST /transcribe empty body", _tr_resp.status_code == 200 and _tr_resp.json().get("text") == "")
+
+# 3. Клиент при недоступном сокете (graceful failure)
+async def _test_offline_client():
+    _offline_cl = inference_client.InferenceClient()
+    _offline_cl._base_url = "http://127.0.0.1:59998"
+    check("inference client: is_healthy false on offline", await _offline_cl.is_healthy() is False)
+    check("inference client: detect_nsfw returns None on offline", await _offline_cl.detect_nsfw(b"dummy") is None)
+    check("inference client: detect_gore returns None on offline", await _offline_cl.detect_gore(b"dummy") is None)
+    check("inference client: extract_ocr_text returns empty string on offline", await _offline_cl.extract_ocr_text(b"dummy") == "")
+    check("inference client: transcribe_audio returns None on offline", await _offline_cl.transcribe_audio(b"dummy") is None)
+    await _offline_cl.close()
+
+asyncio.run(_test_offline_client())
+
+
 print(f"\nИтог: {PASS} ок, {FAIL} провалов.")
-# Importing the application creates an aiogram HTTP session. Some async tests
-# open it, so close it explicitly before the interpreter exits.
-asyncio.run(bot.bot.session.close())
+async def _cleanup_sessions():
+    await bot.bot.session.close()
+    await inference_client.get_client().close()
+
+asyncio.run(_cleanup_sessions())
 
 sys.exit(1 if FAIL else 0)
 

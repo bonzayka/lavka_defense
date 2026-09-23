@@ -55,8 +55,25 @@ IMAGE_MATCH_PERCENT = 85
 # которые бот видел с момента запуска — историю чата Bot API читать не умеет.
 PURGE_WINDOW_SECONDS = 5 * 60  # 5 минут
 
+# --- Изоляция тяжёлого инференса (микросервис / IPC) ---
+# "microservice" — инференс вынесен в отдельный процесс с общением через Unix Domain Socket / IPC.
+# "in_process" — встроенный режим (всё внутри одного процесса бота).
+INFERENCE_MODE = os.environ.get("INFERENCE_MODE", "microservice")
+# Путь к сокету (Linux) или TCP-адресу (Windows)
+INFERENCE_SOCKET = os.environ.get(
+    "INFERENCE_SOCKET",
+    "/tmp/defense_inference.sock" if os.name != "nt" else "http://127.0.0.1:8765"
+)
+# Автоматически поднимать микросервис при старте бота, если он не запущен
+INFERENCE_AUTO_START = os.environ.get("INFERENCE_AUTO_START", "1") not in ("0", "false", "False")
+# Таймаут ожидания ответа инференс-сервиса (сек)
+INFERENCE_TIMEOUT = float(os.environ.get("INFERENCE_TIMEOUT", "60.0"))
+# Ограничение потоков CPU для инференса (0 = авто/все)
+INFERENCE_THREADS = int(os.environ.get("INFERENCE_THREADS", "0"))
+
 # --- Распознавание 18+ (ViT-классификатор, порно/нагота целым кадром) ---
 # Смотрит на картинку ЦЕЛИКОМ и выдаёт вероятность «18+» одной цифрой.
+
 # Устойчив к ракурсам и даёт мало ложных (в отличие от детекторов частей тела).
 # Модель AdamCodd/vit-base-nsfw-detector на onnxruntime — БЕЗ torch/transformers.
 # Веса (ONNX) качаются один раз в models/ автоматически (см. nsfwvit.py).

@@ -72,8 +72,11 @@ def _get_whisper_model():
 
 
 def available() -> bool:
-    """Доступен ли модуль расшифровки (SpeechRecognition или Faster-Whisper + ffmpeg)."""
+    """Доступен ли модуль расшифровки (SpeechRecognition или Faster-Whisper + ffmpeg, либо микросервис инференса)."""
+    if getattr(config, "INFERENCE_MODE", "microservice") == "microservice":
+        return True
     return bool((sr is not None or has_whisper()) and has_ffmpeg())
+
 
 
 def convert_to_wav(data: bytes, ext: str = "ogg") -> bytes:
@@ -233,19 +236,32 @@ async def transcribe(audio_bytes: bytes, language: str | None = None, ext: str =
       - пустую строку "", если речь не распознана / тишина;
       - None в случае сбоя конвертации или недоступности сервиса.
     """
-    if not available():
-        log.warning("voiceguard: модуль недоступен (проверьте speech_recognition и ffmpeg)")
+    lang = language or getattr(config, "VOICE_LANGUAGE", "ru-RU")
+
+    # 1. Попытка через изолированный микросервис инференса (IPC)
+    if getattr(config, "INFERENCE_MODE", "microservice") == "microservice":
+        try:
+            import inference_client
+            client = inference_client.get_client()
+            res = await client.transcribe_audio(audio_bytes, ext=ext, language=lang)
+            if res is not None:
+                return res
+        except Exception as e:
+            log.warning("voiceguard: ошибка IPC-микросервиса: %s, пробую локальный фоллбэк...", e)
+
+    # 2. Локальный фоллбэк (если микросервис выключен или недоступен)
+    if not bool((sr is not None or has_whisper()) and has_ffmpeg()):
+        log.warning("voiceguard: локальный модуль недоступен (проверьте speech_recognition/whisper и ffmpeg)")
         return None
 
-    lang = language or getattr(config, "VOICE_LANGUAGE", "ru-RU")
     sema = _get_semaphore()
-
     async with sema:
         try:
             return await asyncio.to_thread(_sync_convert_and_recognize, audio_bytes, ext, lang)
         except Exception as e:
             log.warning("voiceguard: ошибка обработки аудио: %s", e)
             return None
+
 
 
 def scan_for_violations(text: str) -> tuple[bool, str, str, str]:

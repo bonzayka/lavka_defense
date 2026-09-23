@@ -1,0 +1,16 @@
+[Unit]
+Description=Defense Heavy Inference Service (ViT, CLIP, OCR, Whisper)
+After=network.target
+
+[Service]
+Type=simple
+# Если бот лежит не в /root/defense — поправь пути ниже.
+WorkingDirectory=/root/defense
+ExecStart=/root/defense/venv/bin/python /root/defense/inference_service.py
+Restart=always
+RestartSec=5
+# Пониженный приоритет планировщика ОС: бот и FastAPI всегда получают CPU первыми
+Nice=10
+
+[Install]
+WantedBy=multi-user.target

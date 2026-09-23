@@ -62,6 +62,7 @@ import deanon
 import deleted
 import gore
 import holdem
+import inference_client
 import mafia
 import manager
 import nsfwvit
@@ -856,14 +857,18 @@ def load_nsfw_detector() -> None:
     """Поднять ViT-классификатор 18+ (nsfwvit). При первом запуске качает модель."""
     if not config.NSFW_ENABLED:
         return
+    if getattr(config, "INFERENCE_MODE", "microservice") == "microservice":
+        return
     nsfwvit.load(config.NSFW_MODEL, config.NSFW_THREADS)
 
 
 async def nsfw_check(data: bytes, tag: str):
     """(метка, вероятность) при 18+ >= порога, иначе None. Совместимо с on_media."""
-    if not nsfwvit.available():
-        return None
-    prob = await asyncio.to_thread(nsfwvit.detect_prob, data)
+    prob = None
+    if getattr(config, "INFERENCE_MODE", "microservice") == "microservice":
+        prob = await inference_client.get_client().detect_nsfw(data)
+    elif nsfwvit.available():
+        prob = await asyncio.to_thread(nsfwvit.detect_prob, data)
     if prob is not None and prob >= config.NSFW_THRESHOLD:
         return ("18+", prob)
     return None
@@ -871,6 +876,8 @@ async def nsfw_check(data: bytes, tag: str):
 
 async def nsfw_debug(data: bytes, tag: str):
     """Для /check: сырая вероятность 18+ (без применения порога) или None."""
+    if getattr(config, "INFERENCE_MODE", "microservice") == "microservice":
+        return await inference_client.get_client().detect_nsfw(data)
     if not nsfwvit.available():
         return None
     return await asyncio.to_thread(nsfwvit.detect_prob, data)
@@ -2658,9 +2665,13 @@ async def on_media(message: Message):
         return
 
     # 3) Шок-контент / гор (CLIP, если установлен и включён).
-    if gore.available() and flag("GORE_ON"):
+    gore_enabled = flag("GORE_ON") and (gore.available() or getattr(config, "INFERENCE_MODE", "microservice") == "microservice")
+    if gore_enabled:
         async with _cv_sema:
-            g = await asyncio.to_thread(gore.detect, data, num("GORE_THRESHOLD_PCT") / 100)
+            if getattr(config, "INFERENCE_MODE", "microservice") == "microservice":
+                g = await inference_client.get_client().detect_gore(data, num("GORE_THRESHOLD_PCT") / 100)
+            else:
+                g = await asyncio.to_thread(gore.detect, data, num("GORE_THRESHOLD_PCT") / 100)
         if g:
             label, score = g
             await handle_violation(message, f"шок-контент/гор ({score:.0%})")
@@ -2668,11 +2679,16 @@ async def on_media(message: Message):
 
     # 4) Анти-деанон: OCR картинки на чужие персональные данные (скрин с
     #    телефоном/паспортом/адресом жертвы). По умолчанию — только у новичков.
-    if flag("DEANON_ENABLED") and deanon.available():
+    ocr_enabled = flag("DEANON_ENABLED") and (deanon.available() or getattr(config, "INFERENCE_MODE", "microservice") == "microservice")
+    if ocr_enabled:
         if not flag("DEANON_NEWCOMERS_ONLY") or _is_newcomer(message.chat.id, message.from_user.id):
             async with _cv_sema:
-                text = await asyncio.to_thread(
-                    deanon.extract_text, data, storage.get_str("DEANON_OCR_LANG", config.DEANON_OCR_LANG))
+                if getattr(config, "INFERENCE_MODE", "microservice") == "microservice":
+                    text = await inference_client.get_client().extract_ocr_text(
+                        data, storage.get_str("DEANON_OCR_LANG", config.DEANON_OCR_LANG))
+                else:
+                    text = await asyncio.to_thread(
+                        deanon.extract_text, data, storage.get_str("DEANON_OCR_LANG", config.DEANON_OCR_LANG))
             if text:
                 hit, why = deanon.scan_text(text, num("DEANON_MIN_HITS"))
                 if hit:
@@ -3612,7 +3628,10 @@ async def cmd_check(message: Message):
         mark = "🔴 БАН" if prob >= config.NSFW_THRESHOLD else "🟢 чисто"
         nsfwline = f"18+ {prob:.0%} — {mark} (порог {config.NSFW_THRESHOLD:.0%})"
 
-    if gore.available():
+    if getattr(config, "INFERENCE_MODE", "microservice") == "microservice":
+        g = await inference_client.get_client().detect_gore(data, 0.0)
+        goreline = f"вероятность гора {g[1]:.0%}" if g else "—"
+    elif gore.available():
         g = await asyncio.to_thread(gore.detect, data, 0.0)
         goreline = f"вероятность гора {g[1]:.0%}" if g else "—"
     else:
@@ -3633,10 +3652,11 @@ async def cmd_deanon(message: Message):
     """Диагностика анти-деанона: ответом на картинку показать OCR-текст и найденные данные."""
     if not await _staff_only(message, "manage"):
         return
-    if not deanon.available():
+    ocr_ok = deanon.available() or (getattr(config, "INFERENCE_MODE", "microservice") == "microservice" and await inference_client.get_client().is_healthy())
+    if not ocr_ok:
         await staff_reply(message, f"Анти-деанон OCR: {esc(deanon.status())}.\n"
-                             "Установи движок: <code>pip install rapidocr-onnxruntime</code>, "
-                             "затем перезапусти бота.")
+                             "Установи движок: <code>pip install rapidocr-onnxruntime</code> "
+                             "или проверь микросервис инференса, затем перезапусти бота.")
         return
     reply = message.reply_to_message
     file_obj = pick_image_file(reply) if reply else None
@@ -3648,8 +3668,13 @@ async def cmd_deanon(message: Message):
     except Exception as e:
         await message.answer(f"Не смог скачать: {e}")
         return
-    text = await asyncio.to_thread(
-        deanon.extract_text, data, storage.get_str("DEANON_OCR_LANG", config.DEANON_OCR_LANG))
+    if getattr(config, "INFERENCE_MODE", "microservice") == "microservice":
+        text = await inference_client.get_client().extract_ocr_text(
+            data, storage.get_str("DEANON_OCR_LANG", config.DEANON_OCR_LANG))
+    else:
+        text = await asyncio.to_thread(
+            deanon.extract_text, data, storage.get_str("DEANON_OCR_LANG", config.DEANON_OCR_LANG))
+
     hit, types = deanon.is_deanon(text or "", num("DEANON_MIN_HITS"))
     mark = "🔴 деанон" if hit else "🟢 чисто"
     snippet = (text or "").strip()
@@ -3698,9 +3723,19 @@ async def cmd_diag(message: Message):
         except TelegramBadRequest as e:
             rights = f"не смог проверить: {e}"
 
+    inf_mode = getattr(config, "INFERENCE_MODE", "microservice")
+    if inf_mode == "microservice":
+        inf_ok = await inference_client.get_client().is_healthy()
+        tgt = getattr(config, "INFERENCE_SOCKET", "")
+        inf_status_str = f"✅ активен (IPC: {tgt})" if inf_ok else f"❌ недоступен ({tgt})"
+        inf_line = f"• Микросервис инференса: {esc(inf_status_str)}\n"
+    else:
+        inf_line = "• Микросервис инференса: встроенный (in_process)\n"
+
     await staff_reply(message,
         "🩺 <b>Диагностика</b>\n"
         f"<b>Картинки/ИИ:</b>\n"
+        f"{inf_line}"
         f"• {torch_line}\n• {tr_line}\n"
         f"• Гор (CLIP): {esc(gore.status())} | GORE_ENABLED={config.GORE_ENABLED}\n"
         f"• Детектор 18+ (ViT {config.NSFW_MODEL}): {esc(nsfwvit.status())} "
@@ -8851,11 +8886,32 @@ async def main():
         log.warning("Не удалось загрузить @ники из хранилища: %s", e)
     stats.update(storage.load_stats())  # восстановить счётчики
     load_reference_hashes()
-    load_nsfw_detector()
-    if config.GORE_ENABLED:
-        gore.load(config.GORE_MODEL)
-    if config.DEANON_ENABLED:
-        deanon.load(config.DEANON_OCR_LANG)
+    if getattr(config, "INFERENCE_MODE", "microservice") == "microservice":
+        if not IS_CHILD:
+            try:
+                inf_ready = await inference_client.get_client().ensure_service_running()
+                if inf_ready:
+                    log.info("Изолированный микросервис инференса готов к работе.")
+                else:
+                    log.warning("Микросервис инференса не ответил, включаю локальный режим...")
+                    load_nsfw_detector()
+                    if config.GORE_ENABLED:
+                        gore.load(config.GORE_MODEL)
+                    if config.DEANON_ENABLED:
+                        deanon.load(config.DEANON_OCR_LANG)
+            except Exception as e:
+                log.warning("Ошибка старта микросервиса инференса: %s, включаю локальный режим...", e)
+                load_nsfw_detector()
+                if config.GORE_ENABLED:
+                    gore.load(config.GORE_MODEL)
+                if config.DEANON_ENABLED:
+                    deanon.load(config.DEANON_OCR_LANG)
+    else:
+        load_nsfw_detector()
+        if config.GORE_ENABLED:
+            gore.load(config.GORE_MODEL)
+        if config.DEANON_ENABLED:
+            deanon.load(config.DEANON_OCR_LANG)
     aiguard.start(ai_violation)   # AI-модерация текста (молчит, если выключена)
     dp.message.outer_middleware(PrivacyGate())  # глушит посторонних в личке
     dp.message.outer_middleware(CommandCleanupMiddleware())  # самый внешний: удаляет команду после обработки
@@ -8913,6 +8969,11 @@ async def main():
         # чтобы не оставлять «Unclosed client session».
         if not IS_CHILD:
             manager.stop_all()
+            try:
+                inference_client.get_client().stop_service()
+                await inference_client.get_client().close()
+            except Exception:
+                pass
         await aiguard.stop()
         storage.save_stats(stats)
         await bot.session.close()
