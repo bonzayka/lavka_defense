@@ -52,6 +52,7 @@ PATTERNS_18_PLUS = [
     r"\bобучу\s+(?:новому\s+)?искусству\s+любви\b",
     r"\bисполню\s+твои\s+желания\b.{0,30}\b(?:видео|приват|в\s+лс)\b",
     r"\bсливы?\s+(?:малолеток|школьниц|шкур|вписок)\b",
+    r"\b(?:интим\w*|приват\w*|вирт\w*)\b.{0,20}\b(?:в\s+лс|в\s+личку|лс)\b",
     r"\bинтимки\b|\bвебкам\b",
     r"^\s*ищу\s+с\s+кем\s+(?:пообщаться|поболтать|познакомиться)\b.{0,15}$",
     r"^\s*(?:кто|кому)\s+(?:хочет|желает|скучно)\s+пообщаться\b.{0,15}$",
@@ -85,31 +86,46 @@ PATTERNS_JOB_SCAM = [
     r"\bне\s+работай\s+за\s+копейк\w*.{0,30}заработай\b",
     r"\bзаработай\s+себе\s+котлету\b",
     r"\bподписывайся\s+на\s+канал\s+в\s+профиле\b|\bканал\s+в\s+профиле\b",
-    r"\b(?:ссылка|заявка|анкета|вход|инфа|подробности)\s+(?:в|по|через)\s+(?:био|bio|профил\w*|шапк\w*|описани\w*|закреп\w*)\b",
+    r"\b(?:ссылка|заявка|анкета|вход|инфа|подробности)\s+(?:в|по|через)\s+(?:био|bio|профил\w*|шапк\w*|описани\w*|закреп\w*|канал\w*)\b",
     r"\b(?:в|по)\s+(?:био|bio)\s+(?:по\s+ссылке|ссылка)\b",
-    r"\bссылка\s+в\s+(?:профиле|шапке|описании|закрепе)\b",
+    r"\bссылк\w*\s+(?:в|на)\s+(?:профиле|шапке|описании|закрепе|канале|группе|боте)\b",
+    r"\b(?:канал|ссылк\w*|инфа|подробност\w*|архив\w*|видео\w*|фот\w*|пак\w*|слив\w*|вход)\s+(?:в|на)\s+(?:закреп\w*|профил\w*|шапк\w*|описани\w*)\b",
+    r"\b(?:в|по|через)\s+(?:закреп\w*|профил\w*|шапк\w*|описани\w*)\s+(?:канал|ссылк\w*|инфа)\b",
+    r"\bканал\s+(?:в|на)\s+(?:закреп\w*|профил\w*|шапк\w*)\b",
     r"\bдополнительный\s+доход\b",
     r"[?&]start=(?:ref|invite|partner|affiliate)\w*",
 ]
 
 PATTERNS_CSAM_NORM = [
-    r"\bдетск\w*\s+порн\w*\b",
-    r"\bдетск\w*\s+секс\w*\b",
-    r"\bпорн\w*\s+малолет\w*\b",
-    r"\bпедопорн\w*\b",
-    r"\bц[\s._-]*п\b.{0,20}\b(?:\d+[-–]\d+|в\s+лс|архив|канал)\b",
+    r"\bдетск\w*\s*[пpр][0оo][pрr]н\w*\b",
+    r"\bдетск\w*\s*секс\w*\b",
+    r"\b[пpр][0оo][pрr]н\w*\s*(?:малолет|дет|ребен|школьниц|девочк)\w*\b",
+    r"\b[пpр]едо[пpр]орн\w*\b",
+    r"\b(?:child|ped[oa])\s*(?:porn\w*|pack\w*|archive\w*|sex\w*|leak\w*|chat\w*|link\w*)\b",
+    r"(?:cp|c_p|c\.p)[\s._-]*(?:video\w*|pack\w*|leaks?\w*|archive\w*|channel\w*|chat\w*|foto\w*|photo\w*|links?\w*|mega\w*|box\w*|cloud\w*)",
+    r"(?:cp|c_p|c\.p)[\s._-]*(?:0?[1-9]|1[0-7])[\s._-]*(?:[-–—_]|to|до|\s)[\s._-]*(?:0?[2-9]|1[0-8])\b",
+    r"(?:detki|detsk\w*|det[ei]\w*|malolet\w*)[\s._-]*(?:[пpр][0оo][pрr]n\w*|[пpр][0оo][pрr]н\w*|sex\w*|секс\w*|leak\w*|слив\w*|archive\w*|архив\w*|pack\w*|пак\w*|video\w*|видео\w*|foto\w*|photo\w*|фот\w*)",
+    r"(?:[пpр][0оo][pрr]n\w*|[пpр][0оo][pрr]н\w*|sex\w*|секс\w*)[\s._-]*(?:detki|detsk\w*|det[ei]\w*|malolet\w*|детей|дети|девочек|malchikov)",
+    r"(?:ц[\s._-]*п|c[\s._-]*p|с[\s._-]*р)[\s._-]*(?:от\s*)?(?:0?[1-9]|1[0-7])[\s._-]*(?:[-–—_]|to|до|\s)[\s._-]*(?:0?[2-9]|1[0-8])\b",
+    r"(?:ц[\s._-]*п|c[\s._-]*p|с[\s._-]*р)\b.{0,30}\b(?:архив|archive|в[\s._-]*лс|канал|channel|закреп\w*|пак\w*|pack\w*|папк\w*|слив\w*|leak\w*|видео\w*|video\w*|vids\w*|фот\w*|photo\w*|pics\w*|баз\w*|ссылк\w*|link\w*|чат\w*|chat\w*)",
+    r"\b(?:архив|archive|в[\s._-]*лс|канал|channel|закреп\w*|пак\w*|pack\w*|папк\w*|слив\w*|leak\w*|видео\w*|video\w*|фот\w*|photo\w*)\b.{0,30}\b(?:ц[\s._-]*п|c[\s._-]*p|с[\s._-]*р)\b",
+    r"\b(?:детск\w*|малолет\w*|девочк\w*|школьниц\w*)\b.{0,15}\b(?:0?[1-9]|1[0-7])[\s._-]*(?:[-–—_]|to|до|\s)[\s._-]*(?:0?[2-9]|1[0-8])\b",
+    r"\b(?:детск\w*|малолет\w*)\b.{0,25}\b(?:видео\w*|фот\w*|слив\w*|архив\w*|пак\w*)\b.{0,25}\b(?:в\s+закреп\w*|в\s+канал\w*|в\s+лс|по\s+ссылк\w*|закреп\w*)",
 ]
 
 PATTERNS_CSAM_CONDENSED = [
-    r"детск\w*порн\w*",
+    r"детск\w*[пpр][0оo][pрr]н\w*",
     r"детск\w*секс\w*",
-    r"порн\w*малолет\w*",
-    r"педопорн\w*",
-    r"порнодетей",
-    r"сексдетей",
-    r"цп\d+[-–]\d+",
-    r"цпвлс",
-    r"цпархив",
+    r"[пpр][0оo][pрr]н\w*малолет\w*",
+    r"[пpр][0оo][pрr]н\w*дет\w*",
+    r"сексдет\w*",
+    r"[пpр]едо[пpр]орн\w*",
+    r"childporn\w*",
+    r"pedoporn\w*",
+    r"(?:цп|cp|ср)(?:0?[1-9]|1[0-7])(?:0?[2-9]|1[0-8])(?!\d)",
+    r"(?:цп|cp|ср)(?:архив|archive|влс|канал|channel|закреп|пак|pack|папк|слив|leak|видео|video|фот|photo|баз|base|ссылк|link|чат|chat)",
+    r"(?:архив|archive|влс|канал|channel|закреп|пак|pack|слив|leak|видео|video|фот|photo)(?:цп|cp|ср)",
+    r"(?:детск|малолет)(?:0?[1-9]|1[0-7])(?:0?[2-9]|1[0-8])(?!\d)",
 ]
 
 _RE_CSAM_NORM = [re.compile(p, re.I | re.S) for p in PATTERNS_CSAM_NORM]
@@ -139,23 +155,25 @@ def check_spam(raw: str) -> tuple[bool, str]:
     norm = normalize_ad(clean_text)
     condensed = re.sub(r"[\s\-_.*+~#@!?,:;]+", "", norm)
     condensed_raw = re.sub(r"[\s\-_.*+~#@!?,:;]+", "", clean_text.lower())
+    spaced_raw = re.sub(r"[@_.]+", " ", clean_text.lower())
+    spaced_norm = re.sub(r"[@_.]+", " ", norm)
 
     # 0. Детское порно / ЦП (CSAM) — наивысший приоритет
     for rx in _RE_CSAM_COND:
         if rx.search(condensed) or rx.search(condensed_raw):
             return True, "детское порно / ЦП (CSAM)"
     for rx in _RE_CSAM_NORM:
-        if rx.search(norm) or rx.search(clean_text):
+        if rx.search(norm) or rx.search(clean_text) or rx.search(spaced_raw) or rx.search(spaced_norm):
             return True, "детское порно / ЦП (CSAM)"
 
     # 1. 18+ зазывалы и вирт-боты
     for rx in _RE_18:
-        if rx.search(norm) or rx.search(clean_text):
+        if rx.search(norm) or rx.search(clean_text) or rx.search(spaced_raw) or rx.search(spaced_norm):
             return True, "18+ спам/зазывала"
 
     # 2. Реклама заработка, отзывов, легких денег
     for rx in _RE_JOB:
-        if rx.search(norm) or rx.search(clean_text):
+        if rx.search(norm) or rx.search(clean_text) or rx.search(spaced_raw) or rx.search(spaced_norm):
             return True, "реклама/спам заработка"
 
     return False, ""

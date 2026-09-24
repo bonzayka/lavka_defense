@@ -82,6 +82,30 @@ _p, _a, _h = bot.name_check("привет сикретслово друг")
 check("name_check: скрытое имя публично нейтрально", _p == "недопустимое имя" and _h is True and "сикретслово" in _a)
 storage.del_stopword("сикретслово")
 
+# ---- name_check: проверка AdGuard и CSAM в именах/юзернеймах ----
+_p, _a, _h = bot.name_check("ц_п 10-15 в закрепе")
+check("name_check: CSAM в имени скрыто и детектируется", _p == "недопустимое имя" and _h is True and "CSAM" in _a)
+_p, _a, _h = bot.name_check("@cp_10_15_archive")
+check("name_check: Latin cp в юзернейме", _p == "недопустимое имя" and _h is True and "CSAM" in _a)
+_p, _a, _h = bot.name_check("Виктория (ОТЗЫВЫ 2500Р НА КАРТУ)")
+check("name_check: спам отзывов в имени", "реклама/спам" in _p and "заработка" in _a)
+_p, _a, _h = bot.name_check("Alex @cp_video")
+check("name_check: cp_video в юзернейме", _p == "недопустимое имя" and _h is True and "CSAM" in _a)
+_p, _a, _h = bot.name_check("Max @detsk0e_p0rn0")
+check("name_check: detsk0e_p0rn0 в юзернейме", _p == "недопустимое имя" and _h is True and "CSAM" in _a)
+_p, _a, _h = bot.name_check("Sveta @pedopack")
+check("name_check: pedopack в юзернейме", _p == "недопустимое имя" and _h is True and "CSAM" in _a)
+_p, _a, _h = bot.name_check("Света (интим/приват в лс)")
+check("name_check: 18+ спам в имени", "реклама/спам" in _p and "18+" in _a)
+_p, _a, _h = bot.name_check("Катя (канал в закрепе)")
+check("name_check: канал в закрепе в имени", "реклама/спам" in _p and "заработка" in _a)
+check("name_check: cp1251 нет ложного", bot.name_check("Alex @cp1251") == (None, None, False))
+check("name_check: tcpdump нет ложного", bot.name_check("John @tcpdump") == (None, None, False))
+
+# ---- AdGuard: смешанный текст со спамом и дружелюбным приветствием ----
+mixed_hit, mixed_why = adguard.check_spam("ц_п 10-15 канал в закрепе, Добро пожаловать! Ознакомься с правилами и будь вежлив 🙂")
+check("adguard mixed CSAM+greeting", mixed_hit and "CSAM" in mixed_why)
+
 # ---- банворд ловит @ники и ссылки (латиница) ----
 check("stopword: латинский @ник", textguard.find_stopword("пиши сюда @BadGuy плз", ["@badguy"]) == "@badguy")
 check("stopword: ссылка t.me", textguard.find_stopword("вот https://t.me/ScamChat заходи", ["t.me/scamchat"]) == "t.me/scamchat")
@@ -1788,6 +1812,7 @@ SPAM_SAMPLES = [
     ("Кому не хватает до зарплаты — подскажу варианты, напиши", "до зарплаты варианты"),
     ("Ищу с кем пообщаться😘", "зазывалка флирт-бота"),
     ("de т сk0е  п0р NO 4-16 в MKQ829❤️", "детское порно CSAM"),
+    ("dетск0е p0рнo ссылка в канале", "CSAM leetspeak d/p0"),
 ]
 
 for text, label in SPAM_SAMPLES:

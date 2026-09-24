@@ -328,24 +328,53 @@ def render_rules(text: str) -> str:
 
 
 def name_check(name: str):
-    """Проверка имени вступающего с учётом скрытых стоп-слов.
+    """Проверка имени и юзернейма на мат, стоп-слова, AdGuard (спам/18+/CSAM).
 
     Возвращает (public_reason, audit_reason, hidden) или (None, None, False),
-    если чисто. Для скрытого слова публично пишем нейтральное «недопустимое
+    если чисто. Для скрытого слова/CSAM публично пишем нейтральное «недопустимое
     имя», настоящую причину — только в спец-чат (hidden=True), не в журнал.
     """
     if not name:
         return None, None, False
-    if textguard.has_profanity(name):
-        return "мат в имени", "мат в имени", False
-    sw = textguard.find_stopword(name, storage.stopwords_processed(),
-                                 fuzzy=flag("FUZZY_STOPWORDS"),
-                                 max_distance=num("FUZZY_MAX_DISTANCE"))
-    if not sw:
-        return None, None, False
-    if storage.is_hidden_word(sw):
-        return "недопустимое имя", f"скрытое стоп-слово «{sw}» в имени", True
-    return f"стоп-слово «{sw}» в имени", f"стоп-слово «{sw}» в имени", False
+
+    variants = [name]
+    spaced = re.sub(r"[@_.]+", " ", name).strip()
+    if spaced and spaced != name:
+        variants.append(spaced)
+
+    # 0. CSAM (детское порно / ЦП) в имени/нике проверяется ВСЕГДА с наивысшим приоритетом
+    for v in variants:
+        is_spam, why_spam = adguard.check_spam(v)
+        if is_spam and ("CSAM" in why_spam or "детское порно" in why_spam):
+            return "недопустимое имя", f"спам в имени/нике: {why_spam}", True
+
+    # 1. Мат в имени
+    for v in variants:
+        if textguard.has_profanity(v):
+            return "мат в имени", "мат в имени", False
+
+    # 2. Стоп-слова чата
+    stopwords = storage.stopwords_processed()
+    fuzzy = flag("FUZZY_STOPWORDS")
+    max_d = num("FUZZY_MAX_DISTANCE")
+    for v in variants:
+        sw = textguard.find_stopword(v, stopwords, fuzzy=fuzzy, max_distance=max_d)
+        if sw:
+            if storage.is_hidden_word(sw):
+                return "недопустимое имя", f"скрытое стоп-слово «{sw}» в имени", True
+            return f"стоп-слово «{sw}» в имени", f"стоп-слово «{sw}» в имени", False
+
+    # 3. AdGuard: спам заработка, 18+ зазывалы в имени/нике
+    if flag("ADGUARD_ENABLED"):
+        for v in variants:
+            is_spam, why_spam = adguard.check_spam(v)
+            if is_spam:
+                is_csam = "CSAM" in why_spam or "детское порно" in why_spam
+                public = "недопустимое имя" if is_csam else "реклама/спам в имени"
+                audit = f"спам в имени/нике: {why_spam}"
+                return public, audit, is_csam
+
+    return None, None, False
 
 
 def flag(name: str) -> bool:
@@ -1736,6 +1765,23 @@ class ModerationMiddleware(BaseMiddleware):
                 repeat.pop(rk, None)
                 await apply_punishment(msg, "повтор сообщений", action_for("ANTIREPEAT_ACTION"))
                 return True
+
+        # Проверка имени и юзернейма отправителя на мат, стоп-слова, рекламу, 18+ и CSAM.
+        # CSAM проверяется ВСЕГДА (нулевая толерантность), а мат/стоп-слова/спам — при CHECK_JOIN_NAMES или ADGUARD_ENABLED.
+        sender_name = f"{user.full_name or ''} @{user.username or ''} {user.username or ''}".strip()
+        name_pub, name_why, name_hidden = name_check(sender_name)
+        if name_pub:
+            is_name_csam = "CSAM" in name_why or "детское порно" in name_why
+            if is_name_csam or flag("CHECK_JOIN_NAMES") or flag("ADGUARD_ENABLED"):
+                if not regular or is_name_csam:
+                    name_act = "ban" if is_name_csam else action_for("TEXT_ACTION")
+                    await apply_punishment(msg, name_pub, name_act,
+                                           audit_reason=f"имя/ник: {name_why}",
+                                           hidden=name_hidden)
+                    if flag("NOTIFY_VIOLATIONS"):
+                        card_title = "🔞 CSAM в имени/нике" if is_name_csam else "🚫 Спам/мат в имени/нике"
+                        await notify_panel(event_card(card_title, user, reason=name_why))
+                    return True
 
         # Мат и стоп-слова.
         text = msg.text or msg.caption or ""
@@ -3955,11 +4001,25 @@ async def cmd_checkmsg(message: Message):
     if hit_spam:
         verdicts.append(f"🔴 Спам/реклама/18+ (AdGuard): {esc(why_spam)}")
 
+    author_header = ""
+    if reply and reply.from_user:
+        u = reply.from_user
+        u_name = f"{u.full_name or ''} @{u.username or ''} {u.username or ''}".strip()
+        n_pub, n_why, _ = name_check(u_name)
+        if n_pub:
+            verdicts.append(f"🔴 В имени/нике автора: {esc(n_why)}")
+        author_header = f"Автор сообщения: {mention(u)} (ID: <code>{u.id}</code>)\n\n"
+    elif target_text:
+        n_pub, n_why, _ = name_check(target_text)
+        if n_pub and not hit_spam:
+            verdicts.append(f"🔴 Проверка как имя/ник: {esc(n_why)}")
+
     res = "\n".join(verdicts) if verdicts else "🟢 Чисто: фильтры не сработали бы"
     snippet = target_text[:400] + "…" if len(target_text) > 400 else target_text
     await staff_reply(message,
-        "🧪 <b>Тест модерации текста</b>\n"
+        "🧪 <b>Тест модерации текста и ника</b>\n"
         f"<i>(Админы не наказываются автофильтром в чате, это эмуляция)</i>\n\n"
+        f"{author_header}"
         f"{res}\n\n"
         f"Текст:\n<code>{esc(snippet)}</code>")
 
