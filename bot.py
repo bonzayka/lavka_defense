@@ -1757,15 +1757,19 @@ class ModerationMiddleware(BaseMiddleware):
                     await apply_punishment(msg, f"стоп-слово «{sw}»", action_for("TEXT_ACTION"))
                 return True
 
-        # Анти-спам, реклама заработка и 18+ зазывалы (AdGuard)
-        if text and flag("ADGUARD_ENABLED") and not regular:
+        # Анти-спам, реклама заработка, 18+ и детское порно/ЦП (AdGuard)
+        if text and flag("ADGUARD_ENABLED"):
             is_spam, spam_why = adguard.check_spam(text)
             if is_spam:
-                await apply_punishment(msg, spam_why, action_for("ADGUARD_ACTION"),
-                                       audit_reason=f"спам-текст: {spam_why}")
-                if flag("NOTIFY_VIOLATIONS"):
-                    await notify_panel(event_card("🚫 Спам/реклама (AdGuard)", user, reason=spam_why))
-                return True
+                is_csam = "CSAM" in spam_why or "детское порно" in spam_why
+                if not regular or is_csam:
+                    act = "ban" if is_csam else action_for("ADGUARD_ACTION")
+                    await apply_punishment(msg, spam_why, act,
+                                           audit_reason=f"спам-текст: {spam_why}")
+                    if flag("NOTIFY_VIOLATIONS"):
+                        card_title = "🔞 ДЕТСКОЕ ПОРНО / CSAM" if is_csam else "🚫 Спам/реклама (AdGuard)"
+                        await notify_panel(event_card(card_title, user, reason=spam_why))
+                    return True
 
         # Анти-деанон/угрозы по ТЕКСТУ: слив чужих ПДн, угрозы, деанон-ресурсы
         # (@...dnn и т.п.) — травля/деанон админов. Проверяем у ВСЕХ не-админов
