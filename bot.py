@@ -25,6 +25,8 @@ import logging
 import os
 import random
 import re
+import shutil
+import subprocess
 import tempfile
 import time
 from collections import deque
@@ -2720,7 +2722,107 @@ async def handle_violation(message: Message, reason: str) -> None:
     log.info("МУТ %s — %s, удалено %d сообщ.", user_id, reason, deleted)
 
 
-@dp.message((F.photo | F.sticker | F.document)
+def _extract_ffmpeg_frames(video_bytes: bytes, timestamps: list[float]) -> list[tuple[bytes, str]]:
+    """Извлечение кадров из видео через ffmpeg."""
+    if not shutil.which("ffmpeg") or not video_bytes:
+        return []
+    with tempfile.NamedTemporaryFile(suffix=".mp4", delete=False) as tmp:
+        tmp.write(video_bytes)
+        tmp_name = tmp.name
+    frames: list[tuple[bytes, str]] = []
+    try:
+        for ts in timestamps:
+            cmd = ["ffmpeg", "-v", "error", "-ss", f"{ts:.2f}", "-i", tmp_name,
+                   "-vframes", "1", "-f", "image2", "-c:v", "mjpeg", "pipe:1"]
+            p = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, timeout=5)
+            if p.returncode == 0 and len(p.stdout) > 300:
+                frames.append((p.stdout, f"кадр {ts:.1f}с"))
+    except Exception as e:
+        log.warning("Ошибка извлечения кадров ffmpeg: %s", e)
+    finally:
+        try:
+            os.remove(tmp_name)
+        except OSError:
+            pass
+    return frames
+
+
+async def get_media_frames(message: Message) -> list[tuple[bytes, str]]:
+    """
+    Получает список изображений/кадров для анализа (фото, стикер, видео, кружочек, анимация, документ).
+    Возвращает список кортежей (frame_bytes, label).
+    """
+    frames: list[tuple[bytes, str]] = []
+
+    # 1. Фото / документ-картинка / стикер
+    if message.photo:
+        try:
+            f = await bot.download(message.photo[-1])
+            frames.append((f.read(), "фото"))
+        except Exception as e:
+            log.warning("Не смог скачать фото: %s", e)
+        return frames
+
+    if message.sticker and not (message.sticker.is_animated or message.sticker.is_video):
+        try:
+            f = await bot.download(message.sticker)
+            frames.append((f.read(), "стикер"))
+        except Exception as e:
+            log.warning("Не смог скачать стикер: %s", e)
+        return frames
+
+    if message.document:
+        mt = message.document.mime_type or ""
+        if mt.startswith("image/") and (message.document.file_size or 0) <= MAX_DOC_BYTES:
+            try:
+                f = await bot.download(message.document)
+                frames.append((f.read(), "документ-картинка"))
+            except Exception as e:
+                log.warning("Не смог скачать документ: %s", e)
+            return frames
+
+    # 2. Видео / видеозаметка («кружочек») / GIF-анимация
+    vid_obj = message.video or message.video_note or message.animation
+    if not vid_obj and message.document:
+        mt = message.document.mime_type or ""
+        if mt.startswith("video/") and (message.document.file_size or 0) <= 20 * 1024 * 1024:
+            vid_obj = message.document
+
+    if not vid_obj:
+        return frames
+
+    # А) Проверяем thumbnail, если есть
+    thumb = getattr(vid_obj, "thumbnail", None)
+    if thumb:
+        try:
+            f = await bot.download(thumb)
+            frames.append((f.read(), "превью"))
+        except Exception as e:
+            log.debug("Не удалось скачать thumbnail: %s", e)
+
+    # Б) Извлекаем кадры через ffmpeg
+    file_size = getattr(vid_obj, "file_size", 0) or 0
+    if shutil.which("ffmpeg") and file_size <= 20 * 1024 * 1024:
+        try:
+            downloaded = await bot.download(vid_obj)
+            video_bytes = downloaded.read()
+            duration = float(getattr(vid_obj, "duration", 0) or 5.0)
+            if duration <= 2.0:
+                timestamps = [max(0.2, duration * 0.5)]
+            elif duration <= 6.0:
+                timestamps = [0.8, duration * 0.5, max(1.0, duration - 0.5)]
+            else:
+                timestamps = [duration * 0.2, duration * 0.5, duration * 0.8]
+
+            extracted = await asyncio.to_thread(_extract_ffmpeg_frames, video_bytes, timestamps)
+            frames.extend(extracted)
+        except Exception as e:
+            log.warning("Не удалось извлечь кадры из видео: %s", e)
+
+    return frames
+
+
+@dp.message((F.photo | F.sticker | F.document | F.video | F.animation | F.video_note)
             & F.chat.type.in_({"group", "supergroup"}))
 async def on_media(message: Message):
     if not message.from_user:
@@ -2729,73 +2831,69 @@ async def on_media(message: Message):
             or storage.is_trusted(message.chat.id, message.from_user.id)):
         return
 
-    # Стикер из белого списка паков — доверенный, не гоняем через NSFW/гор
-    # (детектор часто ложно срабатывает на обычные стикеры). Добавить пак:
-    # ответить /allowpack на стикер (или /stickers в списке).
+    # Стикер из белого списка паков
     if message.sticker and storage.is_pack_allowed(message.sticker.set_name):
         return
 
-    file_obj = pick_image_file(message)
-    if file_obj is None:
+    frames = await get_media_frames(message)
+    if not frames:
         return
 
-    try:
-        data = (await bot.download(file_obj)).read()
-    except Exception as e:
-        log.warning("Не смог скачать изображение: %s", e)
-        return
-
-    h = await asyncio.to_thread(dhash_from_bytes, data)
-    m = best_match(h) if h is not None else None
-    if m and m[2] >= config.IMAGE_MATCH_PERCENT:
-        name, _, percent = m
-        await handle_violation(message, f"спам-картинка (похожесть {percent:.0f}% на {name})")
-        return
-
-    tag = f"{message.chat.id}_{message.message_id}"
-    async with _cv_sema:
-        hit = await nsfw_check(data, tag)
-    if hit:
-        cls, score = hit
-        await handle_violation(message, f"18+ контент ({cls}, {score:.0%})")
-        return
-
-    # 3) Шок-контент / гор (CLIP, если установлен и включён).
-    gore_enabled = flag("GORE_ON") and (gore.available() or getattr(config, "INFERENCE_MODE", "microservice") == "microservice")
-    if gore_enabled:
-        async with _cv_sema:
-            if getattr(config, "INFERENCE_MODE", "microservice") == "microservice":
-                g = await inference_client.get_client().detect_gore(data, num("GORE_THRESHOLD_PCT") / 100)
-            else:
-                g = await asyncio.to_thread(gore.detect, data, num("GORE_THRESHOLD_PCT") / 100)
-        if g:
-            label, score = g
-            await handle_violation(message, f"шок-контент/гор ({score:.0%})")
+    for data, label in frames:
+        h = await asyncio.to_thread(dhash_from_bytes, data)
+        m = best_match(h) if h is not None else None
+        if m and m[2] >= config.IMAGE_MATCH_PERCENT:
+            name, _, percent = m
+            await handle_violation(message, f"спам-картинка ({label}, похожесть {percent:.0f}% на {name})")
             return
 
-    # 4) Анти-деанон: OCR картинки на чужие персональные данные (скрин с
-    #    телефоном/паспортом/адресом жертвы). По умолчанию — только у новичков.
-    ocr_enabled = flag("DEANON_ENABLED") and (deanon.available() or getattr(config, "INFERENCE_MODE", "microservice") == "microservice")
-    if ocr_enabled:
-        if not flag("DEANON_NEWCOMERS_ONLY") or _is_newcomer(message.chat.id, message.from_user.id):
+        tag = f"{message.chat.id}_{message.message_id}_{label}"
+        async with _cv_sema:
+            hit = await nsfw_check(data, tag)
+        if hit:
+            cls, score = hit
+            await handle_violation(message, f"18+ контент ({label}: {cls}, {score:.0%})")
+            return
+
+        # 3) Шок-контент / гор (CLIP, если установлен и включён).
+        gore_enabled = flag("GORE_ON") and (gore.available() or getattr(config, "INFERENCE_MODE", "microservice") == "microservice")
+        if gore_enabled:
             async with _cv_sema:
                 if getattr(config, "INFERENCE_MODE", "microservice") == "microservice":
-                    text = await inference_client.get_client().extract_ocr_text(
-                        data, storage.get_str("DEANON_OCR_LANG", config.DEANON_OCR_LANG))
+                    g = await inference_client.get_client().detect_gore(data, num("GORE_THRESHOLD_PCT") / 100)
                 else:
-                    text = await asyncio.to_thread(
-                        deanon.extract_text, data, storage.get_str("DEANON_OCR_LANG", config.DEANON_OCR_LANG))
-            if text:
-                hit, why = deanon.scan_text(text, num("DEANON_MIN_HITS"))
-                if hit:
-                    await apply_punishment(
-                        message, "деанон/угроза",
-                        action_for("DEANON_ACTION"),
-                        audit_reason=f"на картинке — {why}")
-                    if flag("NOTIFY_VIOLATIONS"):
-                        await notify_panel(event_card("🕵 Анти-деанон: картинка",
-                                                      message.from_user, reason=why))
-                    return
+                    g = await asyncio.to_thread(gore.detect, data, num("GORE_THRESHOLD_PCT") / 100)
+            if g:
+                _, score = g
+                await handle_violation(message, f"шок-контент/гор ({label}: {score:.0%})")
+                return
+
+        # 4) Анти-деанон: OCR картинки
+        ocr_enabled = flag("DEANON_ENABLED") and (deanon.available() or getattr(config, "INFERENCE_MODE", "microservice") == "microservice")
+        if ocr_enabled and (message.photo or message.document):
+            if not flag("DEANON_NEWCOMERS_ONLY") or _is_newcomer(message.chat.id, message.from_user.id):
+                async with _cv_sema:
+                    if getattr(config, "INFERENCE_MODE", "microservice") == "microservice":
+                        text = await inference_client.get_client().extract_ocr_text(
+                            data, storage.get_str("DEANON_OCR_LANG", config.DEANON_OCR_LANG))
+                    else:
+                        text = await asyncio.to_thread(
+                            deanon.extract_text, data, storage.get_str("DEANON_OCR_LANG", config.DEANON_OCR_LANG))
+                if text:
+                    hit, why = deanon.scan_text(text, num("DEANON_MIN_HITS"))
+                    if hit:
+                        await apply_punishment(
+                            message, "деанон/угроза",
+                            action_for("DEANON_ACTION"),
+                            audit_reason=f"на картинке — {why}")
+                        if flag("NOTIFY_VIOLATIONS"):
+                            await notify_panel(event_card("🕵 Анти-деанон: картинка",
+                                                          message.from_user, reason=why))
+                        return
+
+    # Если это чистый кружочек и включена расшифровка — передаём в voiceguard
+    if message.video_note and flag("VOICE_TRANSCRIBE_ENABLED"):
+        await process_voice_message(message)
 
 
 def _is_newcomer(chat_id: int, user_id: int) -> bool:
@@ -3699,42 +3797,60 @@ async def cmd_reloadgore(message: Message):
 
 @dp.message(Command("check", "checkgore"))
 async def cmd_check(message: Message):
-    """Диагностика: ответом на картинку показать баллы хеша/18+/гора."""
+    """Диагностика: ответом на картинку/видео/кружок показать баллы хеша/18+/гора."""
     if not await _staff_only(message):
         return
     reply = message.reply_to_message
-    file_obj = pick_image_file(reply) if reply else None
-    if file_obj is None:
-        await message.answer("Ответь /check на сообщение с картинкой.")
-        return
-    try:
-        data = (await bot.download(file_obj)).read()
-    except Exception as e:
-        await message.answer(f"Не смог скачать: {e}")
+    if not reply:
+        await message.answer("Ответь /check на сообщение с картинкой, видео или кружочком.")
         return
 
-    h = await asyncio.to_thread(dhash_from_bytes, data)
-    m = best_match(h) if h is not None else None
-    hashline = f"{m[2]:.0f}% на {esc(m[0])}" if m else "база пуста/нет совпадений"
+    frames = await get_media_frames(reply)
+    if not frames:
+        await message.answer("Не удалось извлечь кадры для проверки (поддерживаются фото, стикеры, видео, кружочки, GIF).")
+        return
 
-    prob = await nsfw_debug(data, f"chk_{reply.message_id}")
-    if prob is None:
+    max_prob = -1.0
+    max_prob_label = ""
+    max_gore = -1.0
+    max_gore_label = ""
+    hashline = "база пуста/нет совпадений"
+
+    for data, label in frames:
+        h = await asyncio.to_thread(dhash_from_bytes, data)
+        m = best_match(h) if h is not None else None
+        if m and m[2] >= config.IMAGE_MATCH_PERCENT:
+            hashline = f"{m[2]:.0f}% на {esc(m[0])} ({label})"
+
+        prob = await nsfw_debug(data, f"chk_{reply.message_id}_{label}")
+        if prob is not None and prob > max_prob:
+            max_prob = prob
+            max_prob_label = label
+
+        if getattr(config, "INFERENCE_MODE", "microservice") == "microservice":
+            g = await inference_client.get_client().detect_gore(data, 0.0)
+            if g and g[1] > max_gore:
+                max_gore = g[1]
+                max_gore_label = label
+        elif gore.available():
+            g = await asyncio.to_thread(gore.detect, data, 0.0)
+            if g and g[1] > max_gore:
+                max_gore = g[1]
+                max_gore_label = label
+
+    if max_prob < 0:
         nsfwline = "детектор не загружен"
     else:
-        mark = "🔴 БАН" if prob >= config.NSFW_THRESHOLD else "🟢 чисто"
-        nsfwline = f"18+ {prob:.0%} — {mark} (порог {config.NSFW_THRESHOLD:.0%})"
+        mark = "🔴 БАН" if max_prob >= config.NSFW_THRESHOLD else "🟢 чисто"
+        nsfwline = f"18+ {max_prob:.0%} ({max_prob_label}) — {mark} (порог {config.NSFW_THRESHOLD:.0%})"
 
-    if getattr(config, "INFERENCE_MODE", "microservice") == "microservice":
-        g = await inference_client.get_client().detect_gore(data, 0.0)
-        goreline = f"вероятность гора {g[1]:.0%}" if g else "—"
-    elif gore.available():
-        g = await asyncio.to_thread(gore.detect, data, 0.0)
-        goreline = f"вероятность гора {g[1]:.0%}" if g else "—"
-    else:
+    if max_gore < 0:
         goreline = "—"
+    else:
+        goreline = f"вероятность гора {max_gore:.0%} ({max_gore_label})"
 
     await message.answer(
-        "🔎 <b>Проверка картинки</b>\n"
+        f"🔎 <b>Проверка медиа (кадров: {len(frames)})</b>\n"
         f"Хеш-база: {hashline} (порог {config.IMAGE_MATCH_PERCENT}%)\n"
         f"18+ (ViT): {nsfwline}\n"
         f"Гор-детектор: {esc(gore.status())} | проверка: {'вкл' if flag('GORE_ON') else 'выкл'}\n"
