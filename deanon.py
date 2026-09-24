@@ -131,15 +131,49 @@ _ADDRESS = re.compile(
 _LABELS = re.compile(
     r"(паспорт|снилс|инн\b|карта\s+\d|номер\s+карты|адрес\s+прожив|"
     r"адрес\s+регистр|прописк|домашн\w*\s+адрес|дата\s+рожд|\bдр\b\s*[:\-]|"
-    r"кем\s+выдан|код\s+подразделения|фио\b|фамилия\b|основные\s+данные)",
+    r"кем\s+выдан|код\s+подразделения|(?:\bф\s*\.\s*и\s*\.\s*о\s*\.?(?!\w)|\bфио\b)|фамили[яи]\b|имя\b|отчество\b|основные\s+данные)",
     re.I)
 
-# ФИО (Фамилия Имя Отчество):
-_FIO = re.compile(
-    r"(?:фио\b|фамилия\s+имя|полное\s+имя|[├└│\-•]\s*фио)\s*[:—\-]?\s*"
-    r"([А-ЯЁ][а-яё]+[\s\-]+[А-ЯЁ][а-яё]+(?:[\s\-]+[А-ЯЁ][а-яё]+)?)",
+# Окончания отчеств в РФ (мужские и женские):
+_PATRONYMIC_ENDINGS = r"(?:ович|евич|ич|ыч|овна|евна|ична|инична|ычна)"
+
+# 3-составное ФИО: [Фамилия] [Имя] [Отчество] или [Имя] [Отчество] [Фамилия]
+_FIO_3PART = re.compile(
+    rf"\b([А-ЯЁ][а-яё]{{1,25}})\s+([А-ЯЁ][а-яё]{{1,25}})\s+([А-ЯЁ][а-яё]{{1,25}}{_PATRONYMIC_ENDINGS})\b|"
+    rf"\b([А-ЯЁ][а-яё]{{1,25}})\s+([А-ЯЁ][а-яё]{{1,25}}{_PATRONYMIC_ENDINGS})\s+([А-ЯЁ][а-яё]{{1,25}})\b"
+)
+
+# ФИО с явной меткой (ФИО:, Ф.И.О., полное имя, ├ ФИО и т.п.):
+_FIO_LABELED = re.compile(
+    r"(?:(?:\bф\s*\.\s*и\s*\.\s*о\s*\.?(?!\w))|\bфио\b|полное\s+имя|[├└│\-•*#]\s*(?:фио|ф\.?\s*и\.?\s*о\.?))\s*[:—\-]?\s*"
+    r"([А-ЯЁа-яё][а-яё]+[\s\-]+[А-ЯЁа-яё][а-яё]+(?:[\s\-]+[А-ЯЁа-яё]+)?)",
     re.I
 )
+
+# ФИО разбитое по строкам/полям (Фамилия: ... Имя: ...):
+_FIO_SPLIT = re.compile(
+    r"(?:фамили[яи]\b\s*[:—\-]?\s*([А-ЯЁа-яё]+)).{0,40}?(?:имя\b\s*[:—\-]?\s*([А-ЯЁа-яё]+))|"
+    r"(?:имя\b\s*[:—\-]?\s*([А-ЯЁа-яё]+)).{0,40}?(?:фамили[яи]\b\s*[:—\-]?\s*([А-ЯЁа-яё]+))",
+    re.I | re.S
+)
+
+# Известные исторические/литературные личности для исключения ложняков на цитатах:
+_FAMOUS_PERSONS = {
+    "пушкин", "толстой", "достоевский", "чехов", "ленин", "гагарин",
+    "лермонтов", "гоголь", "чайковский", "есенин", "маяковский",
+    "тургенев", "булгаков", "некрасов", "ломоносов"
+}
+
+
+def _find_3part_fio(text: str) -> list[str]:
+    matches = []
+    for m in _FIO_3PART.finditer(text):
+        words = [w for w in m.groups() if w]
+        if any(w.lower() in _FAMOUS_PERSONS for w in words):
+            continue
+        matches.append(" ".join(words))
+    return matches
+
 
 # Дата рождения:
 _BIRTHDATE = re.compile(
@@ -148,6 +182,7 @@ _BIRTHDATE = re.compile(
     r"(?:[├└│\-•]\s*возраст\b|\bвозраст\b)\s*[:—\-]?\s*(\d{1,3}\b)",
     re.I
 )
+_DATE_DMY = re.compile(r"\b(0[1-9]|[12]\d|3[01])[./\-](0[1-9]|1[0-2])[./\-](19\d{2}|20[0-2]\d)\b")
 
 # Карточка Глаз Бога / OSINT-пробива (шаблон карточки досье):
 _OSINT_CARD = re.compile(
@@ -168,6 +203,32 @@ def _is_standalone_phone(raw: str) -> bool:
     if len(d) == 11 and (d.startswith(("7", "8")) or stripped.startswith("+")):
         non_phone = re.sub(r"[\d\s+\-()илтномерTELphone:]", "", stripped, flags=re.I)
         return len(non_phone) == 0
+    return False
+
+
+def _is_standalone_fio(raw: str) -> bool:
+    """Проверяет, является ли короткое сообщение одиночным вбросом ФИО (сливом имени)."""
+    stripped = raw.strip()
+    if len(stripped) > 90:
+        return False
+    fios = _find_3part_fio(stripped)
+    if fios:
+        rem = stripped
+        for f in fios:
+            rem = rem.replace(f, "")
+        rem_clean = re.sub(
+            r"[\s\.,:;!?\"'«»—\-\(\)👤├└│•*#]|это\b|вот\b|он\b|она\b|фио\b|ф\.?\s*и\.?\s*о\.?",
+            "", rem, flags=re.I
+        )
+        if len(rem_clean) <= 12:
+            return True
+    if _FIO_LABELED.search(stripped) or _FIO_SPLIT.search(stripped):
+        rem_clean = re.sub(
+            r"[\s\.,:;!?\"'«»—\-\(\)👤├└│•*#]|это\b|вот\b|он\b|она\b|фио\b|ф\.?\s*и\.?\s*о\.?|фамили[яи]\b|имя\b|отчество\b",
+            "", stripped, flags=re.I
+        )
+        if len(rem_clean) <= 40:
+            return True
     return False
 
 
@@ -292,12 +353,12 @@ def find_pii(text: str) -> list[str]:
     if _LABELS.search(raw) or _LABELS.search(norm):
         found.add("label")
 
-    # ФИО
-    if _FIO.search(raw):
+    # ФИО (по явным меткам, сплит-полям или 3-составному имени с отчеством)
+    if _FIO_LABELED.search(raw) or _FIO_SPLIT.search(raw) or _find_3part_fio(raw):
         found.add("fio")
 
     # Дата рождения / возраст
-    if _BIRTHDATE.search(raw):
+    if _BIRTHDATE.search(raw) or (_DATE_DMY.search(raw) and ("fio" in found or re.search(r"\bг\.?р\.?\b", raw, re.I))):
         found.add("birthdate")
 
     # Шаблон карточки OSINT / пробива
@@ -382,6 +443,9 @@ def scan_text(text: str, min_hits: int = 2) -> tuple[bool, str]:
     if not pii_hit and _is_standalone_phone(text):
         pii_hit = True
         pii_types = ["phone"]
+    if not pii_hit and _is_standalone_fio(text):
+        pii_hit = True
+        pii_types = ["fio"]
     if pii_hit:
         reasons.append("чужие ПДн: " + describe(pii_types))
     return (bool(reasons), "; ".join(reasons))
