@@ -54,6 +54,7 @@ from aiogram.types import (
 )
 from aiogram.exceptions import TelegramBadRequest, TelegramRetryAfter, TelegramForbiddenError, TelegramAPIError
 
+import adguard
 import aiguard
 import config
 import channel_scan
@@ -347,17 +348,17 @@ def name_check(name: str):
 
 def flag(name: str) -> bool:
     """Булева настройка с рантайм-оверрайдом из storage (команды /night и т.п.)."""
-    return storage.get_flag(name, getattr(config, name))
+    return storage.get_flag(name, getattr(config, name, False))
 
 
 def num(name: str) -> int:
     """Числовая настройка с рантайм-оверрайдом."""
-    return storage.get_num(name, getattr(config, name))
+    return storage.get_num(name, getattr(config, name, 0))
 
 
 def action_for(name: str) -> str:
     """Действие за фильтр (delete/warn/mute/ban) с рантайм-оверрайдом."""
-    return storage.get_str(name, getattr(config, name))
+    return storage.get_str(name, getattr(config, name, "delete"))
 
 
 def fmt_when(dt: datetime | None = None) -> str:
@@ -697,6 +698,44 @@ async def profile_probe(user_id: int) -> tuple[bool | None, int | None]:
     if not photos.total_count or not photos.photos or not photos.photos[0]:
         return False, None
     return True, dcguard.dc_from_file_id(photos.photos[0][-1].file_id)
+
+
+_avatar_checked_cache: dict[int, tuple[bool, datetime]] = {}
+
+async def check_user_avatar_nsfw(user_id: int) -> tuple[bool, float]:
+    """
+    Проверяет аватарку пользователя через нейросеть ViT 18+.
+    Возвращает (is_nsfw: bool, score: float).
+    """
+    if not (flag("AVATAR_NSFW_CHECK") and (config.NSFW_ENABLED or getattr(config, "INFERENCE_MODE", "microservice") == "microservice")):
+        return False, 0.0
+
+    cached = _avatar_checked_cache.get(user_id)
+    if cached and (now() - cached[1]).total_seconds() < 86400:
+        return not cached[0], 0.0
+
+    try:
+        photos = await bot.get_user_profile_photos(user_id, limit=1)
+    except Exception:
+        return False, 0.0
+
+    if not photos.total_count or not photos.photos or not photos.photos[0]:
+        _avatar_checked_cache[user_id] = (True, now())
+        return False, 0.0
+
+    try:
+        photo_file = photos.photos[0][-1]
+        data = (await bot.download(photo_file)).read()
+        async with _cv_sema:
+            hit = await nsfw_check(data, f"avatar_{user_id}")
+        if hit:
+            _avatar_checked_cache[user_id] = (False, now())
+            return True, hit[1]
+        _avatar_checked_cache[user_id] = (True, now())
+        return False, 0.0
+    except Exception as e:
+        log.warning("Не смог проверить аватарку юзера %s: %s", user_id, e)
+        return False, 0.0
 
 
 async def risk_evaluate(user) -> tuple[int, list[str], int | None]:
@@ -1630,6 +1669,17 @@ class ModerationMiddleware(BaseMiddleware):
                 await report(chat_id, "🎭 Во время игры «Мафия» живые игроки могут писать в общий чат только во время дневного голосования.")
             return True
 
+        # Проверка аватара новичка нейросетью ViT 18+
+        if not regular and flag("AVATAR_NSFW_CHECK"):
+            is_nsfw, nsfw_score = await check_user_avatar_nsfw(user.id)
+            if is_nsfw:
+                act = action_for("AVATAR_NSFW_ACTION")
+                await apply_punishment(msg, f"18+ аватарка ({nsfw_score:.0%})", act,
+                                       audit_reason=f"18+ аватарка {nsfw_score:.0%}")
+                if flag("NOTIFY_VIOLATIONS"):
+                    await notify_panel(event_card("🔞 18+ аватарка", user, reason=f"NSFW {nsfw_score:.0%}"))
+                return True
+
         # Ограничение новичков: первые N часов нельзя ссылки/медиа.
         hrs = num("RESTRICT_NEWCOMERS_HOURS")
         if hrs > 0:
@@ -1703,6 +1753,16 @@ class ModerationMiddleware(BaseMiddleware):
                                            audit_reason=f"скрытое стоп-слово «{sw}»", hidden=True)
                 else:
                     await apply_punishment(msg, f"стоп-слово «{sw}»", action_for("TEXT_ACTION"))
+                return True
+
+        # Анти-спам, реклама заработка и 18+ зазывалы (AdGuard)
+        if text and flag("ADGUARD_ENABLED") and not regular:
+            is_spam, spam_why = adguard.check_spam(text)
+            if is_spam:
+                await apply_punishment(msg, spam_why, action_for("ADGUARD_ACTION"),
+                                       audit_reason=f"спам-текст: {spam_why}")
+                if flag("NOTIFY_VIOLATIONS"):
+                    await notify_panel(event_card("🚫 Спам/реклама (AdGuard)", user, reason=spam_why))
                 return True
 
         # Анти-деанон/угрозы по ТЕКСТУ: слив чужих ПДн, угрозы, деанон-ресурсы
@@ -2277,6 +2337,28 @@ async def challenge(chat_id: int, user) -> None:
                         await notify_panel(event_card("📢 Спам/скам в Bio", user, reason=scam_why))
                 return
 
+        # Проверка аватара нейросетью ViT 18+
+        if flag("AVATAR_NSFW_CHECK"):
+            is_nsfw, nsfw_score = await check_user_avatar_nsfw(user.id)
+            if is_nsfw:
+                pending.pop(key, None)
+                act = action_for("AVATAR_NSFW_ACTION")
+                if act == "ban":
+                    await ban_user(chat_id, user.id)
+                    audit("аватарка", f"бан (18+ аватарка {nsfw_score:.0%})", user.id, user.full_name)
+                    await report(chat_id, f"🚫 {mention(user)} забанен на входе: 18+ аватарка ({nsfw_score:.0%}).")
+                else:
+                    await mute_user(chat_id, user.id)
+                    audit("аватарка", f"мут (18+ аватарка {nsfw_score:.0%})", user.id, user.full_name)
+                    await report(
+                        chat_id,
+                        f"🔇 {mention(user)} ограничен: 18+ аватарка ({nsfw_score:.0%}).",
+                        mod_keyboard(chat_id, user.id),
+                    )
+                if flag("NOTIFY_VIOLATIONS") and not raid and not crisis_active(chat_id):
+                    await notify_panel(event_card("🔞 18+ аватарка", user, reason=f"NSFW {nsfw_score:.0%}"))
+                return
+
         # Риск-скоринг профиля: иностранное имя, случайный ник, нет фото,
         # свежий аккаунт и т.п. Высокий скор -> жёсткое действие сразу;
         # средний -> берём «под наблюдение» (probation) на первые минуты.
@@ -2393,6 +2475,14 @@ async def on_join_request(req: ChatJoinRequest):
         if is_scam:
             await _decline(f"отклонена по Bio: {scam_why}")
             await report(chat_id, f"🚫 Заявка отклонена: у {mention(user)} реклама в «О себе» ({esc(scam_why)}).")
+            return
+    if flag("AVATAR_NSFW_CHECK"):
+        is_nsfw, nsfw_score = await check_user_avatar_nsfw(user.id)
+        if is_nsfw:
+            await _decline(f"отклонена: 18+ аватарка ({nsfw_score:.0%})")
+            await report(chat_id, f"🚫 Заявка отклонена: у {mention(user)} 18+ аватарка ({nsfw_score:.0%}).")
+            if flag("NOTIFY_VIOLATIONS"):
+                await notify_panel(event_card("🔞 18+ аватарка в заявке", user, reason=f"NSFW {nsfw_score:.0%}"))
             return
     try:
         await bot.approve_chat_join_request(chat_id, user.id)
@@ -2586,6 +2676,12 @@ def pick_image_file(message: Message):
     if message.sticker:
         st = message.sticker
         return None if (st.is_animated or st.is_video) else st
+    if message.video and getattr(message.video, "thumbnail", None):
+        return message.video.thumbnail
+    if message.animation and getattr(message.animation, "thumbnail", None):
+        return message.animation.thumbnail
+    if message.video_note and getattr(message.video_note, "thumbnail", None):
+        return message.video_note.thumbnail
     if message.document:
         mt = message.document.mime_type or ""
         if not mt.startswith("image/"):
@@ -3727,6 +3823,7 @@ async def cmd_checkmsg(message: Message):
     sw = textguard.find_stopword(target_text, chat_words, fuzzy=fuzzy, max_distance=max_d)
     has_mat = textguard.has_profanity(target_text)
     hit_deanon, why_deanon = deanon.scan_text(target_text, num("DEANON_MIN_HITS"))
+    hit_spam, why_spam = adguard.check_spam(target_text)
 
     verdicts = []
     if sw:
@@ -3735,6 +3832,8 @@ async def cmd_checkmsg(message: Message):
         verdicts.append("🔴 Нецензурная лексика (мат)")
     if hit_deanon:
         verdicts.append(f"🔴 Деанон/угроза: {esc(why_deanon)}")
+    if hit_spam:
+        verdicts.append(f"🔴 Спам/реклама/18+ (AdGuard): {esc(why_spam)}")
 
     res = "\n".join(verdicts) if verdicts else "🟢 Чисто: фильтры не сработали бы"
     snippet = target_text[:400] + "…" if len(target_text) > 400 else target_text
@@ -7442,6 +7541,8 @@ PANEL_FLAGS = [
     ("VOICE_TRANSCRIBE_REPLY", "Ответ текстом ГС"),
     ("VOICE_MODERATION_ENABLED", "Модерация ГС"),
     ("CHECK_JOIN_BIO", "Проверка Bio (О себе)"),
+    ("ADGUARD_ENABLED", "Антиспам/18+ (AdGuard)"),
+    ("AVATAR_NSFW_CHECK", "18+ на аватарках (ViT)"),
 ]
 
 # Числовые настройки, редактируемые из панели.
@@ -7479,6 +7580,8 @@ PANEL_ACTS = [
     ("RISK_ACTION", "Риск на входе"),
     ("PROBATION_ACTION", "Наблюдение"),
     ("BIO_ACTION", "Реклама в Bio"),
+    ("ADGUARD_ACTION", "Спам/18+ (AdGuard)"),
+    ("AVATAR_NSFW_ACTION", "18+ на аватарке"),
 ]
 ACT_CYCLE = ["delete", "warn", "mute", "ban"]
 
@@ -7498,14 +7601,14 @@ PERM_LABELS = [
 
 # Тумблеры, сгруппированные по разделам (чтобы не «всё в кучу»).
 PANEL_CATEGORIES = [
-    ("spam", "🛡 Антиспам", ["ANTIMAT_ENABLED", "BLOCK_LINKS", "ALLOW_MENTIONS",
+    ("spam", "🛡 Антиспам", ["ADGUARD_ENABLED", "ANTIMAT_ENABLED", "BLOCK_LINKS", "ALLOW_MENTIONS",
                              "BLOCK_FORWARDS", "BLOCK_CHANNEL_MESSAGES", "BLOCK_APK",
                              "BLOCK_PREMIUM_EMOJI", "GORE_ON", "DEANON_ENABLED",
                              "TEXT_DEANON_ENABLED", "VOICE_TRANSCRIBE_ENABLED",
                              "VOICE_TRANSCRIBE_REPLY", "VOICE_MODERATION_ENABLED",
                              "ANTIFLOOD_ENABLED", "ANTIREPEAT_ENABLED", "TRIGGERS_ENABLED",
                              "FUZZY_STOPWORDS"]),
-    ("entry", "🚪 Вход и капча", ["CHECK_JOIN_NAMES", "CHECK_JOIN_BIO", "CAPTCHA_IMAGE", "AUTO_ACCEPT",
+    ("entry", "🚪 Вход и капча", ["AVATAR_NSFW_CHECK", "CHECK_JOIN_NAMES", "CHECK_JOIN_BIO", "CAPTCHA_IMAGE", "AUTO_ACCEPT",
                                   "DC_CHECK_JOIN", "LOCKDOWN", "WELCOME_ENABLED",
                                   "ANTIRAID_ENABLED", "AUTO_CRISIS_ENABLED",
                                   "PHONE_VERIFY_ENABLED"]),
@@ -7514,7 +7617,7 @@ PANEL_CATEGORIES = [
                             "VOTE_ANYONE", "ANON_ADMIN"]),
     ("notify", "🔔 Уведомления", ["NOTIFY_JOINS", "NOTIFY_VIOLATIONS", "NOTIFY_REPORTS",
                                   "REPORT_ENABLED"]),
-    ("profile", "🎯 Профиль-фильтр", ["RISK_ENABLED", "CHECK_JOIN_BIO", "PROBATION_ENABLED",
+    ("profile", "🎯 Профиль-фильтр", ["RISK_ENABLED", "AVATAR_NSFW_CHECK", "CHECK_JOIN_BIO", "PROBATION_ENABLED",
                                       "PROBATION_ON_MEDIA", "PROBATION_ON_LINK",
                                       "AUTO_CLEAN_DELETED", "REGULARS_ENABLED"]),
 ]
