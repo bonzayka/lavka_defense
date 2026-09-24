@@ -46,30 +46,76 @@ except Exception:          # pragma: no cover — на всякий случай
 # ИНН НЕ тяжёлый: голые 12 цифр = межд. номер/код, легко ложит.
 HEAVY_TYPES = {"passport_ru", "card", "snils"}
 
-# Российский/международный телефон: +7 999 123-45-67, 8(999)1234567, +1..., +81...
-_PHONE = re.compile(
-    r"(?<!\d)(?:\+?\d[\s\-()]?){10,15}(?!\d)")
-# Но телефоном считаем только если после чистки 10–15 цифр и есть код/формат.
-_PHONE_DIGITS = re.compile(r"\d")
+# Регулярка для маскирования ссылок при поиске числовых ПДн (паспорта, телефоны, карты, СНИЛС, ИНН).
+# Исключает ложные срабатывания по ref-кодам, ID юзеров в ссылках бота (t.me/...bot?start=ref7475771830),
+# номерам статей, ID заказов в URL и т.д.
+_URL_RE = re.compile(r"https?://\S+|t\.me/\S+|tg://\S+", re.I)
+
+
+def _mask_urls(text: str) -> str:
+    """Заменить ссылки в тексте на пробелы той же длины для поиска чисел (паспорта/телефоны/карты)."""
+    return _URL_RE.sub(lambda m: " " * len(m.group()), text)
+
+
+# Российский/международный телефон:
+# 1) Форматированный номер РФ (+7/8 с разделителями, скобками или дефисами)
+_PHONE_RU_FORMATTED = re.compile(
+    r"(?<![a-zA-Z0-9_])(?:\+7|8)[\s\-]?(?:\(\s*\d{3}\s*\)|\d{3})[\s\-]?\d{3}[\s\-]?\d{2}[\s\-]?\d{2}(?![a-zA-Z0-9_])"
+)
+# 2) Компактный мобильный РФ: +79XXXXXXXXX или 89XXXXXXXXX (11 цифр с кодом 9xx)
+_PHONE_RU_COMPACT = re.compile(
+    r"(?<![a-zA-Z0-9_])(?:\+7|8)9\d{9}(?![a-zA-Z0-9_])"
+)
+# 3) 10-значный номер мобильного РФ только при явном формате: (9xx) xxx-xx-xx или 9xx-xxx-xx-xx
+_PHONE_RU_10D_FORMATTED = re.compile(
+    r"(?<![a-zA-Z0-9_])(?:\(\s*9\d{2}\s*\)|9\d{2})[\s\-](\d{3})[\s\-](\d{2})[\s\-](\d{2})(?![a-zA-Z0-9_])"
+)
+# 4) Международный телефон с префиксом + (от 10 до 15 цифр)
+_PHONE_INTL = re.compile(
+    r"(?<![a-zA-Z0-9_])\+\d{1,4}[\s\-()]?\d{1,4}[\s\-()]?\d{2,4}[\s\-()]?\d{2,4}(?![a-zA-Z0-9_])"
+)
 
 # Email.
-_EMAIL = re.compile(r"[a-z0-9._%+\-]+@[a-z0-9.\-]+\.[a-z]{2,}", re.I)
+_EMAIL = re.compile(r"(?<![a-zA-Z0-9_.])[a-z0-9._%+\-]+@[a-z0-9.\-]+\.[a-z]{2,}(?![a-zA-Z0-9_])", re.I)
 
-# Ссылка на профиль / @username (деанон часто «вот его тг: @...»).
-_HANDLE = re.compile(r"(?:https?://|t\.me/|@)[a-z0-9_]{4,}", re.I)
+# Ссылка на личный профиль / @username в соцсетях:
+# @ник (не бот, не email-домен)
+_HANDLE_TG = re.compile(r"(?<![a-zA-Z0-9_.])@([a-zA-Z][a-zA-Z0-9_]{3,31})(?![a-zA-Z0-9_])", re.I)
+# t.me/ник (не бот, не служебные ссылки t.me/joinchat, t.me/c/...)
+_HANDLE_TME = re.compile(
+    r"(?:https?://)?(?:t\.me|telegram\.me)/(?!joinchat\b|c/\b|\+|share\b|addstickers\b|invoice\b)([a-zA-Z][a-zA-Z0-9_]{3,31})(?:[/?#\s]|$)",
+    re.I
+)
+# Профили соцсетей (vk, ok, insta, fb)
+_HANDLE_SOCIAL = re.compile(
+    r"(?:https?://)?(?:vk\.com|vkontakte\.ru|ok\.ru|instagram\.com|facebook\.com)/([a-zA-Z0-9_.]{3,32})",
+    re.I
+)
 
-# Номер банковской карты: 16 цифр группами по 4 (иногда 4-6-5 для Маэстро).
-_CARD = re.compile(r"(?<!\d)(?:\d[ \-]?){13,19}(?!\d)")
+# Номер банковской карты: 13-19 цифр с валидацией по алгоритму Луна.
+_CARD = re.compile(r"(?<![a-zA-Z0-9_])(?:\d[ \-]?){13,19}(?![a-zA-Z0-9_])")
 
-# Паспорт РФ: серия 4 цифры + номер 6 цифр (10 цифр, часто «12 34 567890»).
-_PASSPORT_RU = re.compile(r"(?<!\d)\d{2}\s?\d{2}\s?\d{6}(?!\d)")
+# Паспорт РФ:
+# 1) Форматированный: серия 4 цифры (код региона 01-99) + разделитель + номер 6 цифр
+#    Примеры: «12 34 567890», «1234 567890», «6501 429135», «серия 6501 номер 429135»
+_PASSPORT_FORMATTED = re.compile(
+    r"(?<![a-zA-Z0-9_])(0[1-9]|[1-9]\d)\s?(\d{2})(?:[\s\-–—№#]|номер|№)+\s*(\d{6})(?![a-zA-Z0-9_])",
+    re.I
+)
+# 2) 10 цифр подряд ТОЛЬКО при наличии маркера паспорта рядом (иначе 10 цифр = ID/таймстамп/код)
+_PASSPORT_LABELED = re.compile(
+    r"(?:\bпаспорт\w*|\bпасп\.?|\bсерия\s*(?:и|№)?\s*номер|\bдокумент\w*)\s*[:№\-]?\s*(?<![a-zA-Z0-9_])(0[1-9]|[1-9]\d)(\d{8})(?![a-zA-Z0-9_])|"
+    r"(?<![a-zA-Z0-9_])(0[1-9]|[1-9]\d)(\d{8})(?![a-zA-Z0-9_])\s*[:№\-]?\s*(?:\bпаспорт\w*|\bпасп\.?)",
+    re.I
+)
 
-# СНИЛС: 11 цифр «123-456-789 01». Требуем РАЗДЕЛИТЕЛИ (иначе ловит 11-значные
-# телефоны 89991234567). Хотя бы один дефис/пробел между группами.
-_SNILS = re.compile(r"(?<!\d)\d{3}[\-\s]\d{3}[\-\s]\d{3}[\-\s]\d{2}(?!\d)")
+# СНИЛС: 11 цифр «123-456-789 01». Требуем разделители либо подпись.
+_SNILS = re.compile(r"(?<![a-zA-Z0-9_])\d{3}[\-\s]\d{3}[\-\s]\d{3}[\-\s]\d{2}(?![a-zA-Z0-9_])")
+_SNILS_LABELED = re.compile(r"(?:\bснилс\b|\bsnils\b)\s*[:№\-]?\s*(\d{11}|\d{3}[\-\s]?\d{3}[\-\s]?\d{3}[\-\s]?\d{2})", re.I)
 
-# ИНН физлица: 12 цифр подряд.
-_INN = re.compile(r"(?<!\d)\d{12}(?!\d)")
+# ИНН: 10 или 12 цифр с подписью, либо с валидной контрольной суммой
+_INN_LABELED = re.compile(r"(?:\bинн\b|\binn\b)\s*[:№\-]?\s*(\d{10}|\d{12})\b", re.I)
+_INN_BARE = re.compile(r"(?<![a-zA-Z0-9_])(\d{10}|\d{12})(?![a-zA-Z0-9_])")
 
 # Адрес: маркеры «ул./улица/пр-т/д. 12 кв. 5/г. Москва/индекс».
 _ADDRESS = re.compile(
@@ -81,10 +127,11 @@ _ADDRESS = re.compile(
     r"\bкв\s?\d{1,4}\b|\bд\s?\d{1,4}\s*кв)",
     re.I)
 
-# Явные подписи «паспорт/карта/адрес проживания» усиливают уверенность.
+# Явные подписи «паспорт/карта/адрес проживания/ФИО» усиливают уверенность.
 _LABELS = re.compile(
     r"(паспорт|снилс|инн\b|карта\s+\d|номер\s+карты|адрес\s+прожив|"
-    r"прописк|домашн\w*\s+адрес|дата\s+рожд|\bдр\b\s*[:\-])",
+    r"адрес\s+регистр|прописк|домашн\w*\s+адрес|дата\s+рожд|\bдр\b\s*[:\-]|"
+    r"кем\s+выдан|код\s+подразделения|фио\b|фамилия\b)",
     re.I)
 
 
@@ -108,12 +155,30 @@ def _luhn_ok(num: str) -> bool:
     return total % 10 == 0
 
 
+def _check_inn_checksum(num: str) -> bool:
+    """Контрольная сумма ИНН (10 цифр ЮЛ или 12 цифр ФЛ/ИП)."""
+    if len(num) == 10:
+        c = [2, 4, 10, 3, 5, 9, 4, 6, 8]
+        return sum(int(num[i]) * c[i] for i in range(9)) % 11 % 10 == int(num[9])
+    if len(num) == 12:
+        c11 = [7, 2, 4, 10, 3, 5, 9, 4, 6, 8]
+        c12 = [3, 7, 2, 4, 10, 3, 5, 9, 4, 6, 8]
+        s11 = sum(int(num[i]) * c11[i] for i in range(10)) % 11 % 10 == int(num[10])
+        s12 = sum(int(num[i]) * c12[i] for i in range(11)) % 11 % 10 == int(num[11])
+        return bool(s11 and s12)
+    return False
+
+
 def _looks_like_phone(raw: str) -> bool:
     d = _clean_digits(raw)
     if not (10 <= len(d) <= 15):
         return False
-    # РФ (+7/8 + 10 цифр) либо международный с ведущим кодом.
-    return d.startswith(("7", "8", "9")) or raw.strip().startswith("+")
+    # РФ (11 цифр с кодом +7/8 либо 10 цифр без кода страны, начинающиеся с 9)
+    if len(d) == 10:
+        return d.startswith("9")
+    if len(d) == 11:
+        return d.startswith(("7", "8"))
+    return raw.strip().startswith("+")
 
 
 def find_pii(text: str) -> list[str]:
@@ -128,33 +193,66 @@ def find_pii(text: str) -> list[str]:
     # Для regex по цифрам/латинице берём исходный текст (нормализация ломает цифры
     # гомоглифами вроде 0->о), а для «словесных» маркеров — нормализованный.
     raw = text
+    # Для поиска чисел маскируем URL, чтобы параметры ссылок (?start=ref7475771830)
+    # не принимались за паспорта или телефоны.
+    num_text = _mask_urls(raw)
     found: set[str] = set()
 
-    if _EMAIL.search(raw):
+    # Email
+    emails = {m.group().lower() for m in _EMAIL.finditer(raw)}
+    if emails:
         found.add("email")
-    if _HANDLE.search(raw):
+
+    # Личные профили / @handle (не боты и не домены почты)
+    for m in _HANDLE_TG.finditer(raw):
+        u = m.group(1).lower()
+        if not u.endswith("bot") and not any(u in em for em in emails):
+            found.add("handle")
+            break
+    if "handle" not in found:
+        for m in _HANDLE_TME.finditer(raw):
+            u = m.group(1).lower()
+            if not u.endswith("bot"):
+                found.add("handle")
+                break
+    if "handle" not in found and _HANDLE_SOCIAL.search(raw):
         found.add("handle")
 
-    for m in _CARD.finditer(raw):
+    # Банковские карты
+    for m in _CARD.finditer(num_text):
         if _luhn_ok(_clean_digits(m.group())):
             found.add("card")
             break
 
-    if _PASSPORT_RU.search(raw):
+    # Паспорт РФ
+    if _PASSPORT_FORMATTED.search(num_text) or _PASSPORT_LABELED.search(num_text):
         found.add("passport_ru")
-    if _SNILS.search(raw):
+
+    # СНИЛС
+    if _SNILS.search(num_text) or _SNILS_LABELED.search(num_text):
         found.add("snils")
-    # ИНН — только если 12 цифр не «съедены» картой/паспортом выше; отдельный тип.
-    if _INN.search(raw):
+
+    # ИНН
+    if _INN_LABELED.search(num_text):
         found.add("inn")
+    else:
+        for m in _INN_BARE.finditer(num_text):
+            if _check_inn_checksum(m.group()):
+                found.add("inn")
+                break
 
-    for m in _PHONE.finditer(raw):
-        if _looks_like_phone(m.group()):
-            found.add("phone")
-            break
+    # Телефон (в тексте с замаскированными ссылками)
+    if (_PHONE_RU_FORMATTED.search(num_text) or
+        _PHONE_RU_COMPACT.search(num_text) or
+        _PHONE_RU_10D_FORMATTED.search(num_text) or
+        _PHONE_INTL.search(num_text)):
+        found.add("phone")
 
+    # Адрес
     if _ADDRESS.search(raw) or _ADDRESS.search(norm):
         found.add("address")
+
+    # Подписи
     if _LABELS.search(raw) or _LABELS.search(norm):
         found.add("label")
 
@@ -189,7 +287,8 @@ _THREAT_PATTERNS = [
     r"уб[ьъе]?ю\b", r"прир[еэ]жу", r"зар[еэ]жу", r"закопа", r"пришью тебя",
     r"взорву", r"сожгу тебя", r"найду тебя", r"я тебя найду", r"приеду к тебе",
     r"знаю где (?:ты )?жив[её]шь", r"вычисл\w* тебя", r"вычислю по",
-    r"пробь?ю по", r"проб[еи]в\b", r"деанон", r"сдеаноню", r"задеаноню",
+    r"пробь?ю по", r"\bпроб[ьъ][юе]\b", r"\bпробив\s+(?:по|данных|через|админа|тебя)\b",
+    r"\b(?:с|за)?деанон(?:ю|ят|ить|нули|им)?\b",
     r"сол[ьъе]ю (?:твои|его|е[её]|ваши)?\s*дан", r"слив дан", r"сливаю дан",
     r"выложу (?:твой|его|её|ваш)\s*(?:адрес|номер|паспорт|данные)",
     r"скину (?:твой|его|её)\s*(?:адрес|номер|паспорт)",
@@ -200,7 +299,7 @@ _THREAT_RE = [re.compile(p, re.I) for p in _THREAT_PATTERNS]
 # Ники/ссылки деанон-ресурсов: @chudochatdnn, t.me/deanonbaza, пробив-боты.
 _DEANON_HANDLE_RE = re.compile(
     r"(?:@|t\.me/|https?://[^\s@]*?/)\w*?(?:deanon|деанон|dnn|probiv|пробив|"
-    r"слив|dox|докс|leakb|leaked)\w*",
+    r"dox|докс|leakb|leaked)\w*",
     re.I)
 
 

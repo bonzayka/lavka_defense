@@ -1713,7 +1713,7 @@ class ModerationMiddleware(BaseMiddleware):
             hit, why = deanon.scan_text(text, num("DEANON_MIN_HITS"))
             if hit:
                 stats["deanon_text"] = stats.get("deanon_text", 0) + 1
-                await apply_punishment(msg, "деанон/угроза (себя задеанонь)",
+                await apply_punishment(msg, "деанон/угроза",
                                        action_for("TEXT_DEANON_ACTION"),
                                        audit_reason=f"деанон-текст: {why}")
                 return True
@@ -2693,7 +2693,7 @@ async def on_media(message: Message):
                 hit, why = deanon.scan_text(text, num("DEANON_MIN_HITS"))
                 if hit:
                     await apply_punishment(
-                        message, "деанон/угроза (себя задеанонь)",
+                        message, "деанон/угроза",
                         action_for("DEANON_ACTION"),
                         audit_reason=f"на картинке — {why}")
                     if flag("NOTIFY_VIOLATIONS"):
