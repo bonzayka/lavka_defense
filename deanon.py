@@ -44,7 +44,7 @@ except Exception:          # pragma: no cover — на всякий случай
 
 # «Тяжёлые» типы — одного достаточно для срабатывания (почти не бывают случайно).
 # ИНН НЕ тяжёлый: голые 12 цифр = межд. номер/код, легко ложит.
-HEAVY_TYPES = {"passport_ru", "card", "snils"}
+HEAVY_TYPES = {"passport_ru", "card", "snils", "osint_card"}
 
 # Регулярка для маскирования ссылок при поиске числовых ПДн (паспорта, телефоны, карты, СНИЛС, ИНН).
 # Исключает ложные срабатывания по ref-кодам, ID юзеров в ссылках бота (t.me/...bot?start=ref7475771830),
@@ -62,9 +62,9 @@ def _mask_urls(text: str) -> str:
 _PHONE_RU_FORMATTED = re.compile(
     r"(?<![a-zA-Z0-9_])(?:\+7|8)[\s\-]?(?:\(\s*\d{3}\s*\)|\d{3})[\s\-]?\d{3}[\s\-]?\d{2}[\s\-]?\d{2}(?![a-zA-Z0-9_])"
 )
-# 2) Компактный мобильный РФ: +79XXXXXXXXX или 89XXXXXXXXX (11 цифр с кодом 9xx)
+# 2) Компактный мобильный РФ: +79XXXXXXXXX, 79XXXXXXXXX или 89XXXXXXXXX (11 цифр с кодом 9xx)
 _PHONE_RU_COMPACT = re.compile(
-    r"(?<![a-zA-Z0-9_])(?:\+7|8)9\d{9}(?![a-zA-Z0-9_])"
+    r"(?<![a-zA-Z0-9_])(?:\+?7|8)9\d{9}(?![a-zA-Z0-9_])"
 )
 # 3) 10-значный номер мобильного РФ только при явном формате: (9xx) xxx-xx-xx или 9xx-xxx-xx-xx
 _PHONE_RU_10D_FORMATTED = re.compile(
@@ -131,8 +131,44 @@ _ADDRESS = re.compile(
 _LABELS = re.compile(
     r"(паспорт|снилс|инн\b|карта\s+\d|номер\s+карты|адрес\s+прожив|"
     r"адрес\s+регистр|прописк|домашн\w*\s+адрес|дата\s+рожд|\bдр\b\s*[:\-]|"
-    r"кем\s+выдан|код\s+подразделения|фио\b|фамилия\b)",
+    r"кем\s+выдан|код\s+подразделения|фио\b|фамилия\b|основные\s+данные)",
     re.I)
+
+# ФИО (Фамилия Имя Отчество):
+_FIO = re.compile(
+    r"(?:фио\b|фамилия\s+имя|полное\s+имя|[├└│\-•]\s*фио)\s*[:—\-]?\s*"
+    r"([А-ЯЁ][а-яё]+[\s\-]+[А-ЯЁ][а-яё]+(?:[\s\-]+[А-ЯЁ][а-яё]+)?)",
+    re.I
+)
+
+# Дата рождения:
+_BIRTHDATE = re.compile(
+    r"(?:\bдата\s+рожд\w*|\bд\.?р\.?\b|[├└│\-•]\s*дата\s+рожд\w*)\s*[:—\-]?\s*"
+    r"(\d{2}[./\-]\d{2}[./\-]\d{4})|"
+    r"(?:[├└│\-•]\s*возраст\b|\bвозраст\b)\s*[:—\-]?\s*(\d{1,3}\b)",
+    re.I
+)
+
+# Карточка Глаз Бога / OSINT-пробива (шаблон карточки досье):
+_OSINT_CARD = re.compile(
+    r"(?:👤\s*(?:основные\s+данные|результат\s+поиска|досье|информация|пробив)|"
+    r"[├└│]\s*фио\b|"
+    r"фио\b.{1,50}\b(?:дата\s+рожд\w*|возраст\b|др\b)|"
+    r"(?:дата\s+рожд\w*|возраст\b|др\b).{1,50}\bфио\b)",
+    re.I
+)
+
+
+def _is_standalone_phone(raw: str) -> bool:
+    """Проверяет, состоит ли всё сообщение практически целиком из одного номера телефона (слив номера)."""
+    stripped = raw.strip()
+    if len(stripped) > 30:
+        return False
+    d = _clean_digits(stripped)
+    if len(d) == 11 and (d.startswith(("7", "8")) or stripped.startswith("+")):
+        non_phone = re.sub(r"[\d\s+\-()илтномерTELphone:]", "", stripped, flags=re.I)
+        return len(non_phone) == 0
+    return False
 
 
 def _clean_digits(s: str) -> str:
@@ -256,6 +292,18 @@ def find_pii(text: str) -> list[str]:
     if _LABELS.search(raw) or _LABELS.search(norm):
         found.add("label")
 
+    # ФИО
+    if _FIO.search(raw):
+        found.add("fio")
+
+    # Дата рождения / возраст
+    if _BIRTHDATE.search(raw):
+        found.add("birthdate")
+
+    # Шаблон карточки OSINT / пробива
+    if _OSINT_CARD.search(raw):
+        found.add("osint_card")
+
     return sorted(found)
 
 
@@ -331,6 +379,9 @@ def scan_text(text: str, min_hits: int = 2) -> tuple[bool, str]:
     if h:
         reasons.append("деанон-ресурс (%s)" % ", ".join(h[:3]))
     pii_hit, pii_types = is_deanon(text, min_hits)
+    if not pii_hit and _is_standalone_phone(text):
+        pii_hit = True
+        pii_types = ["phone"]
     if pii_hit:
         reasons.append("чужие ПДн: " + describe(pii_types))
     return (bool(reasons), "; ".join(reasons))
@@ -438,6 +489,9 @@ TYPE_LABELS = {
     "inn": "ИНН",
     "address": "адрес",
     "label": "подпись «паспорт/адрес»",
+    "fio": "ФИО",
+    "birthdate": "дата рождения",
+    "osint_card": "карточка досье/пробива",
 }
 
 

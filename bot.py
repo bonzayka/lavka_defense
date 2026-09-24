@@ -3649,42 +3649,100 @@ async def cmd_check(message: Message):
 
 @dp.message(Command("deanon"))
 async def cmd_deanon(message: Message):
-    """Диагностика анти-деанона: ответом на картинку показать OCR-текст и найденные данные."""
+    """Диагностика анти-деанона: ответом на картинку/текст или аргументом показать найденные данные."""
     if not await _staff_only(message, "manage"):
         return
-    ocr_ok = deanon.available() or (getattr(config, "INFERENCE_MODE", "microservice") == "microservice" and await inference_client.get_client().is_healthy())
-    if not ocr_ok:
-        await staff_reply(message, f"Анти-деанон OCR: {esc(deanon.status())}.\n"
-                             "Установи движок: <code>pip install rapidocr-onnxruntime</code> "
-                             "или проверь микросервис инференса, затем перезапусти бота.")
+    reply = message.reply_to_message
+    args = (message.text or "").split(maxsplit=1)
+    inline_text = args[1].strip() if len(args) > 1 else ""
+
+    file_obj = pick_image_file(reply) if reply else None
+    if file_obj:
+        ocr_ok = deanon.available() or (getattr(config, "INFERENCE_MODE", "microservice") == "microservice" and await inference_client.get_client().is_healthy())
+        if not ocr_ok:
+            await staff_reply(message, f"Анти-деанон OCR: {esc(deanon.status())}.\n"
+                                 "Установи движок: <code>pip install rapidocr-onnxruntime</code> "
+                                 "или проверь микросервис инференса, затем перезапусти бота.")
+            return
+        try:
+            data = (await bot.download(file_obj)).read()
+        except Exception as e:
+            await message.answer(f"Не смог скачать: {e}")
+            return
+        if getattr(config, "INFERENCE_MODE", "microservice") == "microservice":
+            text = await inference_client.get_client().extract_ocr_text(
+                data, storage.get_str("DEANON_OCR_LANG", config.DEANON_OCR_LANG))
+        else:
+            text = await asyncio.to_thread(
+                deanon.extract_text, data, storage.get_str("DEANON_OCR_LANG", config.DEANON_OCR_LANG))
+
+        hit, types = deanon.is_deanon(text or "", num("DEANON_MIN_HITS"))
+        mark = "🔴 деанон" if hit else "🟢 чисто"
+        snippet = (text or "").strip()
+        snippet = snippet[:500] + "…" if len(snippet) > 500 else snippet
+        await staff_reply(message,
+            "🕵 <b>Проверка картинки на деанон</b>\n"
+            f"OCR-движок: {esc(deanon.status())}\n"
+            f"Найдено: {esc(deanon.describe(types)) or '—'}\n"
+            f"Вердикт: {mark} (нужно типов: {num('DEANON_MIN_HITS')}, действие: {action_for('DEANON_ACTION')})\n\n"
+            f"Распознанный текст:\n<code>{esc(snippet) or '(пусто)'}</code>")
+        return
+
+    # Проверка текста (из аргументов или ответа на текстовое сообщение)
+    target_text = inline_text or ((reply.text or reply.caption) if reply else "")
+    if not target_text:
+        await staff_reply(message,
+            "Ответь <code>/deanon</code> на сообщение с картинкой или текстом, "
+            "либо укажи текст аргументом: <code>/deanon +79991234567</code>.")
+        return
+
+    hit, why = deanon.scan_text(target_text, num("DEANON_MIN_HITS"))
+    pii_types = deanon.find_pii(target_text)
+    mark = "🔴 деанон/угроза" if hit else "🟢 чисто"
+    snippet = target_text[:500] + "…" if len(target_text) > 500 else target_text
+    await staff_reply(message,
+        "🕵 <b>Проверка текста на деанон</b>\n"
+        f"Типы ПДн: {esc(deanon.describe(pii_types)) or '—'}\n"
+        f"Причина детекта: {esc(why) or '—'}\n"
+        f"Вердикт: {mark} (порог типов: {num('DEANON_MIN_HITS')}, действие: {action_for('TEXT_DEANON_ACTION')})\n\n"
+        f"Проверяемый текст:\n<code>{esc(snippet)}</code>")
+
+
+@dp.message(Command("checkmsg", "testmsg"))
+async def cmd_checkmsg(message: Message):
+    """Тест модерации: ответом на сообщение или текстом проверить стоп-слова, деанон, мат."""
+    if not await _staff_only(message):
         return
     reply = message.reply_to_message
-    file_obj = pick_image_file(reply) if reply else None
-    if file_obj is None:
-        await staff_reply(message, "Ответь /deanon на сообщение с картинкой.")
+    args = (message.text or "").split(maxsplit=1)
+    target_text = args[1].strip() if len(args) > 1 else ((reply.text or reply.caption) if reply else "")
+    if not target_text:
+        await staff_reply(message,
+            "Ответь <code>/checkmsg</code> на сообщение или напиши: <code>/checkmsg &lt;текст&gt;</code>.")
         return
-    try:
-        data = (await bot.download(file_obj)).read()
-    except Exception as e:
-        await message.answer(f"Не смог скачать: {e}")
-        return
-    if getattr(config, "INFERENCE_MODE", "microservice") == "microservice":
-        text = await inference_client.get_client().extract_ocr_text(
-            data, storage.get_str("DEANON_OCR_LANG", config.DEANON_OCR_LANG))
-    else:
-        text = await asyncio.to_thread(
-            deanon.extract_text, data, storage.get_str("DEANON_OCR_LANG", config.DEANON_OCR_LANG))
 
-    hit, types = deanon.is_deanon(text or "", num("DEANON_MIN_HITS"))
-    mark = "🔴 деанон" if hit else "🟢 чисто"
-    snippet = (text or "").strip()
-    snippet = snippet[:500] + "…" if len(snippet) > 500 else snippet
+    chat_words = storage.stopwords_processed()
+    fuzzy = flag("FUZZY_STOPWORDS")
+    max_d = num("FUZZY_DISTANCE")
+    sw = textguard.find_stopword(target_text, chat_words, fuzzy=fuzzy, max_distance=max_d)
+    has_mat = textguard.has_profanity(target_text)
+    hit_deanon, why_deanon = deanon.scan_text(target_text, num("DEANON_MIN_HITS"))
+
+    verdicts = []
+    if sw:
+        verdicts.append(f"🔴 Стоп-слово: «{esc(sw)}»")
+    if has_mat:
+        verdicts.append("🔴 Нецензурная лексика (мат)")
+    if hit_deanon:
+        verdicts.append(f"🔴 Деанон/угроза: {esc(why_deanon)}")
+
+    res = "\n".join(verdicts) if verdicts else "🟢 Чисто: фильтры не сработали бы"
+    snippet = target_text[:400] + "…" if len(target_text) > 400 else target_text
     await staff_reply(message,
-        "🕵 <b>Проверка на деанон</b>\n"
-        f"OCR-движок: {esc(deanon.status())}\n"
-        f"Найдено: {esc(deanon.describe(types)) or '—'}\n"
-        f"Вердикт: {mark} (нужно типов: {num('DEANON_MIN_HITS')}, действие: {action_for('DEANON_ACTION')})\n\n"
-        f"Распознанный текст:\n<code>{esc(snippet) or '(пусто)'}</code>")
+        "🧪 <b>Тест модерации текста</b>\n"
+        f"<i>(Админы не наказываются автофильтром в чате, это эмуляция)</i>\n\n"
+        f"{res}\n\n"
+        f"Текст:\n<code>{esc(snippet)}</code>")
 
 
 @dp.message(Command("diag"))
