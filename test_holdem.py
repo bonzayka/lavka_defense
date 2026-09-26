@@ -227,6 +227,116 @@ def test_eliminated_player_no_ghost_bet_or_stack():
         assert opp["street_bet"] == 0
 
 
+def test_incomplete_allin_cannot_bypass_raise_lock():
+    import copy
+    t, uid = _raiser_after_incomplete_allin(seed=2)
+    assert not h.allowed_actions(t, uid)["all_in"]
+    before = copy.deepcopy(t)
+    assert h.apply_action(t, uid, "allin") == {"ok": False, "reason": "raise_not_reopened"}
+    assert t == before
+
+
+def test_cumulative_short_allins_reopen_betting():
+    t = h.new_table(1)
+    for uid in range(1, 5):
+        h.add_player(t, uid, str(uid))
+    h.start_tournament(t, seed=2)
+    raiser = t["current_turn"]
+    assert h.apply_action(t, raiser, "raise", 3000)["ok"]
+    for amount in (4000, 5000):
+        uid = t["current_turn"]
+        t["players"][uid]["stack"] = amount - t["players"][uid]["street_bet"]
+        assert h.apply_action(t, uid, "allin")["ok"]
+    assert h.apply_action(t, t["current_turn"], "call")["ok"]
+    assert t["current_turn"] == raiser
+    assert h.allowed_actions(t, raiser)["min_raise_to"] == 7000
+    assert h.apply_action(t, raiser, "raise", 7000)["ok"]
+
+
+def test_short_big_blind_keeps_nominal_bet_multiway():
+    t = h.new_table(1)
+    for uid in range(1, 5):
+        h.add_player(t, uid, str(uid))
+    t["players"][3]["stack"] = 200
+    h.start_tournament(t, seed=4)
+    assert t["current_bet"] == 1000
+    assert h.allowed_actions(t, t["current_turn"])["min_raise_to"] == 2000
+
+
+def test_heads_up_short_blind_runs_out_without_dry_bet():
+    t = h.new_table(1)
+    h.add_player(t, 1, "A")
+    h.add_player(t, 2, "B")
+    t["players"][2]["stack"] = 200
+    h.start_tournament(t, seed=4)
+    assert t["phase"] in ("between_hands", "finished")
+    assert len(t["board"]) == 5
+    assert sum(p["stack"] for p in t["players"].values()) == 50200
+
+
+def test_no_raise_into_dry_side_pot():
+    t = h.new_table(1)
+    for uid in (1, 2):
+        h.add_player(t, uid, str(uid))
+    t["players"][1]["stack"] = 3000
+    h.start_tournament(t, seed=2)
+    assert h.apply_action(t, 1, "allin")["ok"]
+    opts = h.allowed_actions(t, 2)
+    assert opts["call"] and not opts["all_in"] and not opts["raise_to"]
+    assert not h.apply_action(t, 2, "allin")["ok"]
+
+
+def test_custom_blinds_determine_raise():
+    t = h.new_table(1)
+    t.update(small_blind=25, big_blind=50)
+    for uid in (1, 2, 3):
+        h.add_player(t, uid, str(uid))
+    h.start_tournament(t, seed=2)
+    assert h.allowed_actions(t, t["current_turn"])["min_raise_to"] == 100
+    while t["street"] == "preflop":
+        uid = t["current_turn"]
+        opts = h.allowed_actions(t, uid)
+        assert h.apply_action(t, uid, "call" if opts["call"] else "check")["ok"]
+    assert h.allowed_actions(t, t["current_turn"])["min_raise_to"] == 50
+
+
+def test_invalid_raise_never_mutates_state():
+    import copy
+    t = _headsup_all_in_preflop(3)
+    for amount in (True, 2000.5, "3000", -2, 999999, None):
+        before = copy.deepcopy(t)
+        assert not h.apply_action(t, t["current_turn"], "raise", amount)["ok"]
+        assert before == t
+
+
+def test_disqualification_does_not_finish_a_live_allin_hand():
+    t = h.new_table(1)
+    for uid in (1, 2, 3):
+        h.add_player(t, uid, str(uid))
+    t["players"][1]["stack"] = 3000
+    h.start_tournament(t, seed=5)
+    assert h.apply_action(t, 1, "allin")["ok"]
+    assert h.disqualify_player(t, 2)
+    assert t["phase"] == "playing"
+    assert t["current_turn"] == 3
+    assert h.apply_action(t, 3, "call")["ok"]
+    assert len(t["board"]) == 5
+    assert sum(p["stack"] for p in t["players"].values()) == 103000
+
+
+def test_folded_bets_clear_on_next_street():
+    t = h.new_table(1)
+    for uid in (1, 2, 3):
+        h.add_player(t, uid, str(uid))
+    h.start_tournament(t, seed=5)
+    assert h.apply_action(t, 1, "call")["ok"]
+    assert h.apply_action(t, 2, "fold")["ok"]
+    assert h.apply_action(t, 3, "check")["ok"]
+    assert t["street"] == "flop"
+    assert t["players"][2]["street_bet"] == 0
+    assert t["players"][2]["total_bet"] == 500
+
+
 def _run():
     tests = [v for k, v in sorted(globals().items()) if k.startswith("test_") and callable(v)]
     fails = 0

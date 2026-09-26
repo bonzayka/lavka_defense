@@ -152,7 +152,7 @@
   // Room & WebSocket URL
   const params = new URLSearchParams(location.search);
   const startParam = (tg && tg.initDataUnsafe && tg.initDataUnsafe.start_param) || "";
-  const room = (params.get("room") || startParam || "main").slice(0, 48);
+  const room = (params.get("room") || startParam || "main").slice(0, 32);
   const initData = (tg && tg.initData) || "";
 
   const $ = (id) => document.getElementById(id);
@@ -167,6 +167,16 @@
   let displayedHeroStack = 0;
   let turnTimerTicker = null;
   let currentTurnSec = 120;
+  let stopReconnect = false;
+  let pendingAction = false;
+  let reconnectAttempts = 0;
+  let customBetToken = null;
+  let turnDeadline = 0;
+  let devUid = params.get("dev_uid") || sessionStorage.getItem("poker_dev_uid");
+  if (!devUid) {
+    devUid = String(Math.floor(Math.random() * 1e9) + 1000);
+    sessionStorage.setItem("poker_dev_uid", devUid);
+  }
 
 
   // Format chip numbers with spaces
@@ -228,6 +238,11 @@
   function render() {
     if (!state) return;
     myUid = state.you ? state.you.uid : null;
+    $("roomTitle").textContent = state.chat_title || (room === "main" ? "Вечер за покером" : `Стол ${room}`);
+    $("tableDetails").textContent = `${(state.seats || []).length} / 9 игроков · Блайнды ${fmtChips(state.small_blind)} / ${fmtChips(state.big_blind)}`;
+    $("tableEmpty").hidden = state.phase !== "lobby";
+    document.querySelector(".poker-table").classList.toggle("is-lobby", state.phase === "lobby");
+    if (customBetToken !== state.turn_token) $("customBetModal").classList.remove("open");
 
     // 1. Zone 1: Header Bar & Pot
     const roundTxt = state.phase === "lobby" ? "ЛОББИ СТОЛА" : `РАЗДАЧА #${state.hand_no || 1} · ${(state.street || 'ИГРА').toUpperCase()}`;
@@ -324,7 +339,8 @@
     5: [4, 2, 1, 7, 6],
     6: [4, 3, 1, 0, 7, 5],
     7: [4, 3, 2, 1, 7, 6, 5],
-    8: [4, 5, 6, 7, 0, 1, 2, 3]
+    8: [4, 5, 6, 7, 0, 1, 2, 3],
+    9: [4, 5, 6, 7, 0, 1, 2, 3, 8]
   };
 
   function getVisualPosition(idx, total, myIdx) {
@@ -348,6 +364,7 @@
 
     let myIdx = seats.findIndex(s => s.is_me);
     const totalSeats = seats.length;
+    container.dataset.count = totalSeats;
 
     seats.forEach((s, idx) => {
       // Smart radial layout: perfectly spreads 2 to 8 players around the table
@@ -356,13 +373,13 @@
       const pod = document.createElement("div");
       const isTurn = s.is_turn && state.phase === "playing";
       const isFolded = s.folded;
-      const isBusted = (!s.in_table && s.stack <= 0) || s.stack <= 0;
+      const isBusted = !s.in_table;
 
       pod.className = `player-pod ${isTurn ? "is-turn" : ""} ${s.is_me ? "is-me" : ""} ${isFolded ? "folded" : ""} ${isBusted ? "busted" : ""}`;
       pod.setAttribute("data-pos", visualPos);
 
       // Opponent Mini Pocket Cards
-      if (s.cards && s.cards.length && !s.is_me && !isFolded && !isBusted) {
+      if (s.cards && s.cards.length && !s.is_me && !isFolded && (!isBusted || state.phase !== "playing")) {
         const oppCardsWrap = document.createElement("div");
         oppCardsWrap.className = "opponent-mini-cards";
         s.cards.forEach(c => oppCardsWrap.appendChild(createCardEl(c)));
@@ -401,7 +418,7 @@
       avInner.className = "avatar-inner";
       avInner.textContent = (s.name || "P").slice(0, 2).toUpperCase();
 
-      const avatarSrc = s.avatar || (s.uid ? `/api/avatar/${s.uid}` : "");
+      const avatarSrc = s.avatar || "";
       if (avatarSrc) {
         const img = document.createElement("img");
         img.className = "avatar-img";
@@ -446,7 +463,7 @@
       `;
       pod.appendChild(capsule);
 
-      // BUG FIX: Do NOT display street bet badge for busted players or when hand is over
+      // All-in players remain in the hand; their committed chips stay visible.
       if (s.bet > 0 && !isBusted && state.phase === "playing") {
         const betBadge = document.createElement("div");
         betBadge.className = "pod-bet-badge";
@@ -490,7 +507,7 @@
     if (cards.length && cards[0] !== "🂠") {
       cards.forEach(c => {
         const cardEl = createCardEl(c, true);
-        if (state.you && state.you.combo && (state.phase === "between_hands" || state.phase === "finished")) {
+        if ((state.last_payouts || {})[myUid] > 0 && (state.phase === "between_hands" || state.phase === "finished")) {
           cardEl.classList.add("winning-highlight");
         }
         deck.appendChild(cardEl);
@@ -529,7 +546,7 @@
       lobbyBox.style.cssText = "display:flex; flex-direction:column; gap:8px;";
       
       const seatedCount = (state.seats || []).length;
-      const canStart = seatedCount >= (state.min_players || 2);
+      const canStart = state.is_host && seatedCount >= (state.min_players || 2);
 
       lobbyBox.innerHTML = `
         <div class="turn-wait-banner" style="padding:10px;">
@@ -540,7 +557,7 @@
             ${you.seated ? "✅ Ты за столом" : "🪑 Сесть за стол"}
           </button>
           <button class="btn-act btn-raise" id="lobbyStartBtn" style="flex:1.2;" ${canStart ? "" : "disabled"}>
-            ▶️ Начать игру
+            ${state.is_host ? "Начать игру →" : "Ждём организатора"}
           </button>
         </div>
       `;
@@ -548,7 +565,7 @@
 
       const jBtn = $("lobbyJoinBtn");
       if (jBtn) {
-        jBtn.disabled = you.seated;
+        jBtn.disabled = you.seated || seatedCount >= 9;
         jBtn.onclick = () => {
           SoundFX.chip();
           triggerHaptic("medium");
@@ -581,7 +598,7 @@
       `;
       setTimeout(() => {
         const btn = $("forceNextHandBtn");
-        if (btn && state && state.phase === "between_hands") {
+        if (btn && state && state.is_host && state.phase === "between_hands") {
           btn.style.display = "inline-flex";
           btn.onclick = () => {
             SoundFX.deal();
@@ -605,9 +622,9 @@
       `;
       const cBtn = $("closeFinTableBtn");
       if (cBtn) {
+        cBtn.hidden = !state.is_host;
         cBtn.onclick = () => {
           send("close_table");
-          showToast("Стол закрыт.");
         };
       }
       return;
@@ -682,8 +699,8 @@
       const multRow = document.createElement("div");
       multRow.className = "multipliers-row";
 
-      const halfPot = Math.min(maxRaise, Math.max(minRaise, Math.floor(state.pot / 2) + state.current_bet));
-      const fullPot = Math.min(maxRaise, Math.max(minRaise, state.pot + state.current_bet));
+      const halfPot = Math.min(maxRaise, Math.max(minRaise, Math.floor((state.pot + toCall) / 2) + state.current_bet));
+      const fullPot = Math.min(maxRaise, Math.max(minRaise, state.pot + toCall + state.current_bet));
 
       const presets = [
         { label: "Мин", val: minRaise },
@@ -743,7 +760,8 @@
       slider.id = "pokerSlider";
       slider.min = minRaise;
       slider.max = maxRaise;
-      slider.step = state.big_blind || 1000;
+      slider.step = 1;
+      slider.setAttribute("aria-label", "Сумма ставки до");
       slider.value = currentRaiseVal;
 
       slider.oninput = (e) => {
@@ -780,6 +798,7 @@
     // 1. Fold Button
     const foldBtn = document.createElement("button");
     foldBtn.className = "btn-act btn-fold";
+    foldBtn.disabled = !opts.fold;
     foldBtn.innerHTML = `<span>↩️ Пас</span><span class="btn-sub-label">Сбросить</span>`;
     foldBtn.onclick = () => {
       try { SoundFX.deal(); } catch(e) {}
@@ -799,7 +818,7 @@
         send("action", { action: "check" });
       };
     } else {
-      callBtn.innerHTML = `<span>💰 Колл</span><span class="btn-sub-label">${fmtChips(toCall)}</span>`;
+      callBtn.innerHTML = `<span>${opts.call_amount < toCall ? "Колл · All-in" : "Колл"}</span><span class="btn-sub-label">${fmtChips(opts.call_amount)}</span>`;
       callBtn.onclick = () => {
         try { SoundFX.chip(); } catch(e) {}
         try { triggerHaptic("medium"); } catch(e) {}
@@ -900,9 +919,7 @@
     if (turnTimerTicker) clearInterval(turnTimerTicker);
     turnTimerTicker = setInterval(() => {
       if (state && state.phase === "playing" && state.current_turn) {
-        if (currentTurnSec > 0) {
-          currentTurnSec -= 1;
-        }
+        currentTurnSec = Math.max(0, Math.ceil((turnDeadline - Date.now()) / 1000));
         updateTurnTimerVisual();
       }
     }, 1000);
@@ -910,6 +927,7 @@
 
   // Custom Bet Modal Handlers
   function openCustomBetModal(minVal, maxVal, curVal) {
+    customBetToken = state.turn_token;
     const modal = $("customBetModal");
     if (!modal) return;
     $("cbetMinLabel").textContent = fmtChips(minVal);
@@ -941,9 +959,9 @@
     const max = Number(input.max) || 100000;
     let val = min;
     if (type === "half") {
-      val = Math.min(max, Math.max(min, Math.floor((state.pot || 0) / 2) + (state.current_bet || 0)));
+      val = Math.min(max, Math.max(min, Math.floor(((state.pot || 0) + (state.you.to_call || 0)) / 2) + (state.current_bet || 0)));
     } else if (type === "pot") {
-      val = Math.min(max, Math.max(min, (state.pot || 0) + (state.current_bet || 0)));
+      val = Math.min(max, Math.max(min, (state.pot || 0) + (state.you.to_call || 0) + (state.current_bet || 0)));
     } else if (type === "allin") {
       val = max;
     }
@@ -956,6 +974,7 @@
     const confirmBtn = $("confirmCustomBetBtn");
     if (confirmBtn) {
       confirmBtn.onclick = () => {
+        if (!state || customBetToken !== state.turn_token || state.current_turn !== myUid) return;
         const input = $("customBetInput");
         const min = Number(input.min) || 0;
         const max = Number(input.max) || 100000;
@@ -1052,6 +1071,8 @@
 
   // WebSocket Connection
   function connect() {
+    if (stopReconnect) return;
+    setConnection("Подключаемся к столу…", false);
     const proto = location.protocol === "https:" ? "wss" : "ws";
     ws = new WebSocket(`${proto}://${location.host}/ws`);
 
@@ -1060,7 +1081,7 @@
         type: "auth",
         initData: initData,
         room: room,
-        dev_uid: params.get("dev_uid") || undefined,
+        dev_uid: devUid,
         dev_name: params.get("dev_name") || undefined
       }));
     };
@@ -1069,30 +1090,42 @@
       try {
         const msg = JSON.parse(ev.data);
         if (msg.type === "state") {
+          pendingAction = false;
+          reconnectAttempts = 0;
+          setConnection("За столом · соединение установлено", true);
           state = msg;
           if (state.turn_seconds_left !== undefined && state.turn_seconds_left !== null) {
             currentTurnSec = state.turn_seconds_left;
           } else {
             currentTurnSec = 120;
           }
+          turnDeadline = Date.now() + currentTurnSec * 1000;
           render();
           updateTurnTimerVisual();
         } else if (msg.type === "closed") {
           showToast("🛑 Стол закрыт.");
         } else if (msg.type === "error") {
-          if (msg.error === "not_in_chat") {
+          pendingAction = false;
+          if (["not_in_chat", "bad_init_data", "auth_required", "invalid_room"].includes(msg.error)) {
+            stopReconnect = true;
             clearTimeout(reconnectTimer);
-            showAccessDeniedScreen(msg.message || "Вы не состоите в этом чате.");
+            setConnection(msg.message || "Откройте стол через Telegram-бота. Для локального запуска нужен WEBAPP_DEV=1.", false);
+            $("heroActionPanel").innerHTML = '<div class="turn-wait-banner">Войдите через Telegram, чтобы присоединиться к игре.</div>';
             return;
           }
-          showToast("⚠️ " + (msg.error || "Ошибка"));
+          const errors = {host_only: "Это действие доступно организатору", cannot_join: "Стол полон или игра уже началась", not_enough_players: "Нужно минимум два игрока", not_your_turn: "Сейчас ход другого игрока", stale_turn: "Ход уже изменился. Состояние обновлено", raise_not_reopened: "Повышение недоступно. Можно ответить или сбросить", bad_raise: "Проверьте сумму ставки", cannot_check: "Нужно ответить на ставку", invalid_phase: "Это действие сейчас недоступно"};
+          showToast(errors[msg.error] || "Не удалось выполнить действие. Повторите попытку.");
         }
       } catch(e) {}
     };
 
     ws.onclose = () => {
+      pendingAction = false;
       clearTimeout(reconnectTimer);
-      reconnectTimer = setTimeout(connect, 1500);
+      if (stopReconnect) return;
+      setConnection("Связь потеряна. Переподключаемся…", false);
+      document.querySelectorAll("#heroActionPanel button, #heroActionPanel input").forEach(el => el.disabled = true);
+      reconnectTimer = setTimeout(connect, Math.min(1500 * 2 ** reconnectAttempts++, 15000));
     };
 
     ws.onerror = () => {
@@ -1101,10 +1134,30 @@
   }
 
   function send(type, extra) {
-    if (ws && ws.readyState === WebSocket.OPEN) {
-      ws.send(JSON.stringify(Object.assign({ type }, extra || {})));
+    if (pendingAction) return;
+    if (ws && ws.readyState === WebSocket.OPEN && !stopReconnect) {
+      pendingAction = true;
+      ws.send(JSON.stringify(Object.assign({ type, turn_token: state && state.turn_token }, extra || {})));
+      document.querySelectorAll("#heroActionPanel button").forEach(el => el.disabled = true);
+    } else {
+      showToast("Нет соединения. Дождитесь переподключения.");
     }
   }
+
+  function setConnection(text, online) {
+    $("connectionBar").textContent = text;
+    $("connectionBar").classList.toggle("online", online);
+  }
+  window.openRoomsList = loadRoomsModal;
+  $("inviteBtn").onclick = async () => {
+    const url = new URL(location.href);
+    url.search = "";
+    url.searchParams.set("room", room);
+    try {
+      await navigator.clipboard.writeText(url.href);
+      showToast("Ссылка на стол скопирована");
+    } catch (_) { showToast(`Код комнаты: ${room}`); }
+  };
 
   // Header Handlers
   $("soundBtn").onclick = () => {
@@ -1551,7 +1604,7 @@
 
   // Desktop Monitor Keyboard Hotkeys
   window.addEventListener("keydown", (e) => {
-    if (e.target.tagName === "INPUT" || e.target.tagName === "TEXTAREA") return;
+    if (e.target.tagName === "INPUT" || e.target.tagName === "TEXTAREA" || e.target.isContentEditable || e.repeat) return;
     const key = e.key.toLowerCase();
     if (key === "m") {
       const menu = $("gameMenuModal");
@@ -1563,27 +1616,28 @@
       closeGameMenu();
       closeRanksModal();
       $("roomsModal").classList.remove("open");
+      $("customBetModal").classList.remove("open");
       return;
     }
     // Only process table hotkeys if it's my turn
-    if (activeGameMode !== "poker" || !state || state.current_turn !== myUid) return;
+    if (document.querySelector(".modal-overlay.open") || activeGameMode !== "poker" || !state || state.current_turn !== myUid) return;
     const you = state.you || {};
     const opts = you.options || {};
-    if (key === "f" && opts.can_fold) {
+    if (key === "f" && opts.fold) {
       triggerHaptic("medium");
-      send("fold");
+      send("action", {action: "fold"});
     } else if ((key === " " || key === "c")) {
       e.preventDefault();
-      if (opts.can_check) {
+      if (opts.check) {
         triggerHaptic("light");
-        send("check");
-      } else if (opts.can_call) {
+        send("action", {action: "check"});
+      } else if (opts.call) {
         triggerHaptic("medium");
-        send("call");
+        send("action", {action: "call"});
       }
     } else if (key === "r" && opts.can_raise) {
       triggerHaptic("heavy");
-      send("raise", { amount: currentRaiseVal });
+      send("action", { action: "raise", amount: currentRaiseVal });
     }
   });
 

@@ -207,6 +207,7 @@ def _post(table: dict, uid: int, amount: int) -> int:
 
 def _set_turn(table: dict, uid: int | None) -> None:
     table["current_turn"] = uid
+    table["turn_token"] = table.get("turn_token", 0) + 1
     table["turn_start_time"] = time.time() if uid is not None else 0
 
 
@@ -223,7 +224,8 @@ def begin_hand(table: dict, seed: int | None = None) -> dict:
     table["board"] = []
     table["pot"] = 0
     table["current_bet"] = 0
-    table["min_raise"] = BIG_BLIND
+    table["min_raise"] = table["big_blind"]
+    table["showdown_revealed"] = False
     table["last_payouts"] = {}
     _set_turn(table, None)
     table["deck"] = [r + s for r in RANKS for s in SUITS]
@@ -236,6 +238,7 @@ def begin_hand(table: dict, seed: int | None = None) -> dict:
         p["street_bet"] = 0
         p["total_bet"] = 0
         p["acted"] = False
+        p["last_acted_bet"] = None
         p["last_action"] = ""
         p["hand_rank"] = None
         p["showdown_name"] = ""
@@ -260,20 +263,33 @@ def begin_hand(table: dict, seed: int | None = None) -> dict:
     bb_paid = _post(table, bb_uid, table["big_blind"])
     players[sb_uid]["last_action"] = f"SB {sb_paid}"
     players[bb_uid]["last_action"] = f"BB {bb_paid}"
-    table["current_bet"] = players[bb_uid]["street_bet"]
+    table["current_bet"] = max(sb_paid, bb_paid)
+    if len(_actionable(table)) >= 2:
+        table["current_bet"] = max(table["current_bet"], table["big_blind"])
     _set_turn(table, _next_to_act(table, bb_uid))
     table["last_event"] = (
         f"🃏 Раздача #{table['hand_no']}. Блайнды: {players[sb_uid]['name']} SB {sb_paid}, "
         f"{players[bb_uid]['name']} BB {bb_paid}."
     )
 
-    if table["current_turn"] is None:
+    if _betting_round_complete(table):
         _runout_and_showdown(table)
     return {"ok": True}
 
 
 def player_to_call(table: dict, uid: int) -> int:
     return max(0, table.get("current_bet", 0) - table["players"][uid].get("street_bet", 0))
+
+
+def _raise_reopened(table: dict, uid: int) -> bool:
+    p = table["players"][uid]
+    last = p.get("last_acted_bet", p.get("street_bet", 0))
+    return (not p.get("acted") or last == 0 or
+            (last is not None and table["current_bet"] - last >= table["min_raise"]))
+
+
+def _can_increase_bet(table: dict, uid: int) -> bool:
+    return _raise_reopened(table, uid) and any(u != uid for u in _actionable(table))
 
 
 def allowed_actions(table: dict, uid: int) -> dict:
@@ -292,7 +308,7 @@ def allowed_actions(table: dict, uid: int) -> dict:
         "call": owe > 0 and stack > 0,
         "call_amount": min(owe, stack),
         "raise_to": [],
-        "all_in": stack > 0,
+        "all_in": stack > 0 and (current_total <= table["current_bet"] or _can_increase_bet(table, uid)),
         "all_in_to": current_total,
     }
 
@@ -302,12 +318,12 @@ def allowed_actions(table: dict, uid: int) -> dict:
     # Игрок уже действовал на этой улице и оказался на ходу снова только из-за
     # НЕПОЛНОГО all-in соперника (докол меньше min_raise). Такой докол торги не
     # переоткрывает — рейзить нельзя, доступны лишь call/fold.
-    if p.get("acted"):
+    if not _can_increase_bet(table, uid):
         return opts
 
-    min_to = table["current_bet"] + max(table.get("min_raise", BIG_BLIND), BIG_BLIND)
+    min_to = table["current_bet"] + table["min_raise"]
     if table["current_bet"] == 0:
-        min_to = max(BIG_BLIND, min_to)
+        min_to = max(table["big_blind"], min_to)
 
     opts["min_raise_to"] = min_to
     opts["max_raise_to"] = current_total
@@ -315,7 +331,7 @@ def allowed_actions(table: dict, uid: int) -> dict:
 
     if current_total > table["current_bet"] and min_to <= current_total:
         opts["raise_to"].append(min_to)
-        double_to = min_to + max(table.get("min_raise", BIG_BLIND), BIG_BLIND)
+        double_to = min_to + table["min_raise"]
         if double_to <= current_total and double_to != min_to:
             opts["raise_to"].append(double_to)
     return opts
@@ -354,20 +370,24 @@ def apply_action(table: dict, uid: int, action: str, amount: int | None = None) 
     elif action == "raise":
         if amount is None:
             return {"ok": False, "reason": "amount_required"}
-        if p.get("acted"):  # неполный all-in не переоткрыл торги — ре-рейз запрещён
+        if not _can_increase_bet(table, uid):
             return {"ok": False, "reason": "raise_not_reopened"}
-        to_amount = int(amount)
+        if type(amount) is not int:
+            return {"ok": False, "reason": "bad_raise"}
+        to_amount = amount
         max_to = p["street_bet"] + p["stack"]
-        if to_amount >= max_to:
+        if to_amount > max_to:
+            return {"ok": False, "reason": "bad_raise"}
+        if to_amount == max_to:
             return apply_action(table, uid, "allin")
-        min_to = table["current_bet"] + max(table.get("min_raise", BIG_BLIND), BIG_BLIND)
+        min_to = table["current_bet"] + table["min_raise"]
         if to_amount <= table["current_bet"] or to_amount < min_to:
             return {"ok": False, "reason": "bad_raise"}
         delta = to_amount - p["street_bet"]
         _post(table, uid, delta)
         raise_size = to_amount - table["current_bet"]
         table["current_bet"] = to_amount
-        table["min_raise"] = max(raise_size, BIG_BLIND)
+        table["min_raise"] = max(raise_size, table["big_blind"])
         _reopen_action(table, uid)
         p["acted"] = True
         p["last_action"] = "raise"
@@ -377,7 +397,9 @@ def apply_action(table: dict, uid: int, action: str, amount: int | None = None) 
         if to_amount <= p["street_bet"]:
             return {"ok": False, "reason": "no_chips"}
         old_bet = table["current_bet"]
-        prev_min_raise = max(table.get("min_raise", BIG_BLIND), BIG_BLIND)
+        if to_amount > old_bet and not _can_increase_bet(table, uid):
+            return {"ok": False, "reason": "raise_not_reopened"}
+        prev_min_raise = table["min_raise"]
         _post(table, uid, p["stack"])
         if to_amount > old_bet:
             raise_size = to_amount - old_bet
@@ -394,6 +416,7 @@ def apply_action(table: dict, uid: int, action: str, amount: int | None = None) 
     else:
         return {"ok": False, "reason": "unknown_action"}
 
+    p["last_acted_bet"] = table["current_bet"]
     _advance_state(table, uid)
     return {"ok": True}
 
@@ -416,6 +439,8 @@ def _next_to_act(table: dict, after_uid: int | None = None) -> int | None:
 def _betting_round_complete(table: dict) -> bool:
     actors = _actionable(table)
     if not actors:
+        return True
+    if len(actors) == 1 and player_to_call(table, actors[0]) == 0:
         return True
     for uid in actors:
         p = table["players"][uid]
@@ -462,12 +487,13 @@ def _next_street(table: dict) -> None:
         _showdown(table)
         return
 
-    for uid in _not_folded(table):
+    for uid in table["players"]:
         p = table["players"][uid]
         p["street_bet"] = 0
         p["acted"] = False
+        p["last_acted_bet"] = None
     table["current_bet"] = 0
-    table["min_raise"] = BIG_BLIND
+    table["min_raise"] = table["big_blind"]
 
     dealer_uid = table["seats"][table["dealer_index"]]
     _set_turn(table, _next_to_act(table, dealer_uid))
@@ -503,13 +529,14 @@ def _award_uncontested(table: dict, winner_uid: int) -> None:
 
 
 def _showdown(table: dict) -> None:
+    table["showdown_revealed"] = True
     contenders = _not_folded(table)
     board = list(table["board"])
     for uid in contenders:
         cards = table["players"][uid]["hole"] + board
         rank = best_hand(cards)
         table["players"][uid]["hand_rank"] = rank
-        table["players"][uid]["showdown_name"] = HAND_NAMES[rank[0]]
+        table["players"][uid]["showdown_name"] = "роял-флеш" if rank[:2] == (8, 14) else HAND_NAMES[rank[0]]
 
     payouts = {uid: 0 for uid in table["players"]}
     lines = []
@@ -603,13 +630,9 @@ def disqualify_player(table: dict, uid: int) -> bool:
     p["folded"] = True
     p["acted"] = True
     p["last_action"] = "dq"
-    if table.get("current_turn") == uid:
-        _set_turn(table, _next_to_act(table, uid))
-    contenders = _not_folded(table)
-    if len(contenders) == 1:
-        _award_uncontested(table, contenders[0])
-    elif len(_participants(table)) < 2:
-        _finish_tournament(table)
+    if table.get("phase") == "playing":
+        if table.get("current_turn") == uid or _betting_round_complete(table) or len(_not_folded(table)) <= 1:
+            _advance_state(table, uid)
     return True
 
 

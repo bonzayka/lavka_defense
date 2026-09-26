@@ -23,6 +23,7 @@ import asyncio
 import hashlib
 import hmac
 import json
+import logging
 import os
 import sys
 import time
@@ -50,6 +51,7 @@ from fastapi.responses import FileResponse, JSONResponse  # noqa: E402
 from fastapi.staticfiles import StaticFiles  # noqa: E402
 
 STATIC_DIR = Path(__file__).resolve().parent / "static"
+log = logging.getLogger(__name__)
 
 # Разрешить «dev»-вход без Telegram (для локальной отладки в браузере).
 WEBAPP_DEV = getattr(config, "WEBAPP_DEV", None)
@@ -84,23 +86,18 @@ async def is_user_in_chat(chat_id: int, user_id: int) -> bool:
     Проверка, состоит ли пользователь в Telegram-чате, к которому привязан стол.
     Если пользователь не состоит (left / kicked), доступ к столу запрещается.
     """
-    if WEBAPP_DEV or chat_id > 0:
+    if WEBAPP_DEV:
         return True
-    code = f"chat_{chat_id}"
-    r = rooms.get(code)
-    if r and r.table:
-        if user_id in r.table.get("players", {}) or user_id == r.table.get("host"):
-            return True
     try:
         import bot
         bot_inst = getattr(bot, "bot", None)
         if not bot_inst:
-            return True
+            return False
         member = await bot_inst.get_chat_member(chat_id, user_id)
         status = getattr(member, "status", None)
-        return status not in ("left", "kicked", None)
+        return status in ("creator", "administrator", "member") or (status == "restricted" and getattr(member, "is_member", False))
     except Exception:
-        return True
+        return False
 
 
 # ============================ Проверка initData =============================
@@ -111,7 +108,7 @@ def verify_init_data(init_data: str, bot_token: str, max_age: int = INITDATA_MAX
         hash   = HMAC_SHA256(key=secret, msg=data_check_string)
     Возвращает dict пользователя {id, name, photo_url} или None, если подпись неверна.
     """
-    if not init_data or not bot_token:
+    if not isinstance(init_data, str) or not init_data or not bot_token:
         return None
     try:
         pairs = dict(parse_qsl(init_data, strict_parsing=True))
@@ -128,16 +125,21 @@ def verify_init_data(init_data: str, bot_token: str, max_age: int = INITDATA_MAX
         return None
 
     # Свежесть (не обязательно, но полезно).
-    if max_age and pairs.get("auth_date", "").isdigit():
-        if time.time() - int(pairs["auth_date"]) > max_age:
+    if max_age:
+        if not pairs.get("auth_date", "").isdigit():
+            return None
+        age = time.time() - int(pairs["auth_date"])
+        if age > max_age or age < -30:
             return None
 
     try:
         user = json.loads(pairs.get("user", "{}"))
     except json.JSONDecodeError:
         return None
+    if not isinstance(user, dict):
+        return None
     uid = user.get("id")
-    if not uid:
+    if type(uid) is not int or uid <= 0:
         return None
     name = (f"{user.get('first_name', '')} {user.get('last_name', '')}").strip() \
         or user.get("username") or f"Игрок {uid}"
@@ -157,12 +159,22 @@ class Room:
         self.on_action = on_action
         self.chat_id = chat_id
         self.next_hand_task: asyncio.Task | None = None
+        self.turn_task: asyncio.Task | None = None
         self.last_active = time.time()
 
     def schedule_next_hand(self):
         """Гарантировать запуск следующей раздачи при завершении руки."""
-        if self.next_hand_task is None or self.next_hand_task.done():
+        if self.chat_id is None and (self.next_hand_task is None or self.next_hand_task.done()):
             self.next_hand_task = asyncio.create_task(maybe_next_hand(self))
+
+    def schedule_turn(self):
+        if self.chat_id is not None:
+            return
+        if self.turn_task and self.turn_task is not asyncio.current_task():
+            self.turn_task.cancel()
+        self.turn_task = None
+        if self.table.get("phase") == "playing" and self.table.get("current_turn") is not None:
+            self.turn_task = asyncio.create_task(expire_turn(self, self.table["turn_token"]))
 
     def add_conn(self, ws: WebSocket, uid: int):
         self.conns[ws] = uid
@@ -247,9 +259,9 @@ def serialize(table: dict, viewer_uid: int, room: Room | None = None) -> dict:
         is_me = uid == viewer_uid
         # Физическая изоляция: свои карты видны только самому себе (is_me) и в state.you.hole.
         # Для чужих мест реальные карты открываются ТОЛЬКО на шоудауне (is_round_over).
-        show_cards = is_me or (is_round_over and bool(p.get("hole")) and not p.get("folded"))
+        show_cards = is_me or (is_round_over and table.get("showdown_revealed", False) and bool(p.get("hole")) and not p.get("folded"))
         p_stack = p.get("stack", 0)
-        p_bet = 0 if (is_round_over or p_stack <= 0) else p.get("street_bet", 0)
+        p_bet = 0 if is_round_over else p.get("street_bet", 0)
         seats.append({
             "uid": uid,
             "name": p["name"],
@@ -259,6 +271,7 @@ def serialize(table: dict, viewer_uid: int, room: Room | None = None) -> dict:
             "folded": p.get("folded", False),
             "all_in": p.get("all_in", False),
             "in_table": p.get("in_table", False),
+            "disqualified": p.get("disqualified", False),
             "is_turn": table.get("current_turn") == uid,
             "is_me": is_me,
             "is_host": uid == table.get("host"),
@@ -305,6 +318,7 @@ def serialize(table: dict, viewer_uid: int, room: Room | None = None) -> dict:
         "big_blind": table.get("big_blind", holdem.BIG_BLIND),
         "min_raise": table.get("min_raise", holdem.BIG_BLIND),
         "current_turn": table.get("current_turn"),
+        "turn_token": table.get("turn_token", 0),
         "current_bet": table.get("current_bet", 0),
         "turn_timeout_sec": holdem.TURN_TIMEOUT_SEC,
         "turn_seconds_left": t_left,
@@ -330,7 +344,7 @@ async def broadcast(room: Room):
     dead = []
     for ws, uid in list(room.conns.items()):
         try:
-            await ws.send_json(serialize(room.table, uid, room))
+            await asyncio.wait_for(ws.send_json(serialize(room.table, uid, room)), timeout=3)
         except Exception:
             dead.append(ws)
     for ws in dead:
@@ -340,26 +354,38 @@ async def broadcast(room: Room):
 async def maybe_next_hand(room: Room):
     """Между раздачами: подождать и раздать следующую (как в групповом боте)."""
     table = room.table
-    if table.get("phase") != "between_hands":
-        return
-    await broadcast(room)
-    await asyncio.sleep(NEXT_HAND_DELAY)
+    while table.get("phase") == "between_hands":
+        hand_no = table["hand_no"]
+        await asyncio.sleep(NEXT_HAND_DELAY)
+        async with room.lock:
+            if room.table is not table or table.get("phase") != "between_hands":
+                return
+            if table["hand_no"] != hand_no:
+                continue
+            holdem.begin_hand(table)
+            room.schedule_turn()
+            await broadcast(room)
+
+
+async def expire_turn(room: Room, token: int):
+    table = room.table
+    delay = max(0, table["turn_start_time"] + holdem.TURN_TIMEOUT_SEC - time.time())
+    await asyncio.sleep(delay)
     async with room.lock:
-        if table.get("phase") == "between_hands":
-            if len(holdem.active_table_players(table)) >= 2:
-                holdem.begin_hand(table)
-                cid = getattr(room, "chat_id", None)
-                if cid:
-                    try:
-                        import bot
-                        asyncio.create_task(bot._holdem_announce_hole_cards(cid))
-                        asyncio.create_task(bot._holdem_refresh(cid))
-                        asyncio.create_task(bot._holdem_send_turn_prompt(cid))
-                    except Exception as e:
-                        log.warning("maybe_next_hand telegram sync error: %s", e)
-            else:
-                holdem._finish_tournament(table)
-    await broadcast(room)
+        if room.table is not table or table.get("phase") != "playing" or table["turn_token"] != token:
+            return
+        uid = table["current_turn"]
+        player = table["players"][uid]
+        player["misses"] += 1
+        if player["misses"] >= holdem.MAX_TIMEOUTS:
+            holdem.disqualify_player(table, uid)
+        else:
+            opts = holdem.allowed_actions(table, uid)
+            holdem.apply_action(table, uid, "check" if opts.get("check") else "fold")
+        room.schedule_turn()
+        if table["phase"] == "between_hands":
+            room.schedule_next_hand()
+        await broadcast(room)
 
 
 # ================================ HTTP-роуты ================================
@@ -373,6 +399,8 @@ async def list_rooms():
     active = []
     for code, room in list(rooms.items()):
         tbl = room.table
+        if code.startswith("chat_") or tbl.get("phase") == "closed":
+            continue
         active.append({
             "code": code,
             "chat_title": tbl.get("chat_title") or ("Стол чата" if code.startswith("chat_") else "Публичный стол"),
@@ -386,27 +414,11 @@ async def list_rooms():
 
 @app.get("/api/avatar/{user_id}")
 async def get_avatar(user_id: int):
-    """Отдать аватар пользователя Telegram (из кеша или через Bot API)."""
-    if user_id in avatar_cache and avatar_cache[user_id]:
-        from fastapi.responses import RedirectResponse
-        return RedirectResponse(avatar_cache[user_id])
-    try:
-        import bot
-        bot_inst = getattr(bot, "bot", None)
-        token = getattr(bot, "BOT_TOKEN", BOT_TOKEN)
-        if bot_inst and token:
-            photos = await bot_inst.get_user_profile_photos(user_id, limit=1)
-            if photos and photos.total_count > 0:
-                file_id = photos.photos[0][-1].file_id
-                f = await bot_inst.get_file(file_id)
-                if f.file_path:
-                    url = f"https://api.telegram.org/file/bot{token}/{f.file_path}"
-                    set_avatar_cache(user_id, url)
-                    from fastapi.responses import RedirectResponse
-                    return RedirectResponse(url)
-    except Exception:
-        pass
-    from fastapi.responses import Response
+    """Only public profile URLs; never expose Bot API download URLs/tokens."""
+    from fastapi.responses import RedirectResponse, Response
+    url = avatar_cache.get(user_id, "")
+    if url.startswith("https://") and "api.telegram.org/file/" not in url:
+        return RedirectResponse(url)
     return Response(status_code=404)
 
 
@@ -437,16 +449,16 @@ async def ws_endpoint(ws: WebSocket):
 
     try:
         # 1) Первое сообщение — авторизация: {type:"auth", initData, room, dev_uid?}
-        raw = await ws.receive_text()
+        raw = await asyncio.wait_for(ws.receive_text(), timeout=15)
         msg = json.loads(raw)
-        if msg.get("type") != "auth":
+        if not isinstance(msg, dict) or msg.get("type") != "auth":
             await ws.send_json({"type": "error", "error": "auth_required"})
             await ws.close()
             return
 
         code = str(msg.get("room") or "main")[:32]
         user = verify_init_data(msg.get("initData", ""), BOT_TOKEN)
-        if user is None and (WEBAPP_DEV or os.environ.get("WEBAPP_DEV", "0") not in ("0", "false", "False", "") or msg.get("dev_uid")):
+        if user is None and WEBAPP_DEV:
             duid = int(msg.get("dev_uid") or 1000 + int(time.time()) % 9000)
             user = {"id": duid, "name": msg.get("dev_name") or f"Dev{duid}", "photo_url": ""}
         if user is None:
@@ -473,7 +485,9 @@ async def ws_endpoint(ws: WebSocket):
                     await ws.close()
                     return
             except ValueError:
-                pass
+                await ws.send_json({"type": "error", "error": "invalid_room"})
+                await ws.close()
+                return
 
         room = get_room(code, host_id=uid)
         room.table["code"] = code
@@ -488,54 +502,60 @@ async def ws_endpoint(ws: WebSocket):
         # 2) Основной цикл действий.
         while True:
             raw = await ws.receive_text()
-            data = json.loads(raw)
+            try:
+                data = json.loads(raw)
+            except json.JSONDecodeError:
+                data = None
+            if not isinstance(data, dict):
+                await ws.send_json({"type": "error", "error": "invalid_message"})
+                continue
             mtype = data.get("type")
-            follow_up = False
+            if mtype == "ping":
+                await ws.send_json({"type": "pong"})
+                continue
 
             async with room.lock:
                 table = room.table
+                result = {"ok": True}
+                if mtype in ("start", "next_hand", "close_table", "cancel") and uid != table.get("host"):
+                    await ws.send_json({"type": "error", "error": "host_only"})
+                    continue
                 if mtype == "join":
-                    holdem.add_player(table, uid, name)
+                    if not holdem.add_player(table, uid, name):
+                        result = {"ok": False, "reason": "cannot_join"}
                     if uid in table.get("players", {}) and avatar_cache.get(uid):
                         table["players"][uid]["avatar"] = avatar_cache[uid]
                 elif mtype in ("start", "next_hand"):
                     if table.get("phase") == "lobby":
-                        holdem.start_tournament(table)
+                        result = holdem.start_tournament(table)
                     elif table.get("phase") == "between_hands":
                         if len(holdem.active_table_players(table)) >= 2:
                             holdem.begin_hand(table)
-                            cid = getattr(room, "chat_id", None)
-                            if cid:
-                                try:
-                                    import bot
-                                    asyncio.create_task(bot._holdem_announce_hole_cards(cid))
-                                    asyncio.create_task(bot._holdem_refresh(cid))
-                                    asyncio.create_task(bot._holdem_send_turn_prompt(cid))
-                                except Exception:
-                                    pass
                         else:
                             holdem._finish_tournament(table)
+                    else:
+                        result = {"ok": False, "reason": "invalid_phase"}
                 elif mtype == "action":
                     action = data.get("action")
                     amount = data.get("amount")
-                    try:
-                        amount = int(amount) if amount is not None else None
-                    except (TypeError, ValueError):
-                        amount = None
-                    holdem.apply_action(table, uid, action, amount)
-                    follow_up = table.get("phase") == "between_hands"
+                    if data.get("turn_token", table["turn_token"]) != table["turn_token"]:
+                        result = {"ok": False, "reason": "stale_turn"}
+                    else:
+                        result = holdem.apply_action(table, uid, action, amount)
                 elif mtype in ("close_table", "cancel"):
-                    is_host = (uid == table.get("host"))
-                    is_fin = (table.get("phase") in ("finished", "lobby", "closed"))
-                    if is_host or is_fin:
-                        table["phase"] = "closed"
-                        table["last_event"] = f"🛑 Стол закрыт ({name})."
-                elif mtype == "ping":
-                    pass
-
-            await broadcast(room)
-            if follow_up:
-                room.schedule_next_hand()
+                    table["phase"] = "closed"
+                    holdem._set_turn(table, None)
+                    table["last_event"] = f"🛑 Стол закрыт ({name})."
+                else:
+                    result = {"ok": False, "reason": "unknown_action"}
+                if not result.get("ok"):
+                    await ws.send_json({"type": "error", "error": result["reason"]})
+                    await ws.send_json(serialize(table, uid, room))
+                    continue
+                room.schedule_turn()
+                if table.get("phase") == "between_hands":
+                    room.schedule_next_hand()
+                await broadcast(room)
 
             # Если комната привязана к чату Telegram — синхронизируем изменения с группой!
             cid = getattr(room, "chat_id", None)
@@ -553,7 +573,9 @@ async def ws_endpoint(ws: WebSocket):
         pass
     except Exception as e:  # noqa: BLE001
         try:
-            await ws.send_json({"type": "error", "error": str(e)})
+            log.warning("WebSocket request failed: %s", type(e).__name__)
+            await ws.send_json({"type": "error", "error": "invalid_message"})
+            await ws.close()
         except Exception:
             pass
     finally:

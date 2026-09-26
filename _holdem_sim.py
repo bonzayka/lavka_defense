@@ -35,7 +35,7 @@ def random_action(table, uid, rnd):
 
 def play_one(seed):
     rnd = random.Random(seed)
-    nplayers = rnd.randint(2, 6)
+    nplayers = rnd.randint(2, 9)
     table = holdem.new_table(host_id=1)
     for uid in range(1, nplayers + 1):
         holdem.add_player(table, uid, f"P{uid}")
@@ -104,7 +104,8 @@ def main():
         print("OK: 3000 турниров без ошибок и без потери фишек.")
     else:
         print(f"Всего сбоев: {fails}")
+    return fails
 
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(1 if main() else 0)

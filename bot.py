@@ -6249,10 +6249,9 @@ async def _on_webapp_action(chat_id: int, mtype: str, uid: int):
         if mtype == "join":
             holdem_player_chat[uid] = chat_id
             await _holdem_refresh(chat_id)
-        elif mtype == "start":
+        elif mtype in ("start", "next_hand"):
             await _holdem_announce_hole_cards(chat_id)
-            await _holdem_refresh(chat_id)
-            await _holdem_send_turn_prompt(chat_id)
+            await _holdem_after_action(chat_id)
         elif mtype == "action":
             await _holdem_cancel_timer(chat_id)
             holdem_custom_wait.pop(uid, None)
@@ -6424,10 +6423,12 @@ async def _holdem_send_turn_prompt(chat_id: int):
         f"👇 <i>Выбери действие или напиши сумму ставки в чат:</i>"
     )
     holdem_custom_wait.pop(uid, None)
+    token = table["turn_token"]
     await _holdem_dm(uid, text, _holdem_turn_kb(chat_id, uid, opts))
+    if table["turn_token"] != token or table.get("current_turn") != uid:
+        return
     await _holdem_cancel_timer(chat_id)
-    table["turn_token"] = table.get("turn_token", 0) + 1
-    holdem_turn_tasks[chat_id] = asyncio.create_task(_holdem_turn_timer(chat_id, table["turn_token"], uid))
+    holdem_turn_tasks[chat_id] = asyncio.create_task(_holdem_turn_timer(chat_id, token, uid))
 
 
 async def _holdem_announce_hole_cards(chat_id: int):
@@ -6454,21 +6455,15 @@ async def _holdem_after_action(chat_id: int):
             return
         table = game["table"]
         await _holdem_refresh(chat_id)
-        if table.get("phase") == "between_hands":
-            if len(holdem.active_table_players(table)) < 2 or table.get("phase") == "finished":
-                holdem._finish_tournament(table)
-                return await _holdem_finish_if_needed(chat_id)
+        while table.get("phase") == "between_hands":
+            hand_no = table["hand_no"]
             await asyncio.sleep(4)
-            if table.get("phase") == "between_hands":
-                if len(holdem.active_table_players(table)) >= 2:
-                    holdem.begin_hand(table)
-                    await _holdem_announce_hole_cards(chat_id)
-                    await _holdem_refresh(chat_id)
-                    await _holdem_send_turn_prompt(chat_id)
-                else:
-                    holdem._finish_tournament(table)
-                    await _holdem_finish_if_needed(chat_id)
-        elif table.get("phase") == "finished":
+            if holdem_games.get(chat_id) is not game or table.get("phase") != "between_hands" or table["hand_no"] != hand_no:
+                return
+            holdem.begin_hand(table)
+            await _holdem_announce_hole_cards(chat_id)
+            await _holdem_refresh(chat_id)
+        if table.get("phase") == "finished":
             await _holdem_finish_if_needed(chat_id)
         else:
             await _holdem_send_turn_prompt(chat_id)
@@ -6507,7 +6502,11 @@ async def _holdem_timeout_apply(chat_id: int, uid: int):
 
 async def _holdem_turn_timer(chat_id: int, token: int, uid: int):
     try:
-        await asyncio.sleep(holdem.TURN_TIMEOUT_SEC)
+        game = holdem_games.get(chat_id)
+        if not game:
+            return
+        deadline = game["table"].get("turn_start_time", time.time()) + holdem.TURN_TIMEOUT_SEC
+        await asyncio.sleep(max(0, deadline - time.time()))
         game = holdem_games.get(chat_id)
         if not game:
             return
@@ -6577,6 +6576,9 @@ async def holdem_lobby_cb(cb: CallbackQuery):
     table = game["table"]
     action = cb.data.split(":", 1)[1]
     uid = cb.from_user.id
+    if action in ("start", "cancel") and uid != table.get("host"):
+        await cb.answer("Это действие доступно организатору стола.", show_alert=True)
+        return
     if action == "join":
         if table.get("phase") != "lobby":
             await cb.answer("Игра уже началась.")
@@ -6607,8 +6609,7 @@ async def holdem_lobby_cb(cb: CallbackQuery):
             return
         await cb.answer("Поехали! 🂡")
         await _holdem_announce_hole_cards(chat_id)
-        await _holdem_refresh(chat_id)
-        await _holdem_send_turn_prompt(chat_id)
+        await _holdem_after_action(chat_id)
     else:
         await cb.answer()
 

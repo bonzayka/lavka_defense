@@ -2,13 +2,15 @@
 <html lang="ru">
 <head>
   <meta charset="utf-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+  <meta name="theme-color" content="#101b19" />
   <title>Chudo Poker · Telegram Mini App</title>
   <script src="https://telegram.org/js/telegram-web-app.js"></script>
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link href="https://fonts.googleapis.com/css2?family=Cinzel:wght@600;700;800;900&family=Outfit:wght@400;500;600;700;800&family=Space+Grotesk:wght@600;700&display=swap" rel="stylesheet">
-    <link rel="stylesheet" href="/static/style.css?v=88">
+    <link rel="stylesheet" href="/static/style.css?v=89">
+    <link rel="stylesheet" href="/static/lounge.css?v=89">
 
 </head>
 <body>
@@ -16,6 +18,7 @@
     <!-- Zone 1: Top Status Bar (Header) -->
     <header class="app-header">
       <div class="header-left">
+        <a class="brand" href="/" aria-label="Chudo Poker — главная"><span class="brand-mark">♠</span><span>CHUDO <b>POKER</b><small>ТВОЙ СТОЛ. ТВОЯ ИГРА.</small></span></a>
         <button class="icon-btn" id="menuToggleBtn" title="Меню игр и столов" onclick="openGameMenu()">☰</button>
         <button class="icon-btn" id="soundBtn" title="Звук">🔊</button>
         <button class="icon-btn" id="roomsListBtn" title="Список столов" onclick="loadRoomsModal()">🗂</button>
@@ -41,10 +44,15 @@
     </header>
 
     <!-- Event Toast -->
-    <div class="event-toast" id="eventToast"></div>
+    <div class="event-toast" id="eventToast" role="status" aria-live="polite"></div>
+    <div class="connection-bar" id="connectionBar" role="status">Подключаемся к столу…</div>
 
     <!-- POKER SCREEN -->
     <div id="pokerScreen" class="game-screen active">
+      <section class="table-heading">
+        <div><div class="eyebrow">NO LIMIT · TEXAS HOLD’EM</div><h1 id="roomTitle">Вечер за покером</h1><p id="tableDetails">До 9 игроков · Турнир на фишки</p></div>
+        <button class="invite-btn" id="inviteBtn">Пригласить <span>↗</span></button>
+      </section>
       <!-- Poker Subheader: Round & Pot -->
       <div class="poker-subheader" id="pokerSubheader">
         <div class="round-indicator">
@@ -60,12 +68,13 @@
       <!-- Zone 2: Poker Arena (Oval Table & Player Pods) -->
       <main class="arena-viewport">
         <div class="poker-table">
-          <div class="table-logo-watermark">CHUDO POKER</div>
+          <div class="table-logo-watermark">♠ CHUDO POKER</div>
 
           <!-- Center Hub: Board Cards & Pot -->
           <div class="table-center-hub">
+            <div class="table-empty" id="tableEmpty"><span>Хорошая игра начинается<br>с хорошей компании.</span><small>Займите место и пригласите друзей</small></div>
             <div class="center-pot-plate">
-              <span class="chip-icon">🪙</span>
+              <span class="chip-icon">БАНК</span>
               <span class="pot-sum" id="centerPotSum">0</span>
             </div>
 
@@ -95,7 +104,8 @@
         </div>
 
         <!-- Action Panel Content (Turn / Pre-actions / Lobby) -->
-        <div id="heroActionPanel"></div>
+        <div id="heroActionPanel"><div class="turn-wait-banner">Подключение к столу…</div></div>
+        <div class="dock-caption">Игра на виртуальные фишки <span>F — пас · C — чек / колл · R — рейз</span></div>
       </footer>
     </div>
 
@@ -336,7 +346,7 @@
     </div>
   </div>
 
-<script src="/static/app.js?v=88"></script>
+<script src="/static/app.js?v=89"></script>
 
 </body>
 </html>
